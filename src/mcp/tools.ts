@@ -1122,6 +1122,149 @@ export function syncStatus(ctx: ToolContext, args: SyncStatusArgs): WithMeta & {
   return withMeta(ctx, args.account, { accounts });
 }
 
+// ---- relay/menu status ----------------------------------------------------
+
+export interface RelayMenuAction {
+  id: string;
+  label: string;
+  systemImage: string;
+  tool: string;
+  arguments?: Record<string, unknown>;
+}
+
+export interface RelayMenuStatusAccount extends SyncStatusEntry {
+  stale: boolean;
+  age_seconds: number | null;
+}
+
+export interface RelayMenuStatus {
+  title: string;
+  summary: string;
+  state: 'ready' | 'syncing' | 'stale' | 'empty';
+  systemImage: string;
+  detail: string[];
+  accounts: RelayMenuStatusAccount[];
+  actions: RelayMenuAction[];
+  _meta: Record<string, unknown>;
+}
+
+function ageSeconds(now: Date, iso: string | null): number | null {
+  if (iso == null) return null;
+  const ms = now.getTime() - new Date(iso).getTime();
+  return Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : null;
+}
+
+function formatAge(seconds: number | null): string {
+  if (seconds == null) return 'never synced';
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86_400)}d ago`;
+}
+
+/**
+ * Menu-bar status for local relay hosts. This is intentionally read-only and
+ * does not call `withMeta`, because status polling must not auto-spawn syncs.
+ */
+export function relayMenuStatus(ctx: ToolContext): RelayMenuStatus {
+  const now = ctx.now?.() ?? new Date();
+  const labels = [...new Set([...Object.keys(ctx.config.accounts), ...discoverAccounts(ctx.repo)])].sort();
+  const accounts = labels.map((account) => {
+    const counts = { meta: 0, full: 0, 'summary-only': 0 };
+    const rows = ctx.repo.db
+      .prepare(`SELECT body_state, count(*) c FROM messages WHERE account = ? GROUP BY body_state`)
+      .all(account) as { body_state: string; c: number }[];
+    for (const r of rows) {
+      if (r.body_state === 'meta' || r.body_state === 'full' || r.body_state === 'summary-only') {
+        counts[r.body_state] = r.c;
+      }
+    }
+    const index_as_of = indexAsOf(ctx.repo, account);
+    const age = ageSeconds(now, index_as_of);
+    return {
+      account,
+      index_as_of,
+      syncing: ctx.repo.activeSyncRun(account) != null,
+      messages: ctx.repo.countMessages(account),
+      bodyStates: counts,
+      age_seconds: age,
+      stale: age == null || age * 1000 > STALE_AFTER_MS,
+    };
+  });
+
+  const totalMessages = accounts.reduce((sum, a) => sum + a.messages, 0);
+  const syncing = accounts.some((a) => a.syncing);
+  const stale = accounts.some((a) => a.stale);
+  const state: RelayMenuStatus['state'] = syncing
+    ? 'syncing'
+    : totalMessages === 0
+      ? 'empty'
+      : stale
+        ? 'stale'
+        : 'ready';
+  const freshest = accounts
+    .map((a) => a.age_seconds)
+    .filter((age): age is number => age != null)
+    .sort((a, b) => a - b)[0] ?? null;
+
+  return {
+    title: 'Mail Index',
+    summary: `${state[0]!.toUpperCase()}${state.slice(1)} · ${totalMessages} messages · ${accounts.length} accounts`,
+    state,
+    systemImage: syncing ? 'arrow.triangle.2.circlepath' : stale ? 'exclamationmark.triangle' : 'tray.full',
+    detail: [
+      `${accounts.length} account${accounts.length === 1 ? '' : 's'}`,
+      `${totalMessages} indexed message${totalMessages === 1 ? '' : 's'}`,
+      `Last sync ${formatAge(freshest)}`,
+      ...accounts.slice(0, 4).map((a) =>
+        `${a.account}: ${a.messages} messages · ${a.syncing ? 'syncing' : a.stale ? 'stale' : 'ready'} · ${formatAge(a.age_seconds)}`,
+      ),
+    ],
+    accounts,
+    actions: [
+      { id: 'sync_now', label: 'Sync Now', systemImage: 'arrow.triangle.2.circlepath', tool: 'sync_now' },
+      { id: 'sync_status', label: 'Detailed Status', systemImage: 'list.bullet.rectangle', tool: 'sync_status' },
+      { id: 'catch_up_24h', label: 'Catch Up 24h', systemImage: 'clock.arrow.circlepath', tool: 'catch_up', arguments: { since: '24h' } },
+    ],
+    _meta: {
+      'io.github.unsoldgroup.mail-index/menuStatusVersion': 1,
+      'io.modelcontextprotocol.ui/display': 'menu',
+    },
+  };
+}
+
+export interface SyncNowArgs {
+  account?: string;
+}
+
+export function syncNow(ctx: ToolContext, args: SyncNowArgs): WithMeta & {
+  started: boolean;
+  started_accounts: string[];
+  skipped_accounts: string[];
+  command: string;
+} {
+  const labels = args.account
+    ? [args.account]
+    : [...new Set([...Object.keys(ctx.config.accounts), ...discoverAccounts(ctx.repo)])].sort();
+  const started: string[] = [];
+  const skipped: string[] = [];
+  for (const account of labels) {
+    if (ctx.repo.activeSyncRun(account) != null) {
+      skipped.push(account);
+      continue;
+    }
+    if (ctx.backgroundSync?.(account)) started.push(account);
+    else skipped.push(account);
+  }
+  const command = args.account ? handback('sync', '--account', args.account) : handback('sync', '--all-accounts');
+  return withMeta(ctx, args.account, {
+    started: started.length > 0,
+    started_accounts: started,
+    skipped_accounts: skipped,
+    command,
+  });
+}
+
 // =========================================================================
 // COMPOSITES (PLAN §12) — SQL views over the index, stale → background sync
 // =========================================================================

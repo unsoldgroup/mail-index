@@ -17,10 +17,13 @@
  * (ADR-0005) via {@link spawnDetachedSync}, which outlives the request.
  */
 
+import { randomUUID } from 'node:crypto';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { spawn } from 'node:child_process';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 
 import {
   search,
@@ -42,6 +45,8 @@ import {
   saveDomainCategoryTool,
   cadenceTool,
   syncStatus,
+  relayMenuStatus,
+  syncNow,
   catchUp,
   digestSources,
   archiveMessage,
@@ -64,6 +69,7 @@ interface ToolDef {
   name: string;
   description: string;
   inputSchema: JsonSchema;
+  annotations?: Record<string, unknown>;
   /** Run the tool over the context with the (validated-by-schema) args. */
   run: (ctx: ToolContext, args: Record<string, unknown>) => unknown | Promise<unknown>;
 }
@@ -316,7 +322,42 @@ export const TOOLS: ToolDef[] = [
     description:
       'Per-account freshness (index_as_of), whether a sync is running, message counts, and the meta/full/summary-only body-ladder split.',
     inputSchema: obj({ account: str }),
+    annotations: {
+      title: 'Sync Status',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     run: (ctx, a) => syncStatus(ctx, { ...optStr(a, 'account') }),
+  },
+  {
+    name: 'relay_menu_status',
+    description:
+      'Read-only menu/status payload for local MCP relay hosts: compact state, SF Symbol names, detail rows, and quick actions expressed as ordinary MCP tool calls. Safe for frequent polling; it never starts syncs.',
+    inputSchema: obj({}),
+    annotations: {
+      title: 'Menu Status',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    run: (ctx) => relayMenuStatus(ctx),
+  },
+  {
+    name: 'sync_now',
+    description:
+      'Quick action for relay/menu hosts. Starts a detached incremental sync for one account, or all configured/indexed accounts when omitted, and returns immediately with the equivalent CLI command handback.',
+    inputSchema: obj({ account: str }),
+    annotations: {
+      title: 'Sync Now',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    run: (ctx, a) => syncNow(ctx, { ...optStr(a, 'account') }),
   },
   {
     name: 'catch_up',
@@ -382,11 +423,17 @@ export async function dispatch(
 }
 
 /** The `tools/list` payload (exported for tests): name + description + schema. */
-export function toolList(): { name: string; description: string; inputSchema: JsonSchema }[] {
+export function toolList(): {
+  name: string;
+  description: string;
+  inputSchema: JsonSchema;
+  annotations?: Record<string, unknown>;
+}[] {
   return TOOLS.map((t) => ({
     name: t.name,
     description: t.description,
     inputSchema: t.inputSchema,
+    ...(t.annotations ? { annotations: t.annotations } : {}),
   }));
 }
 
@@ -421,7 +468,7 @@ export function buildServer(ctx: ToolContext): Server {
         '`get_message` for the few rows you actually need the full body of — do not ' +
         'fetch every result. Local-first and read-only: it never sends or changes ' +
         'mail. No telemetry — to report a bug or give feedback, help the user draft ' +
-        'it and point them to https://github.com/alunsoldantarctica/mail-index/issues ' +
+        'it and point them to https://github.com/unsoldgroup/mail-index/issues ' +
         '(nothing is sent automatically).',
     },
   );
@@ -447,6 +494,143 @@ export async function serve(ctx: ToolContext): Promise<Server> {
   const server = buildServer(ctx);
   await server.connect(new StdioServerTransport());
   return server;
+}
+
+export interface HttpServeOptions {
+  host: string;
+  port: number;
+  path: string;
+  mode: 'full' | 'setup';
+  build: () => Server;
+  onShutdown?: () => void;
+}
+
+/** Serve one long-lived Streamable HTTP MCP endpoint for many agent sessions. */
+export async function serveHttp(opts: HttpServeOptions): Promise<void> {
+  const startedAt = Date.now();
+  const transports = new Map<string, StreamableHTTPServerTransport>();
+  const servers = new Map<string, Server>();
+
+  const closeSession = async (transport: StreamableHTTPServerTransport) => {
+    const sid = transport.sessionId;
+    if (!sid) return;
+    transports.delete(sid);
+    const server = servers.get(sid);
+    servers.delete(sid);
+    await server?.close();
+  };
+
+  const handleMcp = async (req: IncomingMessage, res: ServerResponse, body: unknown) => {
+    const sessionId = req.headers['mcp-session-id'];
+    const sid = Array.isArray(sessionId) ? sessionId[0] : sessionId;
+    let transport = sid ? transports.get(sid) : undefined;
+
+    if (!transport) {
+      if (!isInitializeRequest(body)) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          jsonrpc: '2.0',
+          error: { code: -32000, message: 'Bad Request: initialize required' },
+          id: null,
+        }));
+        return;
+      }
+
+      const server = opts.build();
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (newSessionId) => {
+          transports.set(newSessionId, transport as StreamableHTTPServerTransport);
+          servers.set(newSessionId, server);
+        },
+      });
+      transport.onclose = () => {
+        void closeSession(transport as StreamableHTTPServerTransport);
+      };
+      await server.connect(transport);
+    }
+
+    await transport.handleRequest(req, res, body);
+  };
+
+  const httpServer = createServer((req, res) => {
+    void (async () => {
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? `${opts.host}:${opts.port}`}`);
+
+      if (req.method === 'GET' && url.pathname === '/healthz') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: true,
+          name: 'mail-index',
+          mode: opts.mode,
+          uptime_ms: Date.now() - startedAt,
+          sessions: transports.size,
+        }));
+        return;
+      }
+
+      if (url.pathname !== opts.path) {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'not_found' }));
+        return;
+      }
+
+      if (req.method === 'GET' || req.method === 'DELETE') {
+        const sessionId = req.headers['mcp-session-id'];
+        const sid = Array.isArray(sessionId) ? sessionId[0] : sessionId;
+        const transport = sid ? transports.get(sid) : undefined;
+        if (!transport) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            error: { code: -32000, message: 'Bad Request: unknown session' },
+            id: null,
+          }));
+          return;
+        }
+        await transport.handleRequest(req, res);
+        return;
+      }
+
+      if (req.method !== 'POST') {
+        res.writeHead(405, { allow: 'GET, POST, DELETE' });
+        res.end();
+        return;
+      }
+
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const raw = Buffer.concat(chunks).toString('utf8');
+      const body = raw.length > 0 ? JSON.parse(raw) : undefined;
+      await handleMcp(req, res, body);
+    })().catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'content-type': 'application/json' });
+      }
+      res.end(JSON.stringify({
+        jsonrpc: '2.0',
+        error: { code: -32603, message },
+        id: null,
+      }));
+    });
+  });
+
+  const shutdown = async () => {
+    opts.onShutdown?.();
+    for (const transport of transports.values()) await transport.close();
+    transports.clear();
+    for (const server of servers.values()) await server.close();
+    servers.clear();
+    httpServer.close(() => process.exit(0));
+  };
+  process.on('SIGINT', () => { void shutdown(); });
+  process.on('SIGTERM', () => { void shutdown(); });
+
+  await new Promise<void>((resolve) => {
+    httpServer.listen(opts.port, opts.host, resolve);
+  });
+  process.stderr.write(`mail-index-mcp: Streamable HTTP listening on http://${opts.host}:${opts.port}${opts.path}\n`);
 }
 
 /**

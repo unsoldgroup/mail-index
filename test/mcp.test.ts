@@ -49,6 +49,8 @@ import {
   domainsToCategorizeTool,
   saveDomainCategoryTool,
   syncStatus,
+  relayMenuStatus,
+  syncNow,
   catchUp,
   digestSources,
   archiveMessage,
@@ -524,6 +526,39 @@ test('sync_status: per-account counts, freshness, body ladder', () => {
   assert.equal(a.bodyStates.full, 1, 'the enriched newsletter');
 });
 
+test('relay_menu_status: compact read-only menu payload without auto-sync side effects', () => {
+  const repo = freshRepo();
+  seedMailbox(repo);
+  recordSync(repo, new Date(T - 5 * 3_600_000).toISOString());
+  let spawned = false;
+  const res = relayMenuStatus(ctxFor(repo, { backgroundSync: () => ((spawned = true), true) }));
+
+  assert.equal(res.title, 'Mail Index');
+  assert.equal(res.state, 'stale');
+  assert.equal(res.accounts.length, 1);
+  assert.equal(res.accounts[0].account, ACCOUNT);
+  assert.equal(res.actions.some((a) => a.tool === 'sync_now'), true);
+  assert.equal(spawned, false, 'menu polling must not start syncs');
+});
+
+test('sync_now: starts detached sync through the existing background sync hook', () => {
+  const repo = freshRepo();
+  seedMailbox(repo);
+  recordSync(repo, NOW.toISOString());
+  let spawnedFor = null;
+  const res = syncNow(ctxFor(repo, {
+    backgroundSync: (account) => {
+      spawnedFor = account;
+      return true;
+    },
+  }), {});
+
+  assert.equal(res.started, true);
+  assert.deepEqual(res.started_accounts, [ACCOUNT]);
+  assert.equal(spawnedFor, ACCOUNT);
+  assert.equal(res.command, handback('sync', '--all-accounts'));
+});
+
 test('catch_up: STALE index returns data + sync_started + eta + handback, spawns detached sync (ADR-0005)', () => {
   const repo = freshRepo();
   seedMailbox(repo);
@@ -593,7 +628,7 @@ test('surface: exactly the PLAN §12 tools are advertised, all with schemas, all
     'get_contact', 'find_person', 'list_threads', 'graph_neighbors', 'graph_communities',
     'interest_propose', 'interest_set', 'interest_get', 'save_summary',
     'domains_to_categorize', 'save_domain_category', 'cadence', 'sync_status',
-    'catch_up', 'digest_sources', 'archive_message', 'modify_labels',
+    'relay_menu_status', 'sync_now', 'catch_up', 'digest_sources', 'archive_message', 'modify_labels',
   ];
   const names = TOOLS.map((t) => t.name);
   assert.deepEqual(new Set(names), new Set(expected), 'the full §12 surface');
@@ -603,6 +638,11 @@ test('surface: exactly the PLAN §12 tools are advertised, all with schemas, all
     assert.equal(t.inputSchema.type, 'object', `${t.name} advertises an object schema`);
     assert.ok(t.description.length > 0, `${t.name} has a description`);
   }
+  assert.equal(
+    toolList().find((t) => t.name === 'relay_menu_status')?.annotations?.['readOnlyHint'],
+    true,
+    'menu status advertises standard read-only tool annotation',
+  );
 
   // dispatch routes by name and stamps index_as_of on the result.
   const repo = freshRepo();
@@ -635,11 +675,12 @@ test('setup mode: tools/list advertises exactly the reduced setup surface', () =
   }
 });
 
-test('setup mode: with config present the FULL 23-tool surface is what serve() would use', () => {
+test('setup mode: with config present the full tool surface is what serve() would use', () => {
   // The config-present path serves the full surface — assert its size/identity
   // here so the bootstrapping branch never silently shrinks the real surface.
-  // 21 read tools + the 2 opt-in writers (archive_message, modify_labels).
-  assert.equal(TOOLS.length, 23, 'full surface is 23 tools');
+  // 21 original read tools + the 2 opt-in writers (archive_message,
+  // modify_labels) + 2 relay/status quick-action tools.
+  assert.equal(TOOLS.length, 25, 'full surface is 25 tools');
 });
 
 test('setup_status reports observation and does not crash with no config', () => {
