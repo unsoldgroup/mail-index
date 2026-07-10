@@ -1,0 +1,5 @@
+# Copy to .dev.vars (gitignored) for `wrangler dev`.
+GOOGLE_CLIENT_ID = "xxxx.apps.googleusercontent.com"
+GOOGLE_CLIENT_SECRET = "GOCSPX-..."
+# 32+ random bytes, e.g. `openssl rand -hex 32`
+COOKIE_ENCRYPTION_KEY = "dev-only-key"

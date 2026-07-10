@@ -1,0 +1,38 @@
+{
+  "name": "mail-index-worker",
+  "version": "0.1.0",
+  "description": "Remote MCP server for mail-index on Cloudflare Workers (D1 + Gmail REST).",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "migrate:local": "wrangler d1 migrations apply mail-index --local",
+    "migrate:remote": "wrangler d1 migrations apply mail-index --remote"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.0.5",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "graphology": "^0.26.0",
+    "graphology-communities-louvain": "^2.0.2",
+    "graphology-metrics": "^2.4.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd",
+      "sharp"
+    ]
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.18.4",
+    "@cloudflare/workers-types": "^5.20260710.1",
+    "graphology-types": "^0.24.8",
+    "typescript": "^5.6.0",
+    "vitest": "~4.1.10",
+    "wrangler": "^4.20.0"
+  }
+}

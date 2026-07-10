@@ -1,0 +1,36 @@
+# mail-index remote MCP server on Cloudflare Workers.
+# Secrets (wrangler secret put): GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, COOKIE_ENCRYPTION_KEY
+name = "mail-index-worker"
+main = "src/worker.ts"
+compatibility_date = "2026-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mail-index"
+# Replace after `wrangler d1 create mail-index`:
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+# Replace after `wrangler kv namespace create OAUTH_KV`:
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[vars]
+# Index partition label; keep stable once the index has data.
+ACCOUNT = "al"
+# The only Google account allowed to authorize this server / whose mailbox is indexed.
+ALLOWED_EMAIL = "al@unsoldantarctica.com"
+# Optional Gmail search query narrowing the backfill scope (e.g. "newer_than:2y").
+SYNC_QUERY = ""
+# Include sent mail in the sweep (the local default).
+INCLUDE_SENT = "true"
+# Per-slice caps: metadata fetches / full-body enrich fetches per cron run.
+MAX_META_PER_RUN = "1500"
+MAX_ENRICH_PER_RUN = "40"
