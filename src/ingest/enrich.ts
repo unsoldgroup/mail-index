@@ -135,8 +135,8 @@ async function promoteOne(account: string, id: string, source: MailSource, repo:
   // fields (category/is_list/direction) and snapshot flags are already correct
   // on the row from phase 1, so we carry the existing row's values forward to
   // stay provider-neutral and avoid re-running classification here.
-  const existing = repo.getMessage(account, id);
-  repo.upsertMessage({
+  const existing = await repo.getMessage(account, id);
+  await repo.upsertMessage({
     account,
     gmailMessageId: id,
     threadId: full.threadId,
@@ -194,7 +194,7 @@ export async function enrichOne(options: EnrichOneOptions): Promise<boolean> {
   if (!id || id.trim() === '') {
     throw new EnrichError('enrichOne requires a non-empty message id');
   }
-  const existing = repo.getMessage(account, id);
+  const existing = await repo.getMessage(account, id);
   // Already past meta — nothing to fetch (no-downgrade means a re-promotion
   // would be a no-op anyway). Keep it O(0) in the common already-enriched case.
   if (existing && existing.body_state !== 'meta') return false;
@@ -212,15 +212,15 @@ export async function enrichOne(options: EnrichOneOptions): Promise<boolean> {
  * if another run for the account is already in flight (ADR-0005), exactly like
  * phase-1 sync. Returns the new run's id.
  */
-function acquireLock(repo: Repo, account: string, selector: string): number {
-  return repo.transaction(() => {
-    const held = repo.activeSyncRun(account);
+async function acquireLock(repo: Repo, account: string, selector: string): Promise<number> {
+  return await repo.transaction(async () => {
+    const held = await repo.activeSyncRun(account);
     if (held != null) {
       throw new EnrichError(
         `a sync/enrich for account "${account}" is already in progress (sync_runs id ${held}); refusing to start a second concurrent run`,
       );
     }
-    return repo.startSyncRun({ account, phase: 'enrich', selector });
+    return await repo.startSyncRun({ account, phase: 'enrich', selector });
   });
 }
 
@@ -263,7 +263,7 @@ export async function enrich(options: EnrichOptions): Promise<EnrichResult> {
   }
   const selectorStr = describeSelector(selector);
 
-  const runId = acquireLock(repo, account, selectorStr);
+  const runId = await acquireLock(repo, account, selectorStr);
 
   let fetched = 0;
   let enriched = 0;
@@ -272,7 +272,7 @@ export async function enrich(options: EnrichOptions): Promise<EnrichResult> {
     // other mode resolves them from the deterministic MetaSelector.
     let ids: string[];
     if (selector.profile) {
-      ids = repo.selectProfileMetaMessages(account, selector.limit);
+      ids = await repo.selectProfileMetaMessages(account, selector.limit);
     } else {
       const candidate: MetaSelector = {
         ...(selector.rule ? { rule: selector.rule } : {}),
@@ -280,7 +280,7 @@ export async function enrich(options: EnrichOptions): Promise<EnrichResult> {
         ...(selector.match ? { match: selector.match } : {}),
         ...(selector.limit != null ? { limit: selector.limit } : {}),
       };
-      ids = repo.selectMetaMessages(account, candidate);
+      ids = await repo.selectMetaMessages(account, candidate);
     }
 
     for (const id of ids) {
@@ -290,11 +290,11 @@ export async function enrich(options: EnrichOptions): Promise<EnrichResult> {
       enriched += 1;
     }
 
-    repo.finishSyncRun(runId, { fetched, indexed: enriched });
+    await repo.finishSyncRun(runId, { fetched, indexed: enriched });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     try {
-      repo.finishSyncRun(runId, { fetched, indexed: enriched, error: message });
+      await repo.finishSyncRun(runId, { fetched, indexed: enriched, error: message });
     } catch {
       // Nothing more to do if even closing the row fails; surface the original.
     }

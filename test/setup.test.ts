@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { runSetup, writeAccountBlock, accountIsAuthed, authAddArgs } from '../dist/cli/setup.js';
 
 const EMAIL = 'al@example.com';
+process.env['XDG_DATA_HOME'] = mkdtempSync(join(tmpdir(), 'mail-index-setup-data-'));
 
 /** A recorded run() call, for asserting the exact commands built. */
 function makeDeps(overrides = {}) {
@@ -63,13 +64,13 @@ function tmpConfig() {
   return join(dir, 'config.json');
 }
 
-test('builds the gog auth add command with the read-only Gmail scope', () => {
+test('builds the gog auth add command with the read-only Gmail scope', async () => {
   assert.deepEqual(authAddArgs(EMAIL), [
     'auth', 'add', EMAIL, '--client', 'mail-index', '--services', 'gmail', '--gmail-scope=readonly',
   ]);
 });
 
-test('--enable-writes adds the least-privilege gmail.modify scope (never send/delete)', () => {
+test('--enable-writes adds the least-privilege gmail.modify scope (never send/delete)', async () => {
   const args = authAddArgs(EMAIL, true);
   assert.deepEqual(args, [
     'auth', 'add', EMAIL, '--client', 'mail-index', '--services', 'gmail',
@@ -91,7 +92,7 @@ test('--enable-writes re-runs auth on an already-readonly account to upgrade sco
   assert.deepEqual(authAdd.args, authAddArgs(EMAIL, true));
 });
 
-test('accountIsAuthed matches across array/object shapes and is absent-safe', () => {
+test('accountIsAuthed matches across array/object shapes and is absent-safe', async () => {
   assert.equal(accountIsAuthed(JSON.stringify([{ email: EMAIL }]), EMAIL), true);
   assert.equal(accountIsAuthed(JSON.stringify({ accounts: [{ account: EMAIL }] }), EMAIL), true);
   assert.equal(accountIsAuthed(JSON.stringify([EMAIL]), EMAIL), true);
@@ -207,7 +208,7 @@ test('missing gog with no brew → an install action and an early, non-crashing 
   assert.ok(result.steps.some((s) => s.step === 'mcp'));
 });
 
-test('writeAccountBlock merges into a pre-existing config without dropping siblings', () => {
+test('writeAccountBlock merges into a pre-existing config without dropping siblings', async () => {
   const configPath = tmpConfig();
   writeFileSync(
     configPath,

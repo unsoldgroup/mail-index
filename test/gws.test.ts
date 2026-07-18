@@ -28,11 +28,11 @@ const makeAdapter = () =>
 // The full contract suite, run against the real adapter over recorded fixtures.
 runMailSourceContract(test, makeAdapter, GWS_CONTRACT_FIXTURES);
 
-test('GwsAdapter exposes the gws provider id', () => {
+test('GwsAdapter exposes the gws provider id', async () => {
   assert.equal(makeAdapter().provider, 'gws');
 });
 
-test('GwsAdapter rejects an empty configDir', () => {
+test('GwsAdapter rejects an empty configDir', async () => {
   assert.throws(() => new GwsAdapter({ configDir: '', runner: makeGwsFixtureRunner() }));
 });
 

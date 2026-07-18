@@ -34,6 +34,6 @@ export async function syncLabels(options: SyncLabelsOptions): Promise<number> {
 
   const labels = await source.listLabels();
   if (labels.length === 0) return 0; // don't clobber a previously-good catalogue
-  repo.setLabels(account, labels);
+  await repo.setLabels(account, labels);
   return labels.length;
 }

@@ -32,42 +32,42 @@ import { Repo } from '../dist/index/repo.js';
 
 // ---- buildMatch (query-time) ---------------------------------------------
 
-test('buildMatch quotes terms, prefixes, and OR-combines', () => {
+test('buildMatch quotes terms, prefixes, and OR-combines', async () => {
   assert.equal(buildMatch(['deposit', 'antarctica']), '"deposit"* OR "antarctica"*');
 });
 
-test('buildMatch escapes embedded quotes and drops blanks', () => {
+test('buildMatch escapes embedded quotes and drops blanks', async () => {
   assert.equal(buildMatch(['  ', 'a"b']), '"a""b"*');
 });
 
-test('buildMatch handles FTS operator characters safely', () => {
+test('buildMatch handles FTS operator characters safely', async () => {
   // Bare `OR`/punctuation as a literal term must not break the query — it is
   // quoted, so FTS5 treats it as a string, not an operator.
   assert.equal(buildMatch(['OR', 'a-b']), '"OR"* OR "a-b"*');
 });
 
-test('buildMatch returns empty string when no usable term remains', () => {
+test('buildMatch returns empty string when no usable term remains', async () => {
   assert.equal(buildMatch([]), '');
   assert.equal(buildMatch(['   ', '']), '');
 });
 
 // ---- projectBody (index-time, the ladder) --------------------------------
 
-test('projectBody at meta indexes the snippet only', () => {
+test('projectBody at meta indexes the snippet only', async () => {
   assert.equal(
     projectBody({ snippet: 'a snippet', bodyText: null, summary: null }),
     'a snippet',
   );
 });
 
-test('projectBody at full indexes snippet + distilled body', () => {
+test('projectBody at full indexes snippet + distilled body', async () => {
   assert.equal(
     projectBody({ snippet: 'snip', bodyText: 'distilled body', summary: null }),
     'snip\ndistilled body',
   );
 });
 
-test('projectBody on a full row with a summary is additive (ADR-0003)', () => {
+test('projectBody on a full row with a summary is additive (ADR-0003)', async () => {
   // A summary present on a `full` row feeds FTS alongside the body, not instead.
   assert.equal(
     projectBody({ snippet: 'snip', bodyText: 'body', summary: 'the summary' }),
@@ -75,26 +75,26 @@ test('projectBody on a full row with a summary is additive (ADR-0003)', () => {
   );
 });
 
-test('projectBody at summary-only indexes snippet + summary (body demoted)', () => {
+test('projectBody at summary-only indexes snippet + summary (body demoted)', async () => {
   assert.equal(
     projectBody({ snippet: 'snip', bodyText: null, summary: 'the summary' }),
     'snip\nthe summary',
   );
 });
 
-test('projectBody returns null when nothing is searchable', () => {
+test('projectBody returns null when nothing is searchable', async () => {
   assert.equal(projectBody({ snippet: null, bodyText: null, summary: null }), null);
   assert.equal(projectBody({ snippet: null, bodyText: null }), null);
 });
 
-test('projectRecipients joins to + cc on a space, null when neither', () => {
+test('projectRecipients joins to + cc on a space, null when neither', async () => {
   assert.equal(projectRecipients('a@x.com', 'b@x.com'), 'a@x.com b@x.com');
   assert.equal(projectRecipients('a@x.com', null), 'a@x.com');
   assert.equal(projectRecipients(null, 'b@x.com'), 'b@x.com');
   assert.equal(projectRecipients(null, null), null);
 });
 
-test('projectFtsRow maps a message row to the four FTS columns', () => {
+test('projectFtsRow maps a message row to the four FTS columns', async () => {
   assert.deepEqual(
     projectFtsRow({
       subject: 'Re: deposit',
@@ -116,7 +116,7 @@ test('projectFtsRow maps a message row to the four FTS columns', () => {
 
 // ---- query expansion (opt-in synonyms) -----------------------------------
 
-test('expandQuery adds curated synonyms, term-first and de-duplicated', () => {
+test('expandQuery adds curated synonyms, term-first and de-duplicated', async () => {
   assert.deepEqual(expandQuery(['invoice']), ['invoice', 'receipt', 'bill']);
   // A term with no synonyms is passed through untouched.
   assert.deepEqual(expandQuery(['antarctica']), ['antarctica']);
@@ -124,35 +124,35 @@ test('expandQuery adds curated synonyms, term-first and de-duplicated', () => {
   assert.deepEqual(expandQuery(['invoice', 'receipt']), ['invoice', 'receipt', 'bill']);
 });
 
-test('buildMatch expands only when asked', () => {
+test('buildMatch expands only when asked', async () => {
   assert.equal(buildMatch(['invoice']), '"invoice"*');
   assert.equal(buildMatch(['invoice'], { expand: true }), '"invoice"* OR "receipt"* OR "bill"*');
 });
 
 // ---- bm25 ranking contract -----------------------------------------------
 
-test('bm25Expr weights subject/sender above body', () => {
+test('bm25Expr weights subject/sender above body', async () => {
   assert.deepEqual([...BM25_WEIGHTS], [10, 8, 4, 1]);
   assert.equal(bm25Expr(), 'bm25(messages_fts, 10, 8, 4, 1)');
 });
 
 // ---- index DDL ------------------------------------------------------------
 
-test('FTS_TABLE_DDL uses the porter tokenizer', () => {
+test('FTS_TABLE_DDL uses the porter tokenizer', async () => {
   assert.match(FTS_TABLE_DDL, /tokenize = 'porter unicode61'/);
 });
 
 // ---- the drift-free guarantee, made executable ---------------------------
 
-test('index-time FTS rows match the contract projection (no drift)', () => {
+test('index-time FTS rows match the contract projection (no drift)', async () => {
   // What the repo's live sync writes to messages_fts MUST equal projectFtsRow —
   // the same function the m005 rebuild migration uses to repopulate. If these
   // ever disagree, ranking becomes non-reproducible. This pins the guarantee.
-  const db = openDb({ path: ':memory:' });
+  const db = await openDb({ path: ':memory:' });
   const repo = new Repo(db);
 
   // Seed messages across the Body-state ladder.
-  repo.upsertMessage({
+  await repo.upsertMessage({
     account: 'a',
     gmailMessageId: 'm-meta',
     subject: 'Deposit refund',
@@ -161,7 +161,7 @@ test('index-time FTS rows match the contract projection (no drift)', () => {
     ccAddr: 'cc@x.com',
     snippet: 'your deposit',
   });
-  repo.upsertMessage({
+  await repo.upsertMessage({
     account: 'a',
     gmailMessageId: 'm-full',
     subject: 'Itinerary',
@@ -172,9 +172,9 @@ test('index-time FTS rows match the contract projection (no drift)', () => {
     bodyState: 'full',
     bodyText: 'distilled flight body',
   });
-  repo.saveMessageSummary({ account: 'a', gmailMessageId: 'm-full', text: 'a summary' });
+  await repo.saveMessageSummary({ account: 'a', gmailMessageId: 'm-full', text: 'a summary' });
 
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT m.rowid, m.subject, m.from_addr, m.to_addr, m.cc_addr, m.snippet,
               m.body_text, m.summary_text,
@@ -203,10 +203,10 @@ test('index-time FTS rows match the contract projection (no drift)', () => {
   }
 });
 
-test('porter stemming makes search match word forms (refunds query ↔ refund doc)', () => {
-  const db = openDb({ path: ':memory:' });
+test('porter stemming makes search match word forms (refunds query ↔ refund doc)', async () => {
+  const db = await openDb({ path: ':memory:' });
   const repo = new Repo(db);
-  repo.upsertMessage({
+  await repo.upsertMessage({
     account: 'a',
     gmailMessageId: 'm1',
     subject: 'Your refund is processed',
@@ -215,7 +215,7 @@ test('porter stemming makes search match word forms (refunds query ↔ refund do
   });
   // Plural query against a singular doc: prefix-matching alone ("refunds"*)
   // would NOT match "refund" — only the porter stemmer (both → "refund") does.
-  const hits = repo.searchMessages(buildMatch(['refunds']));
+  const hits = await repo.searchMessages(buildMatch(['refunds']));
   assert.equal(hits.length, 1);
   assert.equal(hits[0].gmail_message_id, 'm1');
 });

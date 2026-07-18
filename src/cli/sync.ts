@@ -116,7 +116,7 @@ export async function runSyncOne(
 
   // Capture the prior completed-sync count BEFORE the sweep so "initial sync"
   // means "no completed sync existed when this one started" (D10).
-  const priorCompletedSyncs = repo.completedSyncCount(label);
+  const priorCompletedSyncs = await repo.completedSyncCount(label);
 
   const result = await syncMetadata({ account: label, source, repo, scope });
 
@@ -158,7 +158,7 @@ export async function runSyncOne(
   // never let a graph failure mask a successful sync.
   if (isFullOrInitialSync(flags, priorCompletedSyncs)) {
     try {
-      buildGraph(repo, label);
+      await buildGraph(repo, label);
     } catch {
       // The graph layer is optional (D8); a build failure leaves the index
       // fully functional. Swallow so sync still reports success.

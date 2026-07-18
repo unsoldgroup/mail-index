@@ -17,7 +17,7 @@ import type { Repo } from '../index/repo.js';
 import { buildGraph, type GraphBuildResult } from '../graph/index.js';
 
 /** Build the graph for a single account label. */
-export function runGraphBuildOne(repo: Repo, account: string): GraphBuildResult {
+export async function runGraphBuildOne(repo: Repo, account: string): Promise<GraphBuildResult> {
   return buildGraph(repo, account);
 }
 
@@ -25,8 +25,11 @@ export function runGraphBuildOne(repo: Repo, account: string): GraphBuildResult 
  * Build the graph for every configured account (each independent; the derived
  * tables are per-account). Returns one result per account, in config order.
  */
-export function runGraphBuildAll(config: OperatorConfig, repo: Repo): GraphBuildResult[] {
-  return Object.keys(config.accounts).map((label) => buildGraph(repo, label));
+export async function runGraphBuildAll(
+  config: OperatorConfig,
+  repo: Repo,
+): Promise<GraphBuildResult[]> {
+  return Promise.all(Object.keys(config.accounts).map((label) => buildGraph(repo, label)));
 }
 
 /** Format a completed graph build as the one-line CLI summary. */

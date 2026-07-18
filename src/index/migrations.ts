@@ -14,22 +14,22 @@
  * `body` column holds across the meta → full → summary-only ladder).
  */
 
-import type { DatabaseSync } from 'node:sqlite';
+import type { StorageDriver } from './driver.js';
 
 import { FTS_TABLE_DDL, projectFtsRow } from './fts.js';
 
 export interface Migration {
   version: number;
   name: string;
-  up: (db: DatabaseSync) => void;
+  up: (db: StorageDriver) => Promise<void>;
 }
 
 /** Migration 1 — full PLAN §6 data model. */
 const m001_initial: Migration = {
   version: 1,
   name: 'initial schema',
-  up: (db) => {
-    db.exec(`
+  up: async (db) => {
+    await db.exec(`
       CREATE TABLE messages (
         account             TEXT    NOT NULL,
         gmail_message_id    TEXT    NOT NULL,
@@ -179,8 +179,8 @@ const m001_initial: Migration = {
 const m002_thread_summary: Migration = {
   version: 2,
   name: 'thread summary columns',
-  up: (db) => {
-    db.exec(`
+  up: async (db) => {
+    await db.exec(`
       ALTER TABLE threads ADD COLUMN summary_text     TEXT;
       ALTER TABLE threads ADD COLUMN summary_is_model INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE threads ADD COLUMN summarized_at    TEXT;
@@ -208,8 +208,8 @@ const m002_thread_summary: Migration = {
 const m003_account_identity: Migration = {
   version: 3,
   name: 'account identity (adapter-switch safety)',
-  up: (db) => {
-    db.exec(`
+  up: async (db) => {
+    await db.exec(`
       CREATE TABLE account_identity (
         account       TEXT NOT NULL,
         address       TEXT NOT NULL,
@@ -237,8 +237,8 @@ const m003_account_identity: Migration = {
 const m004_ocr_images: Migration = {
   version: 4,
   name: 'ocr candidate images',
-  up: (db) => {
-    db.exec(`ALTER TABLE messages ADD COLUMN ocr_images_json TEXT;`);
+  up: async (db) => {
+    await db.exec(`ALTER TABLE messages ADD COLUMN ocr_images_json TEXT;`);
   },
 };
 
@@ -264,8 +264,8 @@ const m004_ocr_images: Migration = {
 const m005_rebuild_fts: Migration = {
   version: 5,
   name: 'rebuild messages_fts (canonical self-contained, rowid-aligned)',
-  up: (db) => {
-    db.exec(`
+  up: async (db) => {
+    await db.exec(`
       DROP TABLE IF EXISTS messages_fts;
 
       CREATE VIRTUAL TABLE messages_fts USING fts5(
@@ -319,8 +319,8 @@ const m005_rebuild_fts: Migration = {
 const m006_registrable_domain: Migration = {
   version: 6,
   name: 'registrable (eTLD+1) domain on domains',
-  up: (db) => {
-    db.exec(`ALTER TABLE domains ADD COLUMN registrable_domain TEXT;`);
+  up: async (db) => {
+    await db.exec(`ALTER TABLE domains ADD COLUMN registrable_domain TEXT;`);
   },
 };
 
@@ -338,15 +338,15 @@ const m006_registrable_domain: Migration = {
 const m007_porter_fts: Migration = {
   version: 7,
   name: 'porter-stemmed FTS rebuild',
-  up: (db) => {
-    db.exec(`DROP TABLE messages_fts;`);
-    db.exec(FTS_TABLE_DDL);
-    const rows = db
+  up: async (db) => {
+    await db.exec(`DROP TABLE messages_fts;`);
+    await db.exec(FTS_TABLE_DDL);
+    const rows = (await db
       .prepare(
         `SELECT rowid, subject, from_addr, to_addr, cc_addr, snippet, body_text, summary_text
            FROM messages`,
       )
-      .all() as {
+      .all()) as {
       rowid: number;
       subject: string | null;
       from_addr: string | null;
@@ -370,7 +370,7 @@ const m007_porter_fts: Migration = {
         bodyText: r.body_text,
         summary: r.summary_text,
       });
-      insert.run(r.rowid, fts.subject, fts.sender, fts.recipients, fts.body);
+      await insert.run(r.rowid, fts.subject, fts.sender, fts.recipients, fts.body);
     }
   },
 };
@@ -390,8 +390,8 @@ const m007_porter_fts: Migration = {
 const m008_topics: Migration = {
   version: 8,
   name: 'topic clustering tables',
-  up: (db) => {
-    db.exec(`
+  up: async (db) => {
+    await db.exec(`
       CREATE TABLE topics (
         account     TEXT    NOT NULL,
         topic_id    INTEGER NOT NULL,
@@ -429,8 +429,8 @@ const m008_topics: Migration = {
 const m009_labels: Migration = {
   version: 9,
   name: 'gmail label catalogue (id → name)',
-  up: (db) => {
-    db.exec(`
+  up: async (db) => {
+    await db.exec(`
       CREATE TABLE labels (
         account    TEXT NOT NULL,
         label_id   TEXT NOT NULL,        -- Gmail label id (INBOX, Label_123…)
@@ -459,8 +459,8 @@ export const MIGRATIONS: readonly Migration[] = [
 ];
 
 /** Read the database's applied schema version (SQLite `user_version`). */
-export function getUserVersion(db: DatabaseSync): number {
-  const row = db.prepare('PRAGMA user_version').get() as
+export async function getUserVersion(db: StorageDriver): Promise<number> {
+  const row = (await db.prepare('PRAGMA user_version').get()) as
     | { user_version: number }
     | undefined;
   return row?.user_version ?? 0;
@@ -470,8 +470,8 @@ export function getUserVersion(db: DatabaseSync): number {
  * Apply all pending migrations in a single transaction. Forward-only: throws
  * if the database version is newer than the code knows about (a downgrade).
  */
-export function runMigrations(db: DatabaseSync): void {
-  const current = getUserVersion(db);
+export async function runMigrations(db: StorageDriver): Promise<void> {
+  const current = await getUserVersion(db);
   const latest = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
 
   if (current > latest) {
@@ -485,17 +485,17 @@ export function runMigrations(db: DatabaseSync): void {
     (a, b) => a.version - b.version,
   );
 
-  db.exec('BEGIN');
+  await db.exec('BEGIN');
   try {
     for (const migration of pending) {
-      migration.up(db);
+      await migration.up(db);
     }
     // user_version does not accept a bound parameter; the value is an integer
     // from our own constant list, so direct interpolation is safe.
-    db.exec(`PRAGMA user_version = ${latest}`);
-    db.exec('COMMIT');
+    await db.exec(`PRAGMA user_version = ${latest}`);
+    await db.exec('COMMIT');
   } catch (err) {
-    db.exec('ROLLBACK');
+    await db.exec('ROLLBACK');
     throw err;
   }
 }

@@ -19,7 +19,7 @@
  * boundary as JS `boolean` and are stored as 0/1 internally.
  */
 
-import type { DatabaseSync, StatementSync } from 'node:sqlite';
+import type { StorageDriver, PreparedStatement } from './driver.js';
 import { IndexError } from './db.js';
 import { bm25Expr, projectBody, projectRecipients } from './fts.js';
 import { classifyCategory, classifyDirection } from '../ingest/classify.js';
@@ -467,35 +467,45 @@ export interface AccountIdentityRow {
 }
 
 export class Repo {
-  readonly db: DatabaseSync;
+  readonly driver: StorageDriver;
 
   // Prepared statements are cached lazily; node:sqlite caches the parse, and
   // reusing them keeps the hot sync loop tight.
-  #stmt = new Map<string, StatementSync>();
+  #stmt = new Map<string, PreparedStatement>();
+  #transactionDepth = 0;
 
-  constructor(db: DatabaseSync) {
-    this.db = db;
+  constructor(driver: StorageDriver) {
+    this.driver = driver;
   }
 
-  #prepare(sql: string): StatementSync {
+  #prepare(sql: string): PreparedStatement {
     let s = this.#stmt.get(sql);
     if (!s) {
-      s = this.db.prepare(sql);
+      s = this.driver.prepare(sql);
       this.#stmt.set(sql, s);
     }
     return s;
   }
 
-  /** Run `fn` inside an IMMEDIATE transaction; rolls back on throw. */
-  transaction<T>(fn: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
+  /**
+   * Run `fn` inside an IMMEDIATE transaction; rolls back on throw. Interactive
+   * (read-then-decide-then-write) transactions are a node:sqlite capability; the
+   * D1 driver (ticket 002) maps the few interactive Repo paths onto
+   * {@link StorageDriver.batch}. Pure write groups use `driver.batch` directly.
+   */
+  async transaction<T>(fn: () => T | Promise<T>): Promise<T> {
+    if (this.#transactionDepth > 0) return await fn();
+    await this.driver.exec('BEGIN IMMEDIATE');
+    this.#transactionDepth += 1;
     try {
-      const result = fn();
-      this.db.exec('COMMIT');
+      const result = await fn();
+      await this.driver.exec('COMMIT');
       return result;
     } catch (err) {
-      this.db.exec('ROLLBACK');
+      await this.driver.exec('ROLLBACK');
       throw err;
+    } finally {
+      this.#transactionDepth -= 1;
     }
   }
 
@@ -505,7 +515,7 @@ export class Repo {
    * body_state actually stored (which may differ from the input when an
    * incoming `meta` is held back from clobbering an existing higher state).
    */
-  upsertMessage(input: MessageInput): BodyState {
+  async upsertMessage(input: MessageInput): Promise<BodyState> {
     const incomingState: BodyState = input.bodyState ?? 'meta';
     if (!BODY_STATES.includes(incomingState)) {
       throw new IndexError(`invalid body_state: ${String(incomingState)}`);
@@ -520,8 +530,8 @@ export class Repo {
       throw new IndexError(`invalid category: ${String(input.category)}`);
     }
 
-    return this.transaction(() => {
-      const existing = this.#prepare(
+    return await this.transaction(async () => {
+      const existing = await this.#prepare(
         `SELECT rowid, body_state, body_text, summary_text, body_fetched_at
            FROM messages WHERE account = ? AND gmail_message_id = ?`,
       ).get(input.account, input.gmailMessageId) as
@@ -560,7 +570,7 @@ export class Repo {
 
       const labelsJson = input.labels ? JSON.stringify(input.labels) : null;
 
-      const rowid = this.#writeMessageRow(input, {
+      const rowid = await this.#writeMessageRow(input, {
         effectiveState,
         effectiveBody,
         labelsJson,
@@ -569,7 +579,7 @@ export class Repo {
         existingRowid: existing?.rowid,
       });
 
-      this.#syncFts(rowid, {
+      await this.#syncFts(rowid, {
         subject: input.subject ?? null,
         sender: input.fromAddr ?? null,
         recipients: projectRecipients(input.toAddr ?? null, input.ccAddr ?? null),
@@ -586,7 +596,7 @@ export class Repo {
     });
   }
 
-  #writeMessageRow(
+  async #writeMessageRow(
     input: MessageInput,
     resolved: {
       effectiveState: BodyState;
@@ -596,11 +606,11 @@ export class Repo {
       now: string;
       existingRowid: number | undefined;
     },
-  ): number {
+  ): Promise<number> {
     // ON CONFLICT keeps the row's rowid stable (so the FTS rowid never drifts)
     // and recomputes only the metadata columns; body_state/body_text are set
     // from the already-resolved (no-downgrade) values.
-    this.#prepare(
+    await this.#prepare(
       `INSERT INTO messages (
          account, gmail_message_id, thread_id, internal_date, date_header,
          from_addr, to_addr, cc_addr, subject, labels_json, category,
@@ -662,7 +672,7 @@ export class Repo {
     );
 
     if (resolved.existingRowid != null) return resolved.existingRowid;
-    const row = this.#prepare(
+    const row = await this.#prepare(
       `SELECT rowid FROM messages WHERE account = ? AND gmail_message_id = ?`,
     ).get(input.account, input.gmailMessageId) as { rowid: number };
     return row.rowid;
@@ -672,7 +682,7 @@ export class Repo {
    * Replace the FTS row for a message rowid: delete-then-insert at the same
    * rowid so the index stays aligned with the message across the body ladder.
    */
-  #syncFts(
+  async #syncFts(
     rowid: number,
     fields: {
       subject: string | null;
@@ -682,21 +692,21 @@ export class Repo {
       bodyText: string | null;
       summary?: string | null;
     },
-  ): void {
+  ): Promise<void> {
     // The FTS `body` projection across the Body-state ladder is the FTS contract
     // (src/index/fts.ts) — single-sourced so index-time and query-time, and any
     // future index rebuild, can never disagree on what got indexed.
     const body = projectBody(fields);
-    this.#prepare(`DELETE FROM messages_fts WHERE rowid = ?`).run(rowid);
-    this.#prepare(
+    await this.#prepare(`DELETE FROM messages_fts WHERE rowid = ?`).run(rowid);
+    await this.#prepare(
       `INSERT INTO messages_fts(rowid, subject, sender, recipients, body)
        VALUES (?, ?, ?, ?, ?)`,
     ).run(rowid, fields.subject, fields.sender, fields.recipients, body);
   }
 
   /** Fetch one message row by id (or undefined). */
-  getMessage(account: string, gmailMessageId: string): MessageRow | undefined {
-    return this.#prepare(
+  async getMessage(account: string, gmailMessageId: string): Promise<MessageRow | undefined> {
+    return await this.#prepare(
       `SELECT account, gmail_message_id, thread_id, subject, from_addr, to_addr,
               cc_addr, snippet, body_state, body_text, summary_text,
               summary_is_model, summarized_at, is_list, direction,
@@ -712,8 +722,8 @@ export class Repo {
    * provider permalink over a constructed deep link. Kept separate from
    * {@link getMessage} so `open` stays a single, cheap column read.
    */
-  getMessageUrl(account: string, gmailMessageId: string): string | null {
-    const row = this.#prepare(
+  async getMessageUrl(account: string, gmailMessageId: string): Promise<string | null> {
+    const row = await this.#prepare(
       `SELECT gmail_url FROM messages WHERE account = ? AND gmail_message_id = ?`,
     ).get(account, gmailMessageId) as { gmail_url: string | null } | undefined;
     return row?.gmail_url ?? null;
@@ -734,12 +744,12 @@ export class Repo {
    *
    * Returns the resulting label array, or `null` if the message is not indexed.
    */
-  applyLabelChange(
+  async applyLabelChange(
     account: string,
     gmailMessageId: string,
     change: { add?: readonly string[]; remove?: readonly string[] },
-  ): string[] | null {
-    const row = this.#prepare(
+  ): Promise<string[] | null> {
+    const row = await this.#prepare(
       `SELECT labels_json, from_addr FROM messages WHERE account = ? AND gmail_message_id = ?`,
     ).get(account, gmailMessageId) as
       | { labels_json: string | null; from_addr: string | null }
@@ -753,7 +763,7 @@ export class Repo {
       if (add.trim() !== '' && !next.includes(add)) next.push(add);
     }
 
-    this.#prepare(
+    await this.#prepare(
       `UPDATE messages SET
          labels_json = ?, category = ?, direction = ?,
          unread = ?, starred = ?, important = ?
@@ -775,7 +785,7 @@ export class Repo {
    * FTS search returning matching message rows ranked by bm25. `query` is raw
    * FTS5 syntax. Optionally scoped to one account.
    */
-  searchMessages(query: string, opts: { account?: string; limit?: number } = {}): MessageRow[] {
+  async searchMessages(query: string, opts: { account?: string; limit?: number } = {}): Promise<MessageRow[]> {
     const limit = opts.limit ?? 20;
     const accountClause = opts.account ? 'AND m.account = ?' : '';
     const stmt = this.#prepare(
@@ -792,8 +802,8 @@ export class Repo {
         LIMIT ?`,
     );
     const rows = opts.account
-      ? stmt.all(query, opts.account, limit)
-      : stmt.all(query, limit);
+      ? await stmt.all(query, opts.account, limit)
+      : await stmt.all(query, limit);
     return rows as unknown as MessageRow[];
   }
 
@@ -806,7 +816,7 @@ export class Repo {
    * ({@link reconcileInbox}); other mutable labels reflect the last fetch.
    * Optionally scoped to one account.
    */
-  messagesByLabel(label: string, opts: { account?: string; limit?: number } = {}): MessageRow[] {
+  async messagesByLabel(label: string, opts: { account?: string; limit?: number } = {}): Promise<MessageRow[]> {
     const limit = opts.limit ?? 20;
     const accountClause = opts.account ? 'AND m.account = ?' : '';
     const stmt = this.#prepare(
@@ -822,8 +832,8 @@ export class Repo {
         LIMIT ?`,
     );
     const rows = opts.account
-      ? stmt.all(label, opts.account, limit)
-      : stmt.all(label, limit);
+      ? await stmt.all(label, opts.account, limit)
+      : await stmt.all(label, limit);
     return rows as unknown as MessageRow[];
   }
 
@@ -832,14 +842,14 @@ export class Repo {
    * reconcile to decide which live-inbox ids still need a metadata fetch
    * (absent) versus only a label flip (present). Empty `ids` → empty set.
    */
-  existingMessageIds(account: string, ids: readonly string[]): Set<string> {
+  async existingMessageIds(account: string, ids: readonly string[]): Promise<Set<string>> {
     const found = new Set<string>();
     if (ids.length === 0) return found;
     const stmt = this.#prepare(
       `SELECT gmail_message_id FROM messages WHERE account = ? AND gmail_message_id = ?`,
     );
     for (const id of ids) {
-      const row = stmt.get(account, id) as { gmail_message_id: string } | undefined;
+      const row = await stmt.get(account, id) as { gmail_message_id: string } | undefined;
       if (row) found.add(row.gmail_message_id);
     }
     return found;
@@ -850,8 +860,8 @@ export class Repo {
    * for `account`. The reconcile diffs this against the live `in:inbox` set to
    * find rows that were archived (drop `INBOX`) since the last fetch.
    */
-  inboxMessageIds(account: string): string[] {
-    const rows = this.#prepare(
+  async inboxMessageIds(account: string): Promise<string[]> {
+    const rows = await this.#prepare(
       `SELECT gmail_message_id FROM messages m
         WHERE m.account = ?
           AND EXISTS (SELECT 1 FROM json_each(m.labels_json) WHERE value = 'INBOX')`,
@@ -865,8 +875,8 @@ export class Repo {
    * `INBOX`) and recomputes `category`, then persists both here so `labels_json`
    * and the `category` column stay consistent. No-op-safe on a missing row.
    */
-  setMessageLabels(account: string, id: string, labels: readonly string[], category: Category | null): void {
-    this.#prepare(
+  async setMessageLabels(account: string, id: string, labels: readonly string[], category: Category | null): Promise<void> {
+    await this.#prepare(
       `UPDATE messages SET labels_json = ?, category = ?
         WHERE account = ? AND gmail_message_id = ?`,
     ).run(JSON.stringify(labels), category, account, id);
@@ -880,18 +890,18 @@ export class Repo {
    * an empty list only if you intend to clear — callers skip the call on a
    * failed fetch rather than wiping a good catalogue.
    */
-  setLabels(
+  async setLabels(
     account: string,
     labels: readonly { id: string; name: string; type?: string }[],
-  ): void {
+  ): Promise<void> {
     const now = new Date().toISOString();
     const del = this.#prepare(`DELETE FROM labels WHERE account = ?`);
     const ins = this.#prepare(
       `INSERT INTO labels (account, label_id, name, type, updated_at) VALUES (?, ?, ?, ?, ?)`,
     );
-    this.transaction(() => {
-      del.run(account);
-      for (const l of labels) ins.run(account, l.id, l.name, l.type ?? null, now);
+    await this.transaction(async () => {
+      await del.run(account);
+      for (const l of labels) await ins.run(account, l.id, l.name, l.type ?? null, now);
     });
   }
 
@@ -901,8 +911,8 @@ export class Repo {
    * (`Label_123…`) map to their display name. Empty when no catalogue is cached
    * yet (callers then fall back to raw ids).
    */
-  labelMap(account: string): Map<string, string> {
-    const rows = this.#prepare(
+  async labelMap(account: string): Promise<Map<string, string>> {
+    const rows = await this.#prepare(
       `SELECT label_id, name FROM labels WHERE account = ?`,
     ).all(account) as { label_id: string; name: string }[];
     return new Map(rows.map((r) => [r.label_id, r.name]));
@@ -914,8 +924,8 @@ export class Repo {
    * send to the API as an id. System labels and unknown strings have no entry —
    * callers pass those through unchanged.
    */
-  labelNameToId(account: string): Map<string, string> {
-    const rows = this.#prepare(
+  async labelNameToId(account: string): Promise<Map<string, string>> {
+    const rows = await this.#prepare(
       `SELECT label_id, name FROM labels WHERE account = ?`,
     ).all(account) as { label_id: string; name: string }[];
     return new Map(rows.map((r) => [r.name.toLowerCase(), r.label_id]));
@@ -926,8 +936,8 @@ export class Repo {
    * Unknown ids (no cached catalogue, or a label seen on a message but absent
    * from the catalogue) pass through unchanged so nothing is ever dropped.
    */
-  labelNames(account: string, ids: readonly string[]): string[] {
-    const map = this.labelMap(account);
+  async labelNames(account: string, ids: readonly string[]): Promise<string[]> {
+    const map = await this.labelMap(account);
     return ids.map((id) => map.get(id) ?? id);
   }
 
@@ -948,7 +958,7 @@ export class Repo {
    * Results are ordered newest-first by `internal_date` so a `limit` keeps the
    * most recent mail. Selector fields combine with AND.
    */
-  selectMetaMessages(account: string, selector: MetaSelector = {}): string[] {
+  async selectMetaMessages(account: string, selector: MetaSelector = {}): Promise<string[]> {
     const where: string[] = [`m.account = ?`, `m.body_state = 'meta'`];
     const params: unknown[] = [account];
 
@@ -978,7 +988,7 @@ export class Repo {
       params.push(selector.limit);
     }
 
-    const rows = this.#prepare(sql).all(...(params as never[])) as { id: string }[];
+    const rows = await this.#prepare(sql).all(...(params as never[])) as { id: string }[];
     return rows.map((r) => r.id);
   }
 
@@ -1005,22 +1015,22 @@ export class Repo {
    * keyword hits) — the caller treats that as "the profile enriches nothing
    * here", not an error. INDEX-ONLY: reads derived rows + FTS, no provider.
    */
-  selectProfileMetaMessages(account: string, limit?: number): string[] {
+  async selectProfileMetaMessages(account: string, limit?: number): Promise<string[]> {
     // The curated dispositions. `important` entities drive inclusion; `muted`
     // and `blocked` drive exclusion (both mean "never enrich", §7).
-    const importantAddrs = this.#prepare(
+    const importantAddrs = await this.#prepare(
       `SELECT address FROM contacts WHERE account = ? AND curation = 'important'`,
     ).all(account) as { address: string }[];
-    const importantDomains = this.#prepare(
+    const importantDomains = await this.#prepare(
       `SELECT domain FROM domains WHERE account = ? AND curation = 'important'`,
     ).all(account) as { domain: string }[];
-    const mutedAddrs = this.#prepare(
+    const mutedAddrs = await this.#prepare(
       `SELECT address FROM contacts WHERE account = ? AND curation IN ('muted','blocked')`,
     ).all(account) as { address: string }[];
-    const mutedDomains = this.#prepare(
+    const mutedDomains = await this.#prepare(
       `SELECT domain FROM domains WHERE account = ? AND curation IN ('muted','blocked')`,
     ).all(account) as { domain: string }[];
-    const keywords = this.getInterestProfile(account).keywords;
+    const keywords = (await this.getInterestProfile(account)).keywords;
 
     // INCLUSION predicate: sender is an important contact OR sender domain is an
     // important domain OR the row matches the keyword FTS query. Each clause is
@@ -1074,28 +1084,28 @@ export class Repo {
       params.push(limit);
     }
 
-    const rows = this.#prepare(sql).all(...(params as never[])) as { id: string }[];
+    const rows = await this.#prepare(sql).all(...(params as never[])) as { id: string }[];
     return rows.map((r) => r.id);
   }
 
   /** Count messages, optionally scoped to one account. */
-  countMessages(account?: string): number {
+  async countMessages(account?: string): Promise<number> {
     const row = account
-      ? (this.#prepare(`SELECT count(*) c FROM messages WHERE account = ?`).get(
+      ? (await this.#prepare(`SELECT count(*) c FROM messages WHERE account = ?`).get(
           account,
         ) as { c: number })
-      : (this.#prepare(`SELECT count(*) c FROM messages`).get() as { c: number });
+      : (await this.#prepare(`SELECT count(*) c FROM messages`).get() as { c: number });
     return row.c;
   }
 
   // ---- sync_runs audit (PLAN §6) ----------------------------------------
 
   /** Open a sync_runs row; returns its id for the matching finish call. */
-  startSyncRun(input: SyncRunStart): number {
+  async startSyncRun(input: SyncRunStart): Promise<number> {
     if (!SYNC_PHASES.includes(input.phase)) {
       throw new IndexError(`invalid sync phase: ${String(input.phase)}`);
     }
-    const res = this.#prepare(
+    const res = await this.#prepare(
       `INSERT INTO sync_runs (account, phase, selector, started_at)
        VALUES (?, ?, ?, ?)`,
     ).run(input.account, input.phase, input.selector ?? null, new Date().toISOString());
@@ -1117,9 +1127,9 @@ export class Repo {
    * longest legitimate run (an initial whole-mailbox sweep) so a live long sync
    * is never mistaken for dead.
    */
-  activeSyncRun(account: string, exceptId?: number): number | undefined {
+  async activeSyncRun(account: string, exceptId?: number): Promise<number | undefined> {
     const cutoff = new Date(Date.now() - STALE_LOCK_MS).toISOString();
-    const row = this.#prepare(
+    const row = await this.#prepare(
       `SELECT id FROM sync_runs
         WHERE account = ? AND finished_at IS NULL AND id != ? AND started_at > ?
         ORDER BY id LIMIT 1`,
@@ -1133,8 +1143,8 @@ export class Repo {
    * sync (count 0 before this run) — one of the two triggers for the auto graph
    * build (D10); the other is an explicit whole-mailbox `--all` sweep.
    */
-  completedSyncCount(account: string): number {
-    const row = this.#prepare(
+  async completedSyncCount(account: string): Promise<number> {
+    const row = await this.#prepare(
       `SELECT count(*) c FROM sync_runs
         WHERE account = ? AND phase = 'sync' AND finished_at IS NOT NULL AND error IS NULL`,
     ).get(account) as { c: number };
@@ -1142,8 +1152,8 @@ export class Repo {
   }
 
   /** Close a sync_runs row with counts and optional error. */
-  finishSyncRun(id: number, result: SyncRunFinish = {}): void {
-    this.#prepare(
+  async finishSyncRun(id: number, result: SyncRunFinish = {}): Promise<void> {
+    await this.#prepare(
       `UPDATE sync_runs
           SET finished_at = ?, fetched = ?, indexed = ?, error = ?
         WHERE id = ?`,
@@ -1159,11 +1169,11 @@ export class Repo {
   // ---- contacts / domains (curation surfaces; full population is M2) ------
 
   /** Upsert a contact's identity/curation fields (idempotent). */
-  upsertContact(input: ContactInput): void {
+  async upsertContact(input: ContactInput): Promise<void> {
     if (input.curation != null && !CURATIONS.includes(input.curation)) {
       throw new IndexError(`invalid curation: ${String(input.curation)}`);
     }
-    this.#prepare(
+    await this.#prepare(
       `INSERT INTO contacts (account, address, display_name, domain, curation)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(account, address) DO UPDATE SET
@@ -1180,8 +1190,8 @@ export class Repo {
   }
 
   /** Write back an agent-assigned domain category (PLAN §6, write-back loop). */
-  setDomainCategory(input: DomainCategoryInput): void {
-    this.#prepare(
+  async setDomainCategory(input: DomainCategoryInput): Promise<void> {
+    await this.#prepare(
       `INSERT INTO domains (account, domain, category, category_note, categorized_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(account, domain) DO UPDATE SET
@@ -1218,14 +1228,14 @@ export class Repo {
    * the message does not exist (no row to attach to) or the text is empty.
    * Returns the stamped `summarized_at`.
    */
-  saveMessageSummary(input: MessageSummaryInput): string {
+  async saveMessageSummary(input: MessageSummaryInput): Promise<string> {
     const text = input.text?.trim() ?? '';
     if (text === '') {
       throw new IndexError('saveMessageSummary requires non-empty summary text');
     }
     const at = input.at ?? new Date().toISOString();
-    return this.transaction(() => {
-      const row = this.#prepare(
+    return await this.transaction(async () => {
+      const row = await this.#prepare(
         `SELECT rowid, subject, from_addr, to_addr, cc_addr, snippet,
                 body_state, body_text
            FROM messages WHERE account = ? AND gmail_message_id = ?`,
@@ -1247,7 +1257,7 @@ export class Repo {
         );
       }
 
-      this.#prepare(
+      await this.#prepare(
         `UPDATE messages
             SET summary_text = ?, summary_is_model = ?, summarized_at = ?
           WHERE account = ? AND gmail_message_id = ?`,
@@ -1259,7 +1269,7 @@ export class Repo {
         input.gmailMessageId,
       );
 
-      this.#syncFts(row.rowid, {
+      await this.#syncFts(row.rowid, {
         subject: row.subject,
         sender: row.from_addr,
         recipients: [row.to_addr, row.cc_addr].filter(Boolean).join(' ') || null,
@@ -1280,13 +1290,13 @@ export class Repo {
    * thread's source fields. Throws {@link IndexError} when the thread does not
    * exist or the text is empty. Returns the stamped `summarized_at`.
    */
-  saveThreadSummary(input: ThreadSummaryInput): string {
+  async saveThreadSummary(input: ThreadSummaryInput): Promise<string> {
     const text = input.text?.trim() ?? '';
     if (text === '') {
       throw new IndexError('saveThreadSummary requires non-empty summary text');
     }
     const at = input.at ?? new Date().toISOString();
-    const res = this.#prepare(
+    const res = await this.#prepare(
       `UPDATE threads
           SET summary_text = ?, summary_is_model = ?, summarized_at = ?
         WHERE account = ? AND thread_id = ?`,
@@ -1316,7 +1326,7 @@ export class Repo {
    *
    * Returns compact candidate rows; the caller demotes via {@link demoteMessage}.
    */
-  compactEligible(account: string, before: string, limit?: number): CompactCandidateRow[] {
+  async compactEligible(account: string, before: string, limit?: number): Promise<CompactCandidateRow[]> {
     const sql =
       `SELECT m.gmail_message_id, m.thread_id, m.summarized_at
          FROM messages m
@@ -1354,8 +1364,8 @@ export class Repo {
       (limit != null ? ` LIMIT ?` : ``);
     const rows =
       limit != null
-        ? this.#prepare(sql).all(account, before, limit)
-        : this.#prepare(sql).all(account, before);
+        ? await this.#prepare(sql).all(account, before, limit)
+        : await this.#prepare(sql).all(account, before);
     return rows as unknown as CompactCandidateRow[];
   }
 
@@ -1369,9 +1379,9 @@ export class Repo {
    * re-enriched by id. Returns whether a row was demoted (false when the row is
    * absent or not in `full` state).
    */
-  demoteMessage(account: string, gmailMessageId: string): boolean {
-    return this.transaction(() => {
-      const row = this.#prepare(
+  async demoteMessage(account: string, gmailMessageId: string): Promise<boolean> {
+    return await this.transaction(async () => {
+      const row = await this.#prepare(
         `SELECT rowid, subject, from_addr, to_addr, cc_addr, snippet,
                 body_state, summary_text
            FROM messages WHERE account = ? AND gmail_message_id = ?`,
@@ -1389,13 +1399,13 @@ export class Repo {
         | undefined;
       if (!row || row.body_state !== 'full' || !row.summary_text) return false;
 
-      this.#prepare(
+      await this.#prepare(
         `UPDATE messages
             SET body_state = 'summary-only', body_text = NULL
           WHERE account = ? AND gmail_message_id = ?`,
       ).run(account, gmailMessageId);
 
-      this.#syncFts(row.rowid, {
+      await this.#syncFts(row.rowid, {
         subject: row.subject,
         sender: row.from_addr,
         recipients: [row.to_addr, row.cc_addr].filter(Boolean).join(' ') || null,
@@ -1414,10 +1424,10 @@ export class Repo {
    * by Correspondent count then volume. By default excludes already-categorized
    * domains (`category IS NULL`); pass `includeCategorized` to surface all.
    */
-  domainsToCategorize(
+  async domainsToCategorize(
     account: string,
     opts: { includeCategorized?: boolean; limit?: number } = {},
-  ): CategorizeCandidateRow[] {
+  ): Promise<CategorizeCandidateRow[]> {
     const catClause = opts.includeCategorized ? `` : `AND d.category IS NULL`;
     const sql =
       `SELECT d.domain, d.msgs, d.distinct_contacts, d.category, d.category_note,
@@ -1437,8 +1447,8 @@ export class Repo {
       (opts.limit != null ? ` LIMIT ?` : ``);
     const rows =
       opts.limit != null
-        ? this.#prepare(sql).all(account, opts.limit)
-        : this.#prepare(sql).all(account);
+        ? await this.#prepare(sql).all(account, opts.limit)
+        : await this.#prepare(sql).all(account);
     return rows as unknown as CategorizeCandidateRow[];
   }
 
@@ -1448,14 +1458,14 @@ export class Repo {
    * the domain (Correspondents first), each with up to `subjectLimit` of their
    * most recent subjects. INDEX-ONLY.
    */
-  categorizeSamples(
+  async categorizeSamples(
     account: string,
     domain: string,
     opts: { senderLimit?: number; subjectLimit?: number } = {},
-  ): CategorizeSample[] {
+  ): Promise<CategorizeSample[]> {
     const senderLimit = opts.senderLimit ?? 5;
     const subjectLimit = opts.subjectLimit ?? 3;
-    const contacts = this.#prepare(
+    const contacts = await this.#prepare(
       `SELECT address, display_name, msgs_sent, msgs_received
          FROM contacts
         WHERE account = ? AND domain = ?
@@ -1476,20 +1486,22 @@ export class Repo {
         ORDER BY internal_date DESC
         LIMIT ?`,
     );
-    return contacts.map((c) => {
-      const subjects = (
-        subjectStmt.all(account, c.address, c.address, subjectLimit) as {
-          subject: string;
-        }[]
-      ).map((r) => r.subject);
-      return {
-        address: c.address,
-        display_name: c.display_name,
-        msgs_sent: c.msgs_sent,
-        msgs_received: c.msgs_received,
-        subjects,
-      };
-    });
+    return Promise.all(
+      contacts.map(async (c) => {
+        const subjects = (
+          (await subjectStmt.all(account, c.address, c.address, subjectLimit)) as {
+            subject: string;
+          }[]
+        ).map((r) => r.subject);
+        return {
+          address: c.address,
+          display_name: c.display_name,
+          msgs_sent: c.msgs_sent,
+          msgs_received: c.msgs_received,
+          subjects,
+        };
+      }),
+    );
   }
 
   // ---- aggregation read surface (M2.1, PLAN §6) ---------------------------
@@ -1505,8 +1517,8 @@ export class Repo {
    * thread "who started it" (initiated) signal fall out of a single forward
    * pass. NULL `internal_date` rows sort first (oldest) deterministically.
    */
-  messagesForAggregation(account: string): AggregationMessageRow[] {
-    return this.#prepare(
+  async messagesForAggregation(account: string): Promise<AggregationMessageRow[]> {
+    return await this.#prepare(
       `SELECT account, gmail_message_id, thread_id, internal_date, date_header,
               from_addr, to_addr, cc_addr, subject, category, is_list, direction,
               unread, starred, important
@@ -1526,31 +1538,31 @@ export class Repo {
    * rebuild by carrying the existing values forward (an UPSERT, not a wipe), so
    * a user's curation survives every aggregation.
    */
-  replaceAggregates(
+  async replaceAggregates(
     account: string,
     aggregates: {
       contacts: readonly ContactAggregate[];
       domains: readonly DomainAggregate[];
       threads: readonly ThreadAggregate[];
     },
-  ): void {
-    this.transaction(() => {
-      this.#replaceContacts(account, aggregates.contacts);
-      this.#replaceDomains(account, aggregates.domains);
-      this.#replaceThreads(account, aggregates.threads);
+  ): Promise<void> {
+    await this.transaction(async () => {
+      await this.#replaceContacts(account, aggregates.contacts);
+      await this.#replaceDomains(account, aggregates.domains);
+      await this.#replaceThreads(account, aggregates.threads);
     });
   }
 
-  #replaceContacts(account: string, contacts: readonly ContactAggregate[]): void {
+  async #replaceContacts(account: string, contacts: readonly ContactAggregate[]): Promise<void> {
     // Drop contacts that no longer aggregate (none of their mail remains), but
     // keep curation/identity for any that persist via the UPSERT below.
     const keep = new Set(contacts.map((c) => c.address));
-    const existing = this.#prepare(
+    const existing = await this.#prepare(
       `SELECT address FROM contacts WHERE account = ?`,
     ).all(account) as { address: string }[];
     const del = this.#prepare(`DELETE FROM contacts WHERE account = ? AND address = ?`);
     for (const row of existing) {
-      if (!keep.has(row.address)) del.run(account, row.address);
+      if (!keep.has(row.address)) await del.run(account, row.address);
     }
 
     const up = this.#prepare(
@@ -1573,7 +1585,7 @@ export class Repo {
          last_seen       = excluded.last_seen`,
     );
     for (const c of contacts) {
-      up.run(
+      await up.run(
         account,
         c.address,
         c.displayName ?? null,
@@ -1591,14 +1603,14 @@ export class Repo {
     }
   }
 
-  #replaceDomains(account: string, domains: readonly DomainAggregate[]): void {
+  async #replaceDomains(account: string, domains: readonly DomainAggregate[]): Promise<void> {
     const keep = new Set(domains.map((d) => d.domain));
-    const existing = this.#prepare(
+    const existing = await this.#prepare(
       `SELECT domain FROM domains WHERE account = ?`,
     ).all(account) as { domain: string }[];
     const del = this.#prepare(`DELETE FROM domains WHERE account = ? AND domain = ?`);
     for (const row of existing) {
-      if (!keep.has(row.domain)) del.run(account, row.domain);
+      if (!keep.has(row.domain)) await del.run(account, row.domain);
     }
 
     const up = this.#prepare(
@@ -1610,22 +1622,22 @@ export class Repo {
          registrable_domain = excluded.registrable_domain`,
     );
     for (const d of domains) {
-      up.run(account, d.domain, d.msgs, d.distinctContacts, d.registrableDomain ?? null);
+      await up.run(account, d.domain, d.msgs, d.distinctContacts, d.registrableDomain ?? null);
     }
   }
 
-  #replaceThreads(account: string, threads: readonly ThreadAggregate[]): void {
+  async #replaceThreads(account: string, threads: readonly ThreadAggregate[]): Promise<void> {
     // Threads now carry an agent-written summary (M3.5, ADR-0003) that the
     // aggregation does not own — so a clean wipe would drop it. Drop only
     // threads that no longer aggregate, and UPSERT the rest so the summary
     // columns survive a rebuild (matching contacts/domains).
     const keep = new Set(threads.map((t) => t.threadId));
-    const existing = this.#prepare(
+    const existing = await this.#prepare(
       `SELECT thread_id FROM threads WHERE account = ?`,
     ).all(account) as { thread_id: string }[];
     const del = this.#prepare(`DELETE FROM threads WHERE account = ? AND thread_id = ?`);
     for (const row of existing) {
-      if (!keep.has(row.thread_id)) del.run(account, row.thread_id);
+      if (!keep.has(row.thread_id)) await del.run(account, row.thread_id);
     }
 
     const up = this.#prepare(
@@ -1643,7 +1655,7 @@ export class Repo {
          last_at           = excluded.last_at`,
     );
     for (const t of threads) {
-      up.run(
+      await up.run(
         account,
         t.threadId,
         t.subject ?? null,
@@ -1664,15 +1676,15 @@ export class Repo {
    * pass map a message's sender host to its brand + category without re-deriving
    * either. Scoped to one account.
    */
-  domainsMeta(account: string): { domain: string; registrable_domain: string | null; category: string | null }[] {
-    return this.#prepare(
+  async domainsMeta(account: string): Promise<{ domain: string; registrable_domain: string | null; category: string | null }[]> {
+    return await this.#prepare(
       `SELECT domain, registrable_domain, category FROM domains WHERE account = ?`,
     ).all(account) as { domain: string; registrable_domain: string | null; category: string | null }[];
   }
 
   /** Fetch one aggregated contact row (or undefined). */
-  getContact(account: string, address: string): ContactRow | undefined {
-    return this.#prepare(
+  async getContact(account: string, address: string): Promise<ContactRow | undefined> {
+    return await this.#prepare(
       `SELECT account, address, display_name, domain, msgs_received, msgs_sent,
               read_count, replied_count, initiated_count, starred_count,
               important_count, first_seen, last_seen, curation
@@ -1686,7 +1698,7 @@ export class Repo {
    * who they talked to. Ordered by sent volume then received volume, newest
    * correspondence first on ties.
    */
-  listCorrespondents(account: string, limit?: number): ContactRow[] {
+  async listCorrespondents(account: string, limit?: number): Promise<ContactRow[]> {
     const sql =
       `SELECT account, address, display_name, domain, msgs_received, msgs_sent,
               read_count, replied_count, initiated_count, starred_count,
@@ -1696,22 +1708,22 @@ export class Repo {
         ORDER BY msgs_sent DESC, msgs_received DESC, last_seen DESC` +
       (limit != null ? ` LIMIT ?` : ``);
     const rows = limit != null
-      ? this.#prepare(sql).all(account, limit)
-      : this.#prepare(sql).all(account);
+      ? await this.#prepare(sql).all(account, limit)
+      : await this.#prepare(sql).all(account);
     return rows as unknown as ContactRow[];
   }
 
   /** Fetch one aggregated domain row (or undefined). */
-  getDomain(account: string, domain: string): DomainRow | undefined {
-    return this.#prepare(
+  async getDomain(account: string, domain: string): Promise<DomainRow | undefined> {
+    return await this.#prepare(
       `SELECT account, domain, msgs, distinct_contacts, curation, category
          FROM domains WHERE account = ? AND domain = ?`,
     ).get(account, domain) as DomainRow | undefined;
   }
 
   /** Fetch one aggregated thread row (or undefined). */
-  getThread(account: string, threadId: string): ThreadRow | undefined {
-    return this.#prepare(
+  async getThread(account: string, threadId: string): Promise<ThreadRow | undefined> {
+    return await this.#prepare(
       `SELECT account, thread_id, subject, participants_json, msg_count,
               unread_count, user_participated, first_at, last_at,
               summary_text, summary_is_model, summarized_at
@@ -1738,14 +1750,14 @@ export class Repo {
    *  - `community` — community_id asc (NULLs last), then engagement desc.
    * All have a stable `address` tiebreak. `limit` defaults at the call site.
    */
-  listContacts(
+  async listContacts(
     opts: {
       account?: string;
       sort?: ContactSort;
       filter?: ContactListFilter;
       limit?: number;
     } = {},
-  ): ContactDetailRow[] {
+  ): Promise<ContactDetailRow[]> {
     const where: string[] = [];
     const params: unknown[] = [];
     if (opts.account) {
@@ -1777,7 +1789,7 @@ export class Repo {
     }
 
     const limit = opts.limit ?? 20;
-    const rows = this.#prepare(
+    const rows = await this.#prepare(
       `SELECT account, address, display_name, domain, msgs_received, msgs_sent,
               read_count, replied_count, initiated_count, starred_count,
               important_count, first_seen, last_seen, curation,
@@ -1791,8 +1803,8 @@ export class Repo {
   }
 
   /** Fetch one contact with its derived signals (M3.4 `get_contact`). */
-  getContactDetail(account: string, address: string): ContactDetailRow | undefined {
-    return this.#prepare(
+  async getContactDetail(account: string, address: string): Promise<ContactDetailRow | undefined> {
+    return await this.#prepare(
       `SELECT account, address, display_name, domain, msgs_received, msgs_sent,
               read_count, replied_count, initiated_count, starred_count,
               important_count, first_seen, last_seen, curation,
@@ -1811,7 +1823,7 @@ export class Repo {
    * last), then sent/received volume, then address. Never returns a bare empty
    * set where a substring near-miss exists. `limit` defaults at the call site.
    */
-  findContacts(hint: string, opts: { account?: string; limit?: number } = {}): ContactDetailRow[] {
+  async findContacts(hint: string, opts: { account?: string; limit?: number } = {}): Promise<ContactDetailRow[]> {
     const needle = `%${hint.trim().toLowerCase()}%`;
     const where: string[] = [
       `(lower(display_name) LIKE ? OR lower(address) LIKE ? OR lower(domain) LIKE ?)`,
@@ -1822,7 +1834,7 @@ export class Repo {
       params.push(opts.account);
     }
     const limit = opts.limit ?? 10;
-    const rows = this.#prepare(
+    const rows = await this.#prepare(
       `SELECT account, address, display_name, domain, msgs_received, msgs_sent,
               read_count, replied_count, initiated_count, starred_count,
               important_count, first_seen, last_seen, curation,
@@ -1843,10 +1855,10 @@ export class Repo {
    * address or the bracketed `Name <addr>` header form. `limit` defaults at the
    * call site.
    */
-  threadsForContact(account: string, address: string, limit = 20): ThreadRow[] {
+  async threadsForContact(account: string, address: string, limit = 20): Promise<ThreadRow[]> {
     const bare = address.toLowerCase();
     const bracket = `%<${bare}>%`;
-    const rows = this.#prepare(
+    const rows = await this.#prepare(
       `SELECT t.account, t.thread_id, t.subject, t.participants_json, t.msg_count,
               t.unread_count, t.user_participated, t.first_at, t.last_at,
               t.summary_text, t.summary_is_model, t.summarized_at
@@ -1873,7 +1885,7 @@ export class Repo {
    * ordered by the best (lowest bm25) hit in each thread. `limit` defaults at the
    * call site.
    */
-  threadsForQuery(query: string, opts: { account?: string; limit?: number } = {}): ThreadRow[] {
+  async threadsForQuery(query: string, opts: { account?: string; limit?: number } = {}): Promise<ThreadRow[]> {
     const limit = opts.limit ?? 20;
     // FTS5's bm25() is an auxiliary function usable only in the direct FTS query
     // context (an ORDER BY over the matched FTS table) — selecting it through a
@@ -1882,7 +1894,7 @@ export class Repo {
     // {@link searchMessages} path) and keep each thread's FIRST (best-ranked)
     // appearance, preserving rank order, then fetch the thread rows in that
     // order. A generous hit cap keeps it bounded.
-    const hits = this.searchMessages(query, {
+    const hits = await this.searchMessages(query, {
       ...(opts.account ? { account: opts.account } : {}),
       limit: Math.max(limit * 5, 50),
     });
@@ -1898,7 +1910,7 @@ export class Repo {
     }
     const out: ThreadRow[] = [];
     for (const { account, threadId } of ordered) {
-      const t = this.getThread(account, threadId);
+      const t = await this.getThread(account, threadId);
       if (t) out.push(t);
     }
     return out;
@@ -1909,8 +1921,8 @@ export class Repo {
    * projection — the snippet + summary feed the agent without dumping bodies
    * (token-conscious, SCOPE 3.4(b)); a body is opt-in via `get_message`.
    */
-  threadMessages(account: string, threadId: string): MessageRow[] {
-    return this.#prepare(
+  async threadMessages(account: string, threadId: string): Promise<MessageRow[]> {
+    return await this.#prepare(
       `SELECT account, gmail_message_id, thread_id, subject, from_addr, to_addr,
               cc_addr, snippet, body_state, body_text, summary_text,
               summary_is_model, summarized_at, is_list, direction,
@@ -1933,13 +1945,13 @@ export class Repo {
    * co-recipients — the caller then falls back to a ranked near-miss set so a
    * miss is never a bare empty answer (DESIGN TEST recall).
    */
-  graphNeighbors(account: string, address: string, limit = 15): GraphNeighborRow[] {
-    const contactRows = this.#prepare(
+  async graphNeighbors(account: string, address: string, limit = 15): Promise<GraphNeighborRow[]> {
+    const contactRows = await this.#prepare(
       `SELECT address FROM contacts WHERE account = ?`,
     ).all(account) as { address: string }[];
     const contactSet = new Set(contactRows.map((r) => r.address));
 
-    const threads = this.#prepare(
+    const threads = await this.#prepare(
       `SELECT t.participants_json AS participants_json
          FROM threads t
         WHERE t.account = ?
@@ -1975,7 +1987,7 @@ export class Repo {
     );
     const out: GraphNeighborRow[] = [];
     for (const [other, shared] of counts) {
-      const d = detail.get(account, other) as
+      const d = await detail.get(account, other) as
         | {
             display_name: string | null;
             domain: string | null;
@@ -2011,12 +2023,14 @@ export class Repo {
    * isolated) are omitted. `memberLimit` caps members per community
    * (token-conscious). Communities are ordered by size desc.
    */
-  graphCommunities(account: string, memberLimit = 10): {
-    communityId: number;
-    size: number;
-    members: { address: string; display_name: string | null; centrality: number | null }[];
-  }[] {
-    const rows = this.#prepare(
+  async graphCommunities(account: string, memberLimit = 10): Promise<
+    {
+      communityId: number;
+      size: number;
+      members: { address: string; display_name: string | null; centrality: number | null }[];
+    }[]
+  > {
+    const rows = await this.#prepare(
       `SELECT community_id, address, display_name, centrality
          FROM contacts
         WHERE account = ? AND community_id IS NOT NULL
@@ -2065,8 +2079,8 @@ export class Repo {
    * `from_addr` or the bare address embedded in a `Name <addr>` header — the one
    * §10 signal the contact rollup does not already carry.
    */
-  contactScoringRows(account: string): ContactScoringRow[] {
-    const rows = this.#prepare(
+  async contactScoringRows(account: string): Promise<ContactScoringRow[]> {
+    const rows = await this.#prepare(
       `SELECT c.address, c.msgs_received, c.msgs_sent, c.read_count,
               c.replied_count, c.initiated_count, c.starred_count,
               c.important_count, c.last_seen,
@@ -2097,11 +2111,11 @@ export class Repo {
    * aggregates (msgs_received / read_count / replied_count) so a snapshot is
    * self-describing without a join back to a mutable `contacts` row.
    */
-  persistEngagementScores(
+  async persistEngagementScores(
     account: string,
     scored: readonly ScoredContactInput[],
     takenAt: string,
-  ): void {
+  ): Promise<void> {
     const setScore = this.#prepare(
       `UPDATE contacts SET engagement_score = ? WHERE account = ? AND address = ?`,
     );
@@ -2118,25 +2132,25 @@ export class Repo {
          replied_count    = excluded.replied_count,
          engagement_score = excluded.engagement_score`,
     );
-    this.transaction(() => {
+    await this.transaction(async () => {
       for (const s of scored) {
-        setScore.run(s.engagementScore, account, s.address);
-        snapshot.run(takenAt, s.engagementScore, account, s.address);
+        await setScore.run(s.engagementScore, account, s.address);
+        await snapshot.run(takenAt, s.engagementScore, account, s.address);
       }
     });
   }
 
   /** Fetch a contact's current engagement_score (or null/undefined). */
-  getEngagementScore(account: string, address: string): number | null | undefined {
-    const row = this.#prepare(
+  async getEngagementScore(account: string, address: string): Promise<number | null | undefined> {
+    const row = await this.#prepare(
       `SELECT engagement_score FROM contacts WHERE account = ? AND address = ?`,
     ).get(account, address) as { engagement_score: number | null } | undefined;
     return row ? row.engagement_score : undefined;
   }
 
   /** Count `contact_stats_snapshot` rows for a contact (snapshot generations). */
-  countSnapshots(account: string, address: string): number {
-    const row = this.#prepare(
+  async countSnapshots(account: string, address: string): Promise<number> {
+    const row = await this.#prepare(
       `SELECT count(*) c FROM contact_stats_snapshot WHERE account = ? AND address = ?`,
     ).get(account, address) as { c: number };
     return row.c;
@@ -2167,14 +2181,14 @@ export class Repo {
    * social circle). Restricting nodes to actual contacts yields the graph of
    * "who is central to YOUR correspondence" (PLAN §9) rather than to you.
    */
-  graphThreads(account: string): GraphThread[] {
-    const contactRows = this.#prepare(
+  async graphThreads(account: string): Promise<GraphThread[]> {
+    const contactRows = await this.#prepare(
       `SELECT address FROM contacts WHERE account = ?`,
     ).all(account) as { address: string }[];
     const contactSet = new Set(contactRows.map((r) => r.address));
 
     // A thread is "list" if any of its messages is is_list; exclude those.
-    const rows = this.#prepare(
+    const rows = await this.#prepare(
       `SELECT t.thread_id AS thread_id, t.participants_json AS participants_json
          FROM threads t
         WHERE t.account = ?
@@ -2219,24 +2233,24 @@ export class Repo {
    * clean slate pass every contact. `community_id` may be null for an isolated
    * contact.
    */
-  persistGraphMetrics(account: string, metrics: readonly GraphMetricInput[]): void {
+  async persistGraphMetrics(account: string, metrics: readonly GraphMetricInput[]): Promise<void> {
     const set = this.#prepare(
       `UPDATE contacts SET centrality = ?, community_id = ?
         WHERE account = ? AND address = ?`,
     );
-    this.transaction(() => {
+    await this.transaction(async () => {
       for (const m of metrics) {
-        set.run(m.centrality, m.communityId, account, m.address);
+        await set.run(m.centrality, m.communityId, account, m.address);
       }
     });
   }
 
   /** Fetch a contact's derived graph metrics (centrality + community_id). */
-  getGraphMetrics(
+  async getGraphMetrics(
     account: string,
     address: string,
-  ): { centrality: number | null; community_id: number | null } | undefined {
-    return this.#prepare(
+  ): Promise<{ centrality: number | null; community_id: number | null } | undefined> {
+    return await this.#prepare(
       `SELECT centrality, community_id FROM contacts WHERE account = ? AND address = ?`,
     ).get(account, address) as
       | { centrality: number | null; community_id: number | null }
@@ -2260,8 +2274,8 @@ export class Repo {
    * `muted` for predominantly-bulk senders. `limit` caps the shortlist
    * (token-conscious; default 20).
    */
-  curationContacts(account: string, limit = 20): CurationContactRow[] {
-    const rows = this.#prepare(
+  async curationContacts(account: string, limit = 20): Promise<CurationContactRow[]> {
+    const rows = await this.#prepare(
       `SELECT c.address, c.display_name, c.domain, c.msgs_received, c.msgs_sent,
               c.read_count, c.replied_count, c.starred_count, c.important_count,
               c.last_seen, c.engagement_score, c.curation,
@@ -2292,8 +2306,8 @@ export class Repo {
    * `engagement_score` descending (NULLs last) then message volume. `limit`
    * caps the shortlist (token-conscious; default 20).
    */
-  curationDomains(account: string, limit = 20): CurationDomainRow[] {
-    const rows = this.#prepare(
+  async curationDomains(account: string, limit = 20): Promise<CurationDomainRow[]> {
+    const rows = await this.#prepare(
       `SELECT domain, msgs, distinct_contacts, engagement_score, category, curation
          FROM domains
         WHERE account = ?
@@ -2310,11 +2324,11 @@ export class Repo {
    * the caller can apply a shortlist without first checking presence. Returns
    * whether a row was updated.
    */
-  setContactCuration(account: string, address: string, curation: Curation | null): boolean {
+  async setContactCuration(account: string, address: string, curation: Curation | null): Promise<boolean> {
     if (curation != null && !CURATIONS.includes(curation)) {
       throw new IndexError(`invalid curation: ${String(curation)}`);
     }
-    const res = this.#prepare(
+    const res = await this.#prepare(
       `UPDATE contacts SET curation = ? WHERE account = ? AND address = ?`,
     ).run(curation, account, address);
     return res.changes > 0;
@@ -2326,11 +2340,11 @@ export class Repo {
    * domain pre-emptively), so this UPSERTS the domain row, preserving any
    * existing aggregate/category columns. Returns nothing (always succeeds).
    */
-  setDomainCuration(account: string, domain: string, curation: Curation | null): void {
+  async setDomainCuration(account: string, domain: string, curation: Curation | null): Promise<void> {
     if (curation != null && !CURATIONS.includes(curation)) {
       throw new IndexError(`invalid curation: ${String(curation)}`);
     }
-    this.#prepare(
+    await this.#prepare(
       `INSERT INTO domains (account, domain, curation) VALUES (?, ?, ?)
        ON CONFLICT(account, domain) DO UPDATE SET curation = excluded.curation`,
     ).run(account, domain, curation);
@@ -2341,8 +2355,8 @@ export class Repo {
    * profile (M3.1, PLAN §11). Ordered by address for a stable shape. `curation`
    * is non-null by the WHERE clause.
    */
-  curatedContacts(account: string): { address: string; curation: Curation }[] {
-    return this.#prepare(
+  async curatedContacts(account: string): Promise<{ address: string; curation: Curation }[]> {
+    return await this.#prepare(
       `SELECT address, curation FROM contacts
         WHERE account = ? AND curation IS NOT NULL
         ORDER BY address ASC`,
@@ -2350,8 +2364,8 @@ export class Repo {
   }
 
   /** The domains that currently carry a curation label (see {@link curatedContacts}). */
-  curatedDomains(account: string): { domain: string; curation: Curation }[] {
-    return this.#prepare(
+  async curatedDomains(account: string): Promise<{ domain: string; curation: Curation }[]> {
+    return await this.#prepare(
       `SELECT domain, curation FROM domains
         WHERE account = ? AND curation IS NOT NULL
         ORDER BY domain ASC`,
@@ -2364,8 +2378,8 @@ export class Repo {
    * when the account has never been curated, so callers never special-case
    * absence. Keywords are JSON-decoded from `keywords_json`.
    */
-  getInterestProfile(account: string): InterestProfileRow {
-    const row = this.#prepare(
+  async getInterestProfile(account: string): Promise<InterestProfileRow> {
+    const row = await this.#prepare(
       `SELECT keywords_json, updated_at FROM interest_profile WHERE account = ?`,
     ).get(account) as { keywords_json: string | null; updated_at: string | null } | undefined;
     let keywords: string[] = [];
@@ -2388,9 +2402,9 @@ export class Repo {
    * the write is idempotent (same keywords → same row, fresh `updated_at`).
    * Returns the stamped `updated_at`.
    */
-  setInterestKeywords(account: string, keywords: readonly string[], at?: string): string {
+  async setInterestKeywords(account: string, keywords: readonly string[], at?: string): Promise<string> {
     const updatedAt = at ?? new Date().toISOString();
-    this.#prepare(
+    await this.#prepare(
       `INSERT INTO interest_profile (account, keywords_json, updated_at)
        VALUES (?, ?, ?)
        ON CONFLICT(account) DO UPDATE SET
@@ -2405,8 +2419,8 @@ export class Repo {
    * the label has never recorded one (its first sync). Used by the sync identity
    * guard to keep a label pinned to one mailbox across an adapter switch.
    */
-  getAccountIdentity(account: string): AccountIdentityRow | null {
-    const row = this.#prepare(
+  async getAccountIdentity(account: string): Promise<AccountIdentityRow | null> {
+    const row = await this.#prepare(
       `SELECT account, address, provider, first_seen, last_verified
          FROM account_identity WHERE account = ?`,
     ).get(account) as AccountIdentityRow | undefined;
@@ -2420,9 +2434,9 @@ export class Repo {
    * set (the guard blocks a mismatch before this is called), so a transport
    * switch to the same mailbox just updates `provider`/`last_verified`.
    */
-  setAccountIdentity(account: string, address: string, provider: string, at?: string): void {
+  async setAccountIdentity(account: string, address: string, provider: string, at?: string): Promise<void> {
     const now = at ?? new Date().toISOString();
-    this.#prepare(
+    await this.#prepare(
       `INSERT INTO account_identity (account, address, provider, first_seen, last_verified)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(account) DO UPDATE SET

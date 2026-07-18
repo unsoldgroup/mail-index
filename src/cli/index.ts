@@ -362,7 +362,7 @@ async function cmdSync(argv: string[]): Promise<number> {
   };
 
   const config = loadConfig();
-  const db = openDb();
+  const db = await openDb();
   try {
     const repo = new Repo(db);
 
@@ -440,7 +440,7 @@ async function cmdEnrich(argv: string[]): Promise<number> {
 
   const config = loadConfig();
   const account = resolveAccount(config, values.account);
-  const db = openDb();
+  const db = await openDb();
   try {
     const repo = new Repo(db);
     const source = buildSource(account);
@@ -489,7 +489,7 @@ async function cmdCurate(argv: string[]): Promise<number> {
   resolveAccount(config, account);
 
   const limit = parseLimit(values.limit, '--limit');
-  const db = openDb();
+  const db = await openDb();
   const prompter = readlinePrompter();
   try {
     const repo = new Repo(db);
@@ -535,7 +535,7 @@ async function cmdSearch(argv: string[]): Promise<number> {
   // adapter). A plain search never opens the config — pass an empty one, which
   // runSearchEnriching ignores when `enrich` is unset (it returns plain hits).
   const config = values.enrich ? loadConfig() : { accounts: {} };
-  const db = openDb();
+  const db = await openDb();
   try {
     const repo = new Repo(db);
     const rows = await runSearchEnriching(config, repo, positionals, flags);
@@ -552,7 +552,7 @@ async function cmdSearch(argv: string[]): Promise<number> {
  * reconcile keeps exact). A fixed `label` (from the `inbox` route) takes no
  * positional; otherwise the label is the sole positional.
  */
-function cmdLabeled(argv: string[], label?: string): number {
+async function cmdLabeled(argv: string[], label?: string): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
     options: {
@@ -574,10 +574,10 @@ function cmdLabeled(argv: string[], label?: string): number {
   }
 
   const limit = parseLimit(values.limit, '--limit');
-  const db = openDb();
+  const db = await openDb();
   try {
     const repo = new Repo(db);
-    const rows = repo.messagesByLabel(resolved, {
+    const rows = await repo.messagesByLabel(resolved, {
       ...(values.account ? { account: values.account } : {}),
       ...(limit != null ? { limit } : {}),
     });
@@ -611,7 +611,7 @@ async function cmdShow(argv: string[]): Promise<number> {
 
   const ref = parseRef(positionals[0]!);
   const config = loadConfig();
-  const db = openDb();
+  const db = await openDb();
   try {
     const repo = new Repo(db);
     const result = await runShow(config, repo, ref);
@@ -622,7 +622,7 @@ async function cmdShow(argv: string[]): Promise<number> {
   }
 }
 
-function cmdOpen(argv: string[]): number {
+async function cmdOpen(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
     options: {
@@ -645,10 +645,10 @@ function cmdOpen(argv: string[]): number {
 
   const ref = parseRef(positionals[0]!);
   const config = loadConfig();
-  const db = openDb();
+  const db = await openDb();
   try {
     const repo = new Repo(db);
-    const result = runOpen(config, repo, ref);
+    const result = await runOpen(config, repo, ref);
     process.stdout.write(formatOpen(result));
     return 0;
   } finally {
@@ -673,7 +673,7 @@ async function cmdArchive(argv: string[]): Promise<number> {
 
   const ref = parseRef(positionals[0]!);
   const config = loadConfig();
-  const db = openDb();
+  const db = await openDb();
   try {
     const repo = new Repo(db);
     const result = await runLabelChange(config, repo, ref, archiveChange());
@@ -710,7 +710,7 @@ async function cmdLabel(argv: string[]): Promise<number> {
 
   const ref = parseRef(positionals[0]!);
   const config = loadConfig();
-  const db = openDb();
+  const db = await openDb();
   try {
     const repo = new Repo(db);
     const result = await runLabelChange(config, repo, ref, {
@@ -724,7 +724,7 @@ async function cmdLabel(argv: string[]): Promise<number> {
   }
 }
 
-function cmdGraph(argv: string[]): number {
+async function cmdGraph(argv: string[]): Promise<number> {
   const [sub, ...rest] = argv;
 
   // `graph` currently has one subcommand, `build`. Treat help / missing sub as
@@ -756,7 +756,7 @@ function cmdGraph(argv: string[]): number {
   // adapter bindings, but loadConfig is still the source of truth for which
   // accounts exist.
   const config = loadConfig();
-  const db = openDb();
+  const db = await openDb();
   try {
     const repo = new Repo(db);
 
@@ -764,7 +764,7 @@ function cmdGraph(argv: string[]): number {
       if (Object.keys(config.accounts).length === 0) {
         throw new CliError('no accounts configured — run mail-index init and edit the config');
       }
-      for (const result of runGraphBuildAll(config, repo)) {
+      for (const result of await runGraphBuildAll(config, repo)) {
         process.stdout.write(formatGraphResult(result) + '\n');
       }
       return 0;
@@ -775,7 +775,7 @@ function cmdGraph(argv: string[]): number {
     }
     // Resolve to validate the label exists in the config (throws ConfigError if not).
     resolveAccount(config, values.account);
-    const result = runGraphBuildOne(repo, values.account);
+    const result = await runGraphBuildOne(repo, values.account);
     process.stdout.write(formatGraphResult(result) + '\n');
     return 0;
   } finally {
@@ -783,7 +783,7 @@ function cmdGraph(argv: string[]): number {
   }
 }
 
-function cmdCompact(argv: string[]): number {
+async function cmdCompact(argv: string[]): Promise<number> {
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -807,7 +807,7 @@ function cmdCompact(argv: string[]): number {
   const labels = Object.keys(config.accounts);
   const opts = values.now ? { now: true } : {};
 
-  const db = openDb();
+  const db = await openDb();
   try {
     const repo = new Repo(db);
 
@@ -816,7 +816,7 @@ function cmdCompact(argv: string[]): number {
         throw new CliError('no accounts configured — run mail-index init and edit the config');
       }
       for (const label of labels) {
-        const result = compact(repo, label, opts);
+        const result = await compact(repo, label, opts);
         process.stdout.write(`${result.account}: demoted ${result.demoted} body(ies) to summary-only\n`);
       }
       return 0;
@@ -834,7 +834,7 @@ function cmdCompact(argv: string[]): number {
     }
     resolveAccount(config, account);
 
-    const result = compact(repo, account, opts);
+    const result = await compact(repo, account, opts);
     process.stdout.write(`${result.account}: demoted ${result.demoted} body(ies) to summary-only\n`);
     return 0;
   } finally {
@@ -842,7 +842,7 @@ function cmdCompact(argv: string[]): number {
   }
 }
 
-function cmdStatus(argv: string[]): number {
+async function cmdStatus(argv: string[]): Promise<number> {
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -857,10 +857,10 @@ function cmdStatus(argv: string[]): number {
     return 0;
   }
 
-  const db = openDb();
+  const db = await openDb();
   try {
     const repo = new Repo(db);
-    const report = buildStatus(repo);
+    const report = await buildStatus(repo);
     process.stdout.write(values.json ? formatStatusJson(report) : formatStatus(report));
     return 0;
   } finally {
@@ -868,7 +868,7 @@ function cmdStatus(argv: string[]): number {
   }
 }
 
-function cmdCadence(argv: string[]): number {
+async function cmdCadence(argv: string[]): Promise<number> {
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -909,10 +909,10 @@ function cmdCadence(argv: string[]): number {
     limit: parseLimit(values.limit, '--limit'),
   };
 
-  const db = openDb();
+  const db = await openDb();
   try {
     const repo = new Repo(db);
-    const rows = runCadence(repo, flags);
+    const rows = await runCadence(repo, flags);
     process.stdout.write(values.json ? formatCadenceJson(rows) : formatCadence(rows, flags));
     return 0;
   } finally {

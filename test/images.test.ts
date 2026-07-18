@@ -32,7 +32,7 @@ const HTML = `
   <img src="https://cdn.example.com/photo/landscape.jpg" width="640" height="360">
 </body></html>`;
 
-test('parseImages extracts src, dimensions, alt, and link wrapping', () => {
+test('parseImages extracts src, dimensions, alt, and link wrapping', async () => {
   const imgs = parseImages(HTML);
   assert.equal(imgs.length, 8);
   const cta = imgs.find((i) => i.src.includes('view-offer'));
@@ -44,7 +44,7 @@ test('parseImages extracts src, dimensions, alt, and link wrapping', () => {
   assert.equal(pixel?.alt, null); // empty alt → null
 });
 
-test('classifyImages tags each image kind deterministically', () => {
+test('classifyImages tags each image kind deterministically', async () => {
   const bySrc = new Map(classifyImages(HTML).map((v) => [v.src, v]));
   assert.equal(bySrc.get('https://cdn.example.com/track/open.gif?id=abc')?.kind, 'pixel');
   assert.equal(bySrc.get('https://cdn.example.com/layout/spacer.gif')?.kind, 'spacer');
@@ -55,11 +55,11 @@ test('classifyImages tags each image kind deterministically', () => {
   assert.equal(bySrc.get('https://cdn.example.com/photo/landscape.jpg')?.kind, 'content');
 });
 
-test('classification is deterministic (same input → same output)', () => {
+test('classification is deterministic (same input → same output)', async () => {
   assert.deepEqual(classifyImages(HTML), classifyImages(HTML));
 });
 
-test('selectOcrCandidates returns content images, deduped and ranked', () => {
+test('selectOcrCandidates returns content images, deduped and ranked', async () => {
   const cands = selectOcrCandidates(HTML);
   // 3 distinct content images (hero appears twice → deduped).
   assert.equal(cands.length, 3);
@@ -73,22 +73,22 @@ test('selectOcrCandidates returns content images, deduped and ranked', () => {
   assert.ok(cands[0]?.reasons.length, 'candidates carry explanatory reasons');
 });
 
-test('selectOcrCandidates honours the limit', () => {
+test('selectOcrCandidates honours the limit', async () => {
   assert.equal(selectOcrCandidates(HTML, { limit: 1 }).length, 1);
 });
 
-test('a tracking pixel and a spacer never become candidates', () => {
+test('a tracking pixel and a spacer never become candidates', async () => {
   const srcs = selectOcrCandidates(HTML).map((c) => c.src);
   assert.ok(!srcs.some((s) => s.includes('open.gif')));
   assert.ok(!srcs.some((s) => s.includes('spacer.gif')));
 });
 
-test('empty / text-only HTML yields no candidates', () => {
+test('empty / text-only HTML yields no candidates', async () => {
   assert.deepEqual(selectOcrCandidates('<p>Just text, no images.</p>'), []);
   assert.deepEqual(selectOcrCandidates(''), []);
 });
 
-test('meaningfulTextLength ignores entity/zero-width preview padding', () => {
+test('meaningfulTextLength ignores entity/zero-width preview padding', async () => {
   // A real-world "image-only" body: one short line then preview-text padding.
   const padded = 'Secure this offer by September 8, 2026' + ' &zwnj; &shy; ‌ ­'.repeat(200);
   assert.ok(meaningfulTextLength(padded) < 60, 'padding stripped to the real line');
@@ -96,7 +96,7 @@ test('meaningfulTextLength ignores entity/zero-width preview padding', () => {
   assert.equal(meaningfulTextLength(null), 0);
 });
 
-test('isLikelyImageOnly fires only when text is thin AND images exist', () => {
+test('isLikelyImageOnly fires only when text is thin AND images exist', async () => {
   const padded = '&zwnj; &shy; '.repeat(300); // ~3600 chars, ~0 meaningful
   assert.equal(isLikelyImageOnly(padded, 3), true, 'thin text + images → true');
   assert.equal(isLikelyImageOnly(padded, 0), false, 'no images → false');
@@ -104,7 +104,7 @@ test('isLikelyImageOnly fires only when text is thin AND images exist', () => {
   assert.equal(isLikelyImageOnly(realText, 3), false, 'real text present → false even with images');
 });
 
-test('a content image wins on link wrapping even when unsized', () => {
+test('a content image wins on link wrapping even when unsized', async () => {
   const html = `<a href="https://x.example/offer"><img src="https://x.example/banner.jpg" width="320" height="120"></a>`;
   const [c] = selectOcrCandidates(html);
   assert.ok(c);

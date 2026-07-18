@@ -25,14 +25,14 @@ function makePrototypeDb(path: string): void {
   db.close();
 }
 
-test('openDb throws a clear IndexError on a pre-existing un-versioned prototype DB', () => {
+test('openDb throws a clear IndexError on a pre-existing un-versioned prototype DB', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mail-index-guard-'));
   const path = join(dir, 'mail.sqlite');
   try {
     makePrototypeDb(path);
 
-    assert.throws(
-      () => openDb({ path }),
+    await assert.rejects(
+      async () => await openDb({ path }),
       (err: unknown) =>
         err instanceof IndexError &&
         /pre-existing un-versioned database/.test((err as Error).message) &&
@@ -43,11 +43,11 @@ test('openDb throws a clear IndexError on a pre-existing un-versioned prototype 
   }
 });
 
-test('openDb still opens a normal fresh DB and migrates it', () => {
+test('openDb still opens a normal fresh DB and migrates it', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mail-index-fresh-'));
   const path = join(dir, 'mail.sqlite');
   try {
-    const db = openDb({ path });
+    const db = await openDb({ path });
     const row = db
       .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='messages'`)
       .get() as { name: string } | undefined;
@@ -55,7 +55,7 @@ test('openDb still opens a normal fresh DB and migrates it', () => {
     db.close();
 
     // Re-opening the now-versioned DB is fine (guard only fires at version 0).
-    const db2 = openDb({ path });
+    const db2 = await openDb({ path });
     db2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

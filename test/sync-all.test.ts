@@ -22,8 +22,8 @@ import { Repo } from '../dist/index/repo.js';
 import { FakeMailSource } from '../dist/source/fake.js';
 import { runSyncAll } from '../dist/cli/sync.js';
 
-function freshRepo(): Repo {
-  return new Repo(openDb({ path: ':memory:' }));
+async function freshRepo(): Repo {
+  return new Repo(await openDb({ path: ':memory:' }));
 }
 
 /** A minimal fixtures bag with `n` messages, ids prefixed by the account label. */
@@ -66,7 +66,7 @@ function builderFor(byLabel: Record<string, number>) {
 }
 
 test('runSyncAll sweeps every configured account under its own label', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   const outcomes = await runSyncAll(CONFIG, {}, repo, builderFor({ alpha: 5, beta: 3 }));
 
   assert.deepEqual(
@@ -79,20 +79,20 @@ test('runSyncAll sweeps every configured account under its own label', async () 
   // alpha's policy limit=2 bounds its sweep; beta (no limit) takes all 3.
   assert.equal(outcomes[0]?.result?.indexed, 2);
   assert.equal(outcomes[1]?.result?.indexed, 3);
-  assert.equal(repo.countMessages('alpha'), 2);
-  assert.equal(repo.countMessages('beta'), 3);
+  assert.equal(await repo.countMessages('alpha'), 2);
+  assert.equal(await repo.countMessages('beta'), 3);
 
   // Messages landed under the right account label (no cross-contamination).
-  assert.ok(repo.getMessage('alpha', 'alpha-m0'));
-  assert.equal(repo.getMessage('beta', 'alpha-m0'), undefined);
+  assert.ok(await repo.getMessage('alpha', 'alpha-m0'));
+  assert.equal(await repo.getMessage('beta', 'alpha-m0'), undefined);
 });
 
 test('runSyncAll writes a per-account sync_runs audit row', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await runSyncAll(CONFIG, {}, repo, builderFor({ alpha: 1, beta: 1 }));
 
   for (const label of ['alpha', 'beta']) {
-    const row = repo.db
+    const row = await repo.driver
       .prepare('SELECT account, phase, finished_at FROM sync_runs WHERE account = ?')
       .get(label) as { account: string; phase: string; finished_at: string | null };
     assert.equal(row.account, label);
@@ -102,7 +102,7 @@ test('runSyncAll writes a per-account sync_runs audit row', async () => {
 });
 
 test('runSyncAll isolates a single account failure from the rest', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   const builder = (account: { configDir: string }) => {
     if (account.configDir === '/a') {
       const boom = new FakeMailSource(fixtures('alpha', 1));
@@ -123,7 +123,7 @@ test('runSyncAll isolates a single account failure from the rest', async () => {
   assert.equal(outcomes[0]?.result, undefined);
   // beta still synced despite alpha failing first.
   assert.equal(outcomes[1]?.result?.indexed, 4);
-  assert.equal(repo.countMessages('beta'), 4);
+  assert.equal(await repo.countMessages('beta'), 4);
   // alpha's failed run released its lock (closed audit row).
-  assert.equal(repo.activeSyncRun('alpha'), undefined);
+  assert.equal(await repo.activeSyncRun('alpha'), undefined);
 });

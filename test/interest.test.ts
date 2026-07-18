@@ -30,8 +30,8 @@ const ACCOUNT = 'test-acct';
 const ME = 'al@example.com';
 const NOW = Date.UTC(2026, 5, 15); // fixed clock for deterministic recency
 
-function freshRepo() {
-  return new Repo(openDb({ path: ':memory:' }));
+async function freshRepo() {
+  return new Repo(await openDb({ path: ':memory:' }));
 }
 
 /** A baseline feature record (a single read received message, nothing else). */
@@ -53,7 +53,7 @@ function baseFeatures(over = {}) {
 
 // ---- pure scoring math ----------------------------------------------------
 
-test('a replied-to Correspondent outranks a never-opened newsletter', () => {
+test('a replied-to Correspondent outranks a never-opened newsletter', async () => {
   // The headline ordering property (CONTEXT.md, PLAN §10).
   const correspondent = scoreContact(
     baseFeatures({
@@ -79,7 +79,7 @@ test('a replied-to Correspondent outranks a never-opened newsletter', () => {
   assert.ok(correspondent > newsletter, 'correspondent ranks above newsletter');
 });
 
-test('replied + initiated are strong positive signals', () => {
+test('replied + initiated are strong positive signals', async () => {
   const none = scoreContact(baseFeatures());
   const replied = scoreContact(baseFeatures({ msgsSent: 3, repliedCount: 3 }));
   const initiated = scoreContact(baseFeatures({ msgsSent: 3, initiatedCount: 3 }));
@@ -87,7 +87,7 @@ test('replied + initiated are strong positive signals', () => {
   assert.ok(initiated > none, 'initiating lifts the score');
 });
 
-test('starred and important lift the score; important outweighs starred', () => {
+test('starred and important lift the score; important outweighs starred', async () => {
   const none = scoreContact(baseFeatures({ msgsReceived: 4, readCount: 4 }));
   const starred = scoreContact(baseFeatures({ msgsReceived: 4, readCount: 4, starredCount: 4 }));
   const important = scoreContact(baseFeatures({ msgsReceived: 4, readCount: 4, importantCount: 4 }));
@@ -96,7 +96,7 @@ test('starred and important lift the score; important outweighs starred', () => 
   assert.ok(important > starred, 'IMPORTANT (medium+) outweighs STARRED (+)');
 });
 
-test('read-rate raises the score; a fully-unread contact scores lower', () => {
+test('read-rate raises the score; a fully-unread contact scores lower', async () => {
   const read = scoreContact(baseFeatures({ msgsReceived: 10, readCount: 10 }));
   const halfRead = scoreContact(baseFeatures({ msgsReceived: 10, readCount: 5 }));
   const unread = scoreContact(baseFeatures({ msgsReceived: 10, readCount: 0 }));
@@ -104,7 +104,7 @@ test('read-rate raises the score; a fully-unread contact scores lower', () => {
   assert.ok(halfRead > unread, 'partial read beats never-opened');
 });
 
-test('the bulk penalty scales with the fraction of bulk mail', () => {
+test('the bulk penalty scales with the fraction of bulk mail', async () => {
   const clean = scoreContact(baseFeatures({ msgsReceived: 10, readCount: 10, bulkCount: 0 }));
   const halfBulk = scoreContact(baseFeatures({ msgsReceived: 10, readCount: 10, bulkCount: 5 }));
   const allBulk = scoreContact(baseFeatures({ msgsReceived: 10, readCount: 10, bulkCount: 10 }));
@@ -114,7 +114,7 @@ test('the bulk penalty scales with the fraction of bulk mail', () => {
   assert.ok(Math.abs((clean - allBulk) - Math.abs(W_BULK)) < 1e-9, 'full bulk = full W_BULK delta');
 });
 
-test('never-opened (all unread, never written back) stacks an extra penalty', () => {
+test('never-opened (all unread, never written back) stacks an extra penalty', async () => {
   // Same received volume, all unread, all non-bulk: the never-opened penalty
   // applies on top.
   const neverOpened = scoreContact(baseFeatures({ msgsReceived: 5, readCount: 0, bulkCount: 0 }));
@@ -126,7 +126,7 @@ test('never-opened (all unread, never written back) stacks an extra penalty', ()
   assert.ok(baseline - neverOpened >= Math.abs(W_NEVER_OPENED) - 1e-9, 'replying suppresses never-opened penalty');
 });
 
-test('recency: a recent contact outscores an identical stale one', () => {
+test('recency: a recent contact outscores an identical stale one', async () => {
   const recent = scoreContact(baseFeatures({ msgsReceived: 10, readCount: 10, lastSeenMs: NOW }));
   const stale = scoreContact(
     baseFeatures({ msgsReceived: 10, readCount: 10, lastSeenMs: NOW - 365 * 86_400_000 }),
@@ -134,7 +134,7 @@ test('recency: a recent contact outscores an identical stale one', () => {
   assert.ok(recent > stale, 'recent correspondence ranks higher');
 });
 
-test('scoreContact is pure: same input → same output, no clock read', () => {
+test('scoreContact is pure: same input → same output, no clock read', async () => {
   const f = baseFeatures({ msgsSent: 2, repliedCount: 2 });
   assert.equal(scoreContact(f), scoreContact({ ...f }));
 });
@@ -146,8 +146,8 @@ test('scoreContact is pure: same input → same output, no clock read', () => {
  * initiated with, and a never-opened newsletter — then aggregate so the
  * interest pass has contacts to score.
  */
-function seed(repo, m) {
-  repo.upsertMessage({
+async function seed(repo, m) {
+  await repo.upsertMessage({
     account: ACCOUNT,
     gmailMessageId: m.id,
     threadId: m.threadId ?? null,
@@ -165,20 +165,20 @@ function seed(repo, m) {
   });
 }
 
-function seedWorld(repo) {
-  seed(repo, {
+async function seedWorld(repo) {
+  await seed(repo, {
     id: 'a-recv', threadId: 'thread-a', internalDate: NOW - 1000,
     from: 'Jordan Partner <jordan@partner.example.com>', to: `Al <${ME}>`,
     subject: 'Deposit terms', direction: 'received', important: true,
   });
-  seed(repo, {
+  await seed(repo, {
     id: 'a-sent', threadId: 'thread-a', internalDate: NOW - 500,
     from: `Al <${ME}>`, to: 'Jordan Partner <jordan@partner.example.com>',
     subject: 'Re: Deposit terms', direction: 'sent',
   });
   // Newsletter: many received, all unread, list/updates → never-opened + bulk.
   for (let i = 0; i < 5; i++) {
-    seed(repo, {
+    await seed(repo, {
       id: `n-${i}`, threadId: `thread-n-${i}`, internalDate: NOW - 10_000 - i,
       from: 'Expedition Weekly <news@bulletin.example.org>',
       to: 'subscribers@bulletin.example.org',
@@ -186,16 +186,16 @@ function seedWorld(repo) {
       category: 'promotions', unread: true,
     });
   }
-  aggregateAccount(repo, ACCOUNT, [ME]);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
 }
 
-test('interestPass persists engagement_score and ranks correspondent over newsletter', () => {
-  const repo = freshRepo();
-  seedWorld(repo);
-  const result = interestPass(repo, ACCOUNT, { now: new Date(NOW) });
+test('interestPass persists engagement_score and ranks correspondent over newsletter', async () => {
+  const repo = await freshRepo();
+  await seedWorld(repo);
+  const result = await interestPass(repo, ACCOUNT, { now: new Date(NOW) });
 
-  const jordan = repo.getEngagementScore(ACCOUNT, 'jordan@partner.example.com');
-  const news = repo.getEngagementScore(ACCOUNT, 'news@bulletin.example.org');
+  const jordan = await repo.getEngagementScore(ACCOUNT, 'jordan@partner.example.com');
+  const news = await repo.getEngagementScore(ACCOUNT, 'news@bulletin.example.org');
   assert.equal(typeof jordan, 'number', 'score persisted onto contacts');
   assert.ok(jordan > news, 'correspondent outranks newsletter in the DB');
   assert.ok(news < 0, 'never-opened bulk newsletter is negative');
@@ -205,19 +205,19 @@ test('interestPass persists engagement_score and ranks correspondent over newsle
   assert.equal(scoredJordan.engagementScore, jordan);
 });
 
-test('interestPass appends exactly one snapshot row per contact each run', () => {
-  const repo = freshRepo();
-  seedWorld(repo);
+test('interestPass appends exactly one snapshot row per contact each run', async () => {
+  const repo = await freshRepo();
+  await seedWorld(repo);
 
-  interestPass(repo, ACCOUNT, { now: new Date(NOW) });
-  assert.equal(repo.countSnapshots(ACCOUNT, 'jordan@partner.example.com'), 1, 'one snapshot after first run');
+  await interestPass(repo, ACCOUNT, { now: new Date(NOW) });
+  assert.equal(await repo.countSnapshots(ACCOUNT, 'jordan@partner.example.com'), 1, 'one snapshot after first run');
 
   // A later run (distinct taken_at) appends a second snapshot generation.
-  interestPass(repo, ACCOUNT, { now: new Date(NOW + 86_400_000) });
-  assert.equal(repo.countSnapshots(ACCOUNT, 'jordan@partner.example.com'), 2, 'second run appends, never overwrites');
+  await interestPass(repo, ACCOUNT, { now: new Date(NOW + 86_400_000) });
+  assert.equal(await repo.countSnapshots(ACCOUNT, 'jordan@partner.example.com'), 2, 'second run appends, never overwrites');
 
   // The snapshot mirrors the score's source aggregates.
-  const snap = repo.db
+  const snap = await repo.driver
     .prepare(
       `SELECT msgs_received, read_count, replied_count, engagement_score
          FROM contact_stats_snapshot
@@ -229,30 +229,30 @@ test('interestPass appends exactly one snapshot row per contact each run', () =>
   assert.equal(typeof snap.engagement_score, 'number');
 });
 
-test('recompute is idempotent: same index state → same score', () => {
-  const repo = freshRepo();
-  seedWorld(repo);
-  const first = interestPass(repo, ACCOUNT, { now: new Date(NOW) });
-  const second = interestPass(repo, ACCOUNT, { now: new Date(NOW) });
+test('recompute is idempotent: same index state → same score', async () => {
+  const repo = await freshRepo();
+  await seedWorld(repo);
+  const first = await interestPass(repo, ACCOUNT, { now: new Date(NOW) });
+  const second = await interestPass(repo, ACCOUNT, { now: new Date(NOW) });
   const byAddr = (r) => Object.fromEntries(r.scored.map((s) => [s.address, s.engagementScore]));
   assert.deepEqual(byAddr(second), byAddr(first), 're-running with same clock + state converges');
 });
 
-test('the score is a SEED, not a fetch trigger: no body is enriched (D13)', () => {
-  const repo = freshRepo();
-  seedWorld(repo);
-  interestPass(repo, ACCOUNT, { now: new Date(NOW) });
+test('the score is a SEED, not a fetch trigger: no body is enriched (D13)', async () => {
+  const repo = await freshRepo();
+  await seedWorld(repo);
+  await interestPass(repo, ACCOUNT, { now: new Date(NOW) });
   // Every message remains at meta — scoring never promoted a body.
-  const fullCount = repo.db
+  const fullCount = await repo.driver
     .prepare(`SELECT count(*) c FROM messages WHERE account = ? AND body_state != 'meta'`)
     .get(ACCOUNT);
   assert.equal(fullCount.c, 0, 'scoring enriched nothing');
 });
 
-test('contactScoringRows computes bulk_count from received bulk mail', () => {
-  const repo = freshRepo();
-  seedWorld(repo);
-  const rows = repo.contactScoringRows(ACCOUNT);
+test('contactScoringRows computes bulk_count from received bulk mail', async () => {
+  const repo = await freshRepo();
+  await seedWorld(repo);
+  const rows = await repo.contactScoringRows(ACCOUNT);
   const news = rows.find((r) => r.address === 'news@bulletin.example.org');
   assert.equal(news.bulk_count, 5, 'all five newsletter issues are bulk');
   const jordan = rows.find((r) => r.address === 'jordan@partner.example.com');

@@ -111,15 +111,19 @@ function describeScope(scope: MailScope | undefined): string | null {
  * check: node:sqlite executes statements serially, and the IMMEDIATE write lock
  * serialises any concurrent file-backed writer. Returns the new run's id.
  */
-function acquireLock(repo: Repo, account: string, selector: string | null): number {
-  return repo.transaction(() => {
-    const held = repo.activeSyncRun(account);
+async function acquireLock(
+  repo: Repo,
+  account: string,
+  selector: string | null,
+): Promise<number> {
+  return await repo.transaction(async () => {
+    const held = await repo.activeSyncRun(account);
     if (held != null) {
       throw new SyncError(
         `a sync for account "${account}" is already in progress (sync_runs id ${held}); refusing to start a second concurrent run`,
       );
     }
-    return repo.startSyncRun({ account, phase: 'sync', selector });
+    return await repo.startSyncRun({ account, phase: 'sync', selector });
   });
 }
 
@@ -131,15 +135,15 @@ function acquireLock(repo: Repo, account: string, selector: string | null): numb
  * while accidentally pointing the label at a *different* mailbox is blocked
  * before any row is written. The provider may change; the mailbox may not.
  */
-function guardAccountIdentity(
+async function guardAccountIdentity(
   repo: Repo,
   account: string,
   address: string,
   provider: string,
-): void {
-  const existing = repo.getAccountIdentity(account);
+): Promise<void> {
+  const existing = await repo.getAccountIdentity(account);
   if (!existing) {
-    repo.setAccountIdentity(account, address, provider);
+    await repo.setAccountIdentity(account, address, provider);
     return;
   }
   if (existing.address.toLowerCase() !== address.toLowerCase()) {
@@ -151,7 +155,7 @@ function guardAccountIdentity(
     );
   }
   // Same mailbox, possibly a new transport: refresh provider + last_verified.
-  repo.setAccountIdentity(account, existing.address, provider);
+  await repo.setAccountIdentity(account, existing.address, provider);
 }
 
 /**
@@ -190,7 +194,7 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
       // (account, gmail_message_id) and Gmail ids are provider-independent, so a
       // switch reuses every row. But the bound *mailbox* may not change: that
       // would mix two mailboxes under one label. Block the mismatch up front.
-      guardAccountIdentity(repo, account, identity.address, source.provider);
+      await guardAccountIdentity(repo, account, identity.address, source.provider);
     }
   } catch (err) {
     // A deliberate identity mismatch is fatal (protects the cache); any other
@@ -198,7 +202,7 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
     if (err instanceof SyncError) throw err;
   }
 
-  const runId = acquireLock(repo, account, selector);
+  const runId = await acquireLock(repo, account, selector);
 
   let fetched = 0;
   let indexed = 0;
@@ -219,7 +223,7 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
         });
 
         const labels = meta.labels;
-        repo.upsertMessage({
+        await repo.upsertMessage({
           account,
           gmailMessageId: meta.id,
           threadId: meta.threadId,
@@ -252,12 +256,12 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
     }
     await flush();
 
-    repo.finishSyncRun(runId, { fetched, indexed });
+    await repo.finishSyncRun(runId, { fetched, indexed });
   } catch (err) {
     // Always close the audit row so the lock is released, then rethrow.
     const message = err instanceof Error ? err.message : String(err);
     try {
-      repo.finishSyncRun(runId, { fetched, indexed, error: message });
+      await repo.finishSyncRun(runId, { fetched, indexed, error: message });
     } catch {
       // If we cannot even close the row (e.g. the DB is gone), there is nothing
       // more to do; surface the original failure below.
@@ -272,13 +276,13 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
   // — safe on every sync. The probed own-address(es) keep the user out of their
   // own contact list and feed Correspondent detection on Sent mail (D11).
   if (options.aggregate !== false) {
-    aggregateAccount(repo, account, knownAddresses);
+    await aggregateAccount(repo, account, knownAddresses);
     // Interest engine (M2.2, D12): recompute every contact's engagement_score
     // from the now-current aggregates and append a per-contact snapshot. Still
     // INDEX-ONLY and idempotent; the score is a curation SEED, never a fetch
     // trigger (D13), so this never enriches. Gated on the same `aggregate` flag
     // since it consumes the aggregates this run just rebuilt.
-    interestPass(repo, account);
+    await interestPass(repo, account);
 
     // Demotion (ADR-0003): once a bulk body has a summary older than the grace
     // window, drop the distilled body — summary-only is the end state, and the
@@ -287,7 +291,7 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
     // no-op. Gated on the same aggregate flag since eligibility reads the
     // curation + thread-participation state the aggregation just rebuilt.
     if (options.compact !== false) {
-      compact(repo, account);
+      await compact(repo, account);
     }
   }
 

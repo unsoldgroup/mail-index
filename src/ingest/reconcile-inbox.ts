@@ -52,8 +52,13 @@ export interface ReconcileInboxResult {
 }
 
 /** Recompute `category` for a label set and persist labels + category together. */
-function writeLabels(repo: Repo, account: string, id: string, labels: string[]): void {
-  repo.setMessageLabels(account, id, labels, classifyCategory(labels));
+async function writeLabels(
+  repo: Repo,
+  account: string,
+  id: string,
+  labels: string[],
+): Promise<void> {
+  await repo.setMessageLabels(account, id, labels, classifyCategory(labels));
 }
 
 /**
@@ -72,7 +77,7 @@ export async function reconcileInbox(options: ReconcileInboxOptions): Promise<Re
   }
 
   // 2. Index inbox ids we have never seen (the only fetch this pass does).
-  const existing = repo.existingMessageIds(account, [...live]);
+  const existing = await repo.existingMessageIds(account, [...live]);
   const toIndex = [...live].filter((id) => !existing.has(id));
   let added = 0;
   for (let i = 0; i < toIndex.length; i += batchSize) {
@@ -84,7 +89,7 @@ export async function reconcileInbox(options: ReconcileInboxOptions): Promise<Re
         from: meta.from,
         knownAddresses,
       });
-      repo.upsertMessage({
+      await repo.upsertMessage({
         account,
         gmailMessageId: meta.id,
         threadId: meta.threadId,
@@ -110,14 +115,14 @@ export async function reconcileInbox(options: ReconcileInboxOptions): Promise<Re
   }
 
   // 3. Diff stored-INBOX against live: drop archived, restore re-inboxed.
-  const storedInbox = repo.inboxMessageIds(account);
+  const storedInbox = await repo.inboxMessageIds(account);
   let archived = 0;
   for (const id of storedInbox) {
     if (live.has(id)) continue;
-    const row = repo.getMessage(account, id);
+    const row = await repo.getMessage(account, id);
     if (!row) continue;
     const labels = parseLabels(row.labels_json).filter((l) => l !== 'INBOX');
-    writeLabels(repo, account, id, labels);
+    await writeLabels(repo, account, id, labels);
     archived += 1;
   }
 
@@ -125,12 +130,12 @@ export async function reconcileInbox(options: ReconcileInboxOptions): Promise<Re
   let restored = 0;
   for (const id of live) {
     if (!existing.has(id) || storedInboxSet.has(id)) continue; // new ids already have INBOX
-    const row = repo.getMessage(account, id);
+    const row = await repo.getMessage(account, id);
     if (!row) continue;
     const labels = parseLabels(row.labels_json);
     if (labels.includes('INBOX')) continue;
     labels.push('INBOX');
-    writeLabels(repo, account, id, labels);
+    await writeLabels(repo, account, id, labels);
     restored += 1;
   }
 

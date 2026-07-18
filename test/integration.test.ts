@@ -140,7 +140,7 @@ function fakeSource(): FakeMailSource {
 async function withTmpRepo(body: (repo: Repo) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'mail-index-int-'));
   const path = join(dir, 'mail.sqlite');
-  const db = openDb({ path });
+  const db = await openDb({ path });
   try {
     await body(new Repo(db));
   } finally {
@@ -149,7 +149,7 @@ async function withTmpRepo(body: (repo: Repo) => Promise<void>): Promise<void> {
   }
 }
 
-test('full pipeline: sync → enrich(rule=direct) → search over a synthetic mailbox', async () => {
+test('full pipeline: sync → await enrich(rule=direct) → search over a synthetic mailbox', async () => {
   await withTmpRepo(async (repo) => {
     // ----- Phase 1: metadata sweep -------------------------------------------
     const syncResult = await syncMetadata({ account: ACCOUNT, source: fakeSource(), repo });
@@ -157,48 +157,48 @@ test('full pipeline: sync → enrich(rule=direct) → search over a synthetic ma
     // Meta counts: every fixture message indexed, none missed.
     assert.equal(syncResult.fetched, MESSAGE_COUNT);
     assert.equal(syncResult.indexed, MESSAGE_COUNT);
-    assert.equal(repo.countMessages(ACCOUNT), MESSAGE_COUNT);
+    assert.equal(await repo.countMessages(ACCOUNT), MESSAGE_COUNT);
 
     // Everything starts at body_state='meta' with no body_text.
     for (const m of FIXTURES.messages) {
-      const row = repo.getMessage(ACCOUNT, m.id);
+      const row = await repo.getMessage(ACCOUNT, m.id);
       assert.ok(row, `${m.id} indexed`);
       assert.equal(row.body_state, 'meta', `${m.id} starts meta`);
       assert.equal(row.body_text, null, `${m.id} has no body yet`);
     }
 
     // Classification: category / is_list / direction.
-    const direct = repo.getMessage(ACCOUNT, 'm-direct');
+    const direct = await repo.getMessage(ACCOUNT, 'm-direct');
     assert.equal(direct?.category, 'personal');
     assert.equal(direct?.is_list, 0);
     assert.equal(direct?.direction, 'received');
     assert.equal(direct?.important, 1); // IMPORTANT label snapshotted (D12)
 
-    const list = repo.getMessage(ACCOUNT, 'm-list');
+    const list = await repo.getMessage(ACCOUNT, 'm-list');
     assert.equal(list?.category, 'updates');
     assert.equal(list?.is_list, 1, 'List-* headers → is_list');
     assert.equal(list?.unread, 1); // UNREAD label snapshotted (D12)
 
-    const promo = repo.getMessage(ACCOUNT, 'm-promo');
+    const promo = await repo.getMessage(ACCOUNT, 'm-promo');
     assert.equal(promo?.category, 'promotions');
     assert.equal(promo?.is_list, 0);
 
-    const sent = repo.getMessage(ACCOUNT, 'm-sent');
+    const sent = await repo.getMessage(ACCOUNT, 'm-sent');
     assert.equal(sent?.direction, 'sent', 'own-address sender + SENT → sent');
 
     // FTS hits on snippets while still meta (body not yet fetched).
     assert.ok(
-      repo.searchMessages('Antarctica', { account: ACCOUNT }).some((m) => m.gmail_message_id === 'm-direct'),
+      (await repo.searchMessages('Antarctica', { account: ACCOUNT })).some((m) => m.gmail_message_id === 'm-direct'),
       'subject term matches at meta',
     );
     assert.ok(
-      repo.searchMessages('zodiac', { account: ACCOUNT }).some((m) => m.gmail_message_id === 'm-list'),
+      (await repo.searchMessages('zodiac', { account: ACCOUNT })).some((m) => m.gmail_message_id === 'm-list'),
       'snippet term matches at meta',
     );
     // A body-only term does NOT match before enrich (only snippet is indexed).
     // "Wire" lives in m-direct's body but not its subject/snippet/sender.
     assert.equal(
-      repo.searchMessages('Wire', { account: ACCOUNT }).length,
+      (await repo.searchMessages('Wire', { account: ACCOUNT })).length,
       0,
       'body-only term absent until enrich',
     );
@@ -216,9 +216,13 @@ test('full pipeline: sync → enrich(rule=direct) → search over a synthetic ma
     // m-sent is personal+received-by-predicate but here it carries SENT — it is
     // still direct (is_list=0, personal) so it is promoted too. Assert exactly
     // which rows flipped rather than a bare count.
-    const fullAfterDirect = FIXTURES.messages
-      .map((m) => m.id)
-      .filter((id) => repo.getMessage(ACCOUNT, id)?.body_state === 'full');
+    const states = await Promise.all(
+      FIXTURES.messages.map(async (m) => ({
+        id: m.id,
+        state: (await repo.getMessage(ACCOUNT, m.id))?.body_state,
+      })),
+    );
+    const fullAfterDirect = states.filter((m) => m.state === 'full').map((m) => m.id);
     assert.deepEqual(
       [...fullAfterDirect].sort(),
       ['m-direct', 'm-sent'].sort(),
@@ -227,11 +231,11 @@ test('full pipeline: sync → enrich(rule=direct) → search over a synthetic ma
     assert.equal(enrichResult.enriched, 2);
 
     // The list/newsletter and promotions rows stay meta — never promoted.
-    assert.equal(repo.getMessage(ACCOUNT, 'm-list')?.body_state, 'meta', 'list excluded');
-    assert.equal(repo.getMessage(ACCOUNT, 'm-promo')?.body_state, 'meta', 'promotions excluded');
+    assert.equal((await repo.getMessage(ACCOUNT, 'm-list'))?.body_state, 'meta', 'list excluded');
+    assert.equal((await repo.getMessage(ACCOUNT, 'm-promo'))?.body_state, 'meta', 'promotions excluded');
 
     // Distilled body stored (quoted history + signature stripped), not raw bytes.
-    const enrichedDirect = repo.getMessage(ACCOUNT, 'm-direct');
+    const enrichedDirect = await repo.getMessage(ACCOUNT, 'm-direct');
     assert.ok(enrichedDirect?.body_text?.includes('Confirming the 20% deposit'), 'real content kept');
     assert.ok(!enrichedDirect?.body_text?.includes('Can you confirm'), 'quoted history removed');
     assert.ok(!enrichedDirect?.body_text?.includes('VP Charters'), 'signature removed');
@@ -240,20 +244,20 @@ test('full pipeline: sync → enrich(rule=direct) → search over a synthetic ma
     // Distilled body is now FTS-searchable — the same body-only term that was
     // absent at meta now matches the enriched row.
     assert.ok(
-      repo.searchMessages('Wire', { account: ACCOUNT }).some((m) => m.gmail_message_id === 'm-direct'),
+      (await repo.searchMessages('Wire', { account: ACCOUNT })).some((m) => m.gmail_message_id === 'm-direct'),
       'distilled body term now matches via FTS after enrich',
     );
 
     // ----- No-downgrade on re-sync -------------------------------------------
     await syncMetadata({ account: ACCOUNT, source: fakeSource(), repo });
-    const afterResync = repo.getMessage(ACCOUNT, 'm-direct');
+    const afterResync = await repo.getMessage(ACCOUNT, 'm-direct');
     assert.equal(afterResync?.body_state, 'full', 'no downgrade full→meta on re-sync');
     assert.ok(afterResync?.body_text?.includes('Confirming the 20% deposit'), 'body preserved');
     // Re-sync is idempotent — still no duplicate rows.
-    assert.equal(repo.countMessages(ACCOUNT), MESSAGE_COUNT, 'no duplicate rows on re-sync');
+    assert.equal(await repo.countMessages(ACCOUNT), MESSAGE_COUNT, 'no duplicate rows on re-sync');
 
     // ----- Search returns ranked hits ----------------------------------------
-    const hits = repo.searchMessages('deposit', { account: ACCOUNT });
+    const hits = await repo.searchMessages('deposit', { account: ACCOUNT });
     assert.ok(hits.length >= 1, 'ranked search returns hits');
     // bm25 ordering is stable; the charter thread mail is the relevant match.
     assert.ok(
@@ -262,7 +266,7 @@ test('full pipeline: sync → enrich(rule=direct) → search over a synthetic ma
     );
 
     // ----- sync_runs audit rows for BOTH phases ------------------------------
-    const phases = repo.db
+    const phases = await repo.driver
       .prepare('SELECT phase, count(*) AS c FROM sync_runs WHERE account = ? GROUP BY phase')
       .all(ACCOUNT) as { phase: string; c: number }[];
     const byPhase = new Map(phases.map((p) => [p.phase, p.c]));
@@ -271,12 +275,12 @@ test('full pipeline: sync → enrich(rule=direct) → search over a synthetic ma
 
     // Both phases left closed (lock-released) rows, and the enrich row records
     // its selector.
-    const open = repo.db
+    const open = await repo.driver
       .prepare('SELECT count(*) AS c FROM sync_runs WHERE account = ? AND finished_at IS NULL')
       .get(ACCOUNT) as { c: number };
     assert.equal(open.c, 0, 'every run closed → no held locks');
 
-    const enrichRow = repo.db
+    const enrichRow = await repo.driver
       .prepare('SELECT phase, selector FROM sync_runs WHERE id = ?')
       .get(enrichResult.runId) as { phase: string; selector: string | null };
     assert.equal(enrichRow.phase, 'enrich');
