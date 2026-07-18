@@ -47,6 +47,11 @@ const SRC_PROC_ALLOW = new Set([
   'cli/proc.ts', // onboarding: spawns gog/brew (mail-index setup) — the single auditable seam
 ]);
 
+/** Core (src/) network seams — the local HTTP MCP transport (streamable HTTP, PR #10). */
+const SRC_NETWORK_ALLOW = new Set([
+  'mcp/server.ts', // node:http server for the streamable-HTTP MCP transport — serves, never fetches
+]);
+
 /** The ONE bin/ file allowed to reach the network: the self-updater. */
 const BIN_NETWORK_ALLOW = new Set(['selfupdate.mjs']);
 /** bin/ files allowed to spawn: the updater (git/npm/build) + the launcher that fires it. */
@@ -82,6 +87,7 @@ const binFiles = load(BIN, '.mjs');
 test('no direct network primitives anywhere in src/ (core is egress-free)', () => {
   const hits: string[] = [];
   for (const { rel, code } of srcFiles) {
+    if (SRC_NETWORK_ALLOW.has(rel)) continue;
     for (const { re, what } of NETWORK) {
       if (re.test(code)) hits.push(`${rel} → ${what}`);
     }
