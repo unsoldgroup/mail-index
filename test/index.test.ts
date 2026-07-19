@@ -28,6 +28,7 @@ const TABLES = [
   'sync_runs',
   'account_identity',
   'labels',
+  'google_tokens',
 ];
 
 test('migrations run clean on a fresh db and create every PLAN §6 table', async () => {

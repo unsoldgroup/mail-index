@@ -7,6 +7,7 @@ import { SCHEMA_VERSION } from '../dist/index/schema.js';
 import { toolList } from '../dist/mcp/server.js';
 
 const bearer = 'development-secret-with-enough-entropy';
+const oauthSecrets = { TOKEN_ENC_KEY: Buffer.alloc(32, 3).toString('base64'), GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret' };
 
 async function fixture() {
   const mf = new Miniflare({
@@ -20,6 +21,7 @@ async function fixture() {
     OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'),
     SYNC_QUEUE: { send: async () => undefined },
     DEV_BEARER_TOKEN: bearer,
+    ...oauthSecrets,
   };
   const ctx = { waitUntil() {}, passThroughOnException() {} };
   return { mf, env, ctx };

@@ -447,6 +447,24 @@ const m009_labels: Migration = {
   },
 };
 
+const m010_google_tokens: Migration = {
+  version: 10,
+  name: 'encrypted Google OAuth grants',
+  up: async (db) => {
+    await db.exec(`
+      CREATE TABLE google_tokens (
+        account TEXT PRIMARY KEY,
+        address TEXT NOT NULL,
+        scopes TEXT NOT NULL,
+        refresh_token_ciphertext BLOB NOT NULL,
+        iv BLOB NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+  },
+};
+
 /** All migrations, in ascending version order. Append-only. */
 export const MIGRATIONS: readonly Migration[] = [
   m001_initial,
@@ -458,6 +476,7 @@ export const MIGRATIONS: readonly Migration[] = [
   m007_porter_fts,
   m008_topics,
   m009_labels,
+  m010_google_tokens,
 ];
 
 /**
