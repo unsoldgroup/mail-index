@@ -50,7 +50,7 @@
     "pretest": "npm run build && npm run worker:build",
     "test": "node --disable-warning=ExperimentalWarning --test",
     "typecheck": "tsc --noEmit && tsc -p worker/tsconfig.json --noEmit",
-    "worker:build": "tsc -p worker/tsconfig.json",
+    "worker:build": "tsc -p worker/tsconfig.json && esbuild worker/oauth.ts --bundle --format=esm --platform=node --target=es2023 --external:cloudflare:* --outfile=dist-worker-bundle/index.js",
     "lint": "eslint .",
     "format": "prettier --write .",
     "bundle": "tsc && node scripts/bundle.mjs"
@@ -70,6 +70,7 @@
     "wrangler": "^4.112.0"
   },
   "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.8.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "graphology": "^0.26.0",
     "graphology-communities-louvain": "^2.0.2",

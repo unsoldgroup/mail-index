@@ -38,18 +38,26 @@ async function hmacKey(encoded: string) {
 export interface OAuthState { account: string; writes: boolean; redirectUri: string; expiresAt: number }
 
 export async function signState(state: OAuthState, encodedKey: string): Promise<string> {
+  return signPayload(state, encodedKey);
+}
+
+export async function signPayload(state: object, encodedKey: string): Promise<string> {
   const payload = Buffer.from(JSON.stringify(state)).toString('base64url');
   const signature = await crypto.subtle.sign('HMAC', await hmacKey(encodedKey), new TextEncoder().encode(payload));
   return `${payload}.${Buffer.from(signature).toString('base64url')}`;
 }
 
 export async function verifyState(value: string, encodedKey: string): Promise<OAuthState> {
+  return verifyPayload<OAuthState>(value, encodedKey);
+}
+
+export async function verifyPayload<T>(value: string, encodedKey: string): Promise<T> {
   const [payload, signature] = value.split('.');
   if (!payload || !signature) throw new Error('Invalid OAuth state');
   const valid = await crypto.subtle.verify('HMAC', await hmacKey(encodedKey), Buffer.from(signature, 'base64url'), new TextEncoder().encode(payload));
   if (!valid) throw new Error('Invalid OAuth state');
-  const state = JSON.parse(Buffer.from(payload, 'base64url').toString()) as OAuthState;
-  if (state.expiresAt < Date.now()) throw new Error('Expired OAuth state');
+  const state = JSON.parse(Buffer.from(payload, 'base64url').toString()) as T & { expiresAt?: number };
+  if (state.expiresAt != null && state.expiresAt < Date.now()) throw new Error('Expired OAuth state');
   return state;
 }
 

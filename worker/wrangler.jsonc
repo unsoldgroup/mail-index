@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/wrangler/config-schema.json",
   "name": "mail-index",
-  "main": "index.ts",
+  "main": "oauth.ts",
   "compatibility_date": "2026-07-18",
   "compatibility_flags": ["nodejs_compat"],
   "d1_databases": [
@@ -16,9 +16,9 @@
   ],
   "observability": { "enabled": true, "head_sampling_rate": 1 }
   ,"triggers": { "crons": ["*/15 * * * *"] }
-  ,"vars": { "SYNC_INTERVAL": "15m" }
+  ,"vars": { "SYNC_INTERVAL": "15m", "OPERATOR_EMAILS": "operator@example.com" }
 
   // Secrets (set with `wrangler secret put`):
   // TOKEN_ENC_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET.
-  // TEMPORARY — DEV_BEARER_TOKEN is replaced by Ticket 007 MCP OAuth.
+  // OPERATOR_EMAILS is a comma-separated non-secret allowlist variable.
 }
