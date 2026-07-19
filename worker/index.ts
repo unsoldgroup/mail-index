@@ -6,9 +6,11 @@ import { D1Driver, type D1DatabaseBinding } from '../src/index/drivers/d1.js';
 import { Repo } from '../src/index/repo.js';
 import { getUserVersion, runMigrations } from '../src/index/migrations.js';
 import { buildServer } from '../src/mcp/server.js';
+import type { ToolContext } from '../src/mcp/tools.js';
 import { GmailRestAdapter } from '../src/source/adapters/gmail-rest/index.js';
+import { InsufficientScopeError } from '../src/source/index.js';
 import { accessTokenProvider, exchangeToken, GMAIL_MODIFY, GMAIL_READONLY, saveGrant, signPayload, signState, verifyGoogleIdentity, verifyPayload, verifyState } from './google-oauth.js';
-import { enqueueScheduledSyncs, jobStatus, runJob, type JobMessage } from './jobs.js';
+import { enqueueJob, enqueueScheduledSyncs, jobStatus, runJob, type JobMessage } from './jobs.js';
 
 const VERSION = '1.4.0';
 const SESSION_COOKIE = 'mail_index_operator';
@@ -45,11 +47,8 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
   const sid = request.headers.get('mcp-session-id');
   let transport = sid ? transports.get(sid) : undefined;
   if (!transport) {
-    const { driver, repo } = await storage(env);
-    const connected = await driver.prepare('SELECT account FROM google_tokens ORDER BY account').all() as { account: string }[];
-    const labels = connected.length ? connected.map((row) => row.account) : ['default'];
-    const accounts = Object.fromEntries(labels.map((account) => [account, { adapter: 'gmail-rest' as const, account }]));
-    const server = buildServer({ repo, config: { accounts }, buildSource: (account) => new GmailRestAdapter({ fetchImpl: fetch, tokenProvider: accessTokenProvider(driver, account.account ?? '', env, fetch) }), jobStatus: (account) => jobStatus(env, account) });
+    const context = await buildWorkerToolContext(env);
+    const server = buildServer(context);
     transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: randomUUID, enableJsonResponse: true,
       onsessioninitialized: (id) => { transports.set(id, transport!); servers.set(id, server); },
       onsessionclosed: (id) => { transports.delete(id); const active = servers.get(id); servers.delete(id); void active?.close(); },
@@ -57,6 +56,20 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
     await server.connect(transport);
   }
   return transport.handleRequest(request);
+}
+
+export async function buildWorkerToolContext(env: Env, fetchImpl: typeof fetch = fetch): Promise<ToolContext> {
+  const { driver, repo } = await storage(env);
+  const connected = await driver.prepare('SELECT account,scopes FROM google_tokens ORDER BY account').all() as { account: string; scopes: string }[];
+  const labels = connected.length ? connected.map((row) => row.account) : ['default'];
+  const accounts = Object.fromEntries(labels.map((account) => [account, { adapter: 'gmail-rest' as const, account }]));
+  const scopes = new Map(connected.map((row) => [row.account, row.scopes]));
+  return { repo, config: { accounts }, buildSource: (account) => {
+    const label = account.account ?? '';
+    const source = new GmailRestAdapter({ fetchImpl, tokenProvider: accessTokenProvider(driver, label, env, fetchImpl) });
+    if (!scopes.get(label)?.includes(GMAIL_MODIFY)) Object.defineProperty(source, 'modify', { value: async () => { throw new InsufficientScopeError('gmail-rest', `/setup?account=${encodeURIComponent(label)}&writes=1`, 'Reconnect this Account with mailbox writes enabled.'); } });
+    return source;
+  }, jobStatus: (account) => jobStatus(env, account), enqueueJob: (kind, account, params) => enqueueJob(env, kind, account, params) };
 }
 
 export interface WorkerDependencies { fetchImpl?: typeof fetch }

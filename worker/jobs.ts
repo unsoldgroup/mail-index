@@ -14,6 +14,8 @@ export interface JobMessage { jobId: string; kind: JobKind; account: string; par
 
 export async function enqueueJob(env: Env, kind: JobKind, account: string, params: Record<string, unknown> = {}): Promise<string> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
+  const existing = await driver.prepare(`SELECT id FROM jobs WHERE kind=? AND account=? AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1`).get(kind, account) as { id: string } | undefined;
+  if (existing) return existing.id;
   const id = crypto.randomUUID();
   await driver.prepare(`INSERT INTO jobs(id,kind,account,params_json,status,progress_json,created_at) VALUES(?,?,?,?,?,?,?)`)
     .run(id, kind, account, JSON.stringify(params), 'queued', '{}', new Date().toISOString());

@@ -84,6 +84,7 @@ export class McpToolError extends Error {
  * `false` when it was debounced/declined (e.g. a sync is already running).
  */
 export type BackgroundSync = (account: string, since?: string) => boolean;
+export type EnqueueJob = (kind: 'sync' | 'backfill' | 'enrich_bulk', account: string, params?: Record<string, unknown>) => Promise<string>;
 
 /** Everything the tools read/write. INDEX-ONLY except the one O(1) enrich seam. */
 export interface ToolContext {
@@ -103,6 +104,7 @@ export interface ToolContext {
   now?: () => Date;
   /** Remote Deployment Job status; absent locally so the local response shape is unchanged. */
   jobStatus?: (account?: string) => Promise<unknown>;
+  enqueueJob?: EnqueueJob;
 }
 
 /** The freshness staleness threshold for reads (ADR-0005): "a few hours" (3h).
@@ -160,7 +162,7 @@ export interface Freshness {
   /** True when a sync for this account is in flight right now. */
   syncing: boolean;
   /** The CLI command to refresh this scope manually. */
-  refresh_command: string;
+  refresh_command: unknown;
 }
 
 /** A response carrying the ADR-0005 freshness stamp. */
@@ -197,9 +199,9 @@ async function withMeta<T extends object>(ctx: ToolContext, account: string | un
   const ageMs = asOf == null ? null : now - new Date(asOf).getTime();
   const stale = ageMs == null || ageMs > STALE_AFTER_MS;
   const syncing = acct != null && await ctx.repo.activeSyncRun(acct) != null;
-  const refresh_command = acct
-    ? handback('sync', '--account', acct)
-    : handback('sync', '--all-accounts');
+  const refresh_command: unknown = ctx.enqueueJob
+    ? { kind: 'sync', account: acct ?? null, status: 'available', poll: 'sync_status' }
+    : acct ? handback('sync', '--account', acct) : handback('sync', '--all-accounts');
 
   const meta: WithMeta = {
     index_as_of: asOf,
@@ -210,7 +212,14 @@ async function withMeta<T extends object>(ctx: ToolContext, account: string | un
   // INCREMENTAL sync. `since` = days elapsed + 1 day of overlap (idempotent
   // upsert makes re-fetching the boundary day harmless); a never-synced account
   // passes no `since`, so its first sweep is a correct initial full sync.
-  if (acct && stale && !syncing && ctx.backgroundSync) {
+  if (acct && stale && !syncing && ctx.enqueueJob) {
+    const since = asOf == null ? undefined : `${Math.ceil(ageMs! / 86_400_000) + 1}d`;
+    const jobId = await ctx.enqueueJob('sync', acct, since ? { since } : {});
+    meta.sync_started = true;
+    meta.eta_seconds = SYNC_ETA_SECONDS;
+    meta.freshness.syncing = true;
+    meta.freshness.refresh_command = { job_id: jobId, status: 'queued', poll: 'sync_status' };
+  } else if (acct && stale && !syncing && ctx.backgroundSync) {
     const since = asOf == null ? undefined : `${Math.ceil(ageMs! / 86_400_000) + 1}d`;
     if (ctx.backgroundSync(acct, since)) {
       meta.sync_started = true;

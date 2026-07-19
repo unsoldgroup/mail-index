@@ -9,6 +9,7 @@ import { toolList } from '../dist/mcp/server.js';
 const oauthSecrets = { TOKEN_ENC_KEY: Buffer.alloc(32, 3).toString('base64'), GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret' };
 
 async function fixture() {
+  const queued: unknown[] = [];
   const mf = new Miniflare({
     modules: true,
     script: 'export default { fetch() { return new Response("ok") } }',
@@ -18,13 +19,13 @@ async function fixture() {
   const env = {
     DB: await mf.getD1Database('DB'),
     OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'),
-    SYNC_QUEUE: { send: async () => undefined },
+    SYNC_QUEUE: { send: async (message: unknown) => { queued.push(message); } },
     ...oauthSecrets,
     OPERATOR_EMAILS: 'operator@example.com',
     SYNC_INTERVAL: '15m',
   };
   const ctx = { waitUntil() {}, passThroughOnException() {} };
-  return { mf, env, ctx };
+  return { mf, env, ctx, queued };
 }
 
 function mcpRequest(body: unknown, sessionId?: string) {
@@ -58,7 +59,7 @@ test('Worker health reports package and migrated schema versions', async () => {
 });
 
 test('Authorized Worker MCP serves initialize, tools/list, and a D1-backed call', async () => {
-  const { mf, env, ctx } = await fixture();
+  const { mf, env, ctx, queued } = await fixture();
   try {
     const initialized = await handleAuthorizedRequest(mcpRequest({
       jsonrpc: '2.0',
@@ -79,6 +80,11 @@ test('Authorized Worker MCP serves initialize, tools/list, and a D1-backed call'
     }, sessionId), env);
     const callBody = (await called.json()) as { result: { content: { text: string }[] } };
     assert.match(callBody.result.content[0]?.text ?? '', /"accounts":\[\]/);
+    assert.doesNotMatch(callBody.result.content[0]?.text ?? '', /mail-index /);
+    assert.match(callBody.result.content[0]?.text ?? '', /job_id/);
+    const repeated = await handleAuthorizedRequest(mcpRequest({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'sync_status', arguments: {} } }, sessionId), env);
+    assert.equal(repeated.status, 200);
+    assert.equal(queued.length, 1, 'stale-read Job enqueue is deduplicated');
   } finally {
     await mf.dispose();
   }

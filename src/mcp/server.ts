@@ -422,6 +422,23 @@ export async function dispatch(
   return tool.run(ctx, args);
 }
 
+async function remoteizeHandbacks(ctx: ToolContext, value: unknown, fallbackAccount?: string): Promise<unknown> {
+  if (!ctx.enqueueJob) return value;
+  if (typeof value === 'string' && value.startsWith('mail-index ')) {
+    const account = /--account\s+([^\s]+)/.exec(value)?.[1] ?? fallbackAccount;
+    if (!account) return { status: 'requires_account', poll: 'sync_status' };
+    const kind = value.includes(' enrich ') ? 'enrich_bulk' : value.includes(' graph ') ? 'backfill' : 'sync';
+    const jobId = await ctx.enqueueJob(kind, account, { command: value });
+    return { job_id: jobId, status: 'queued', poll: 'sync_status' };
+  }
+  if (Array.isArray(value)) return Promise.all(value.map((item) => remoteizeHandbacks(ctx, item, fallbackAccount)));
+  if (value && typeof value === 'object') {
+    const entries = await Promise.all(Object.entries(value).map(async ([key, item]) => [key, await remoteizeHandbacks(ctx, item, fallbackAccount)] as const));
+    return Object.fromEntries(entries);
+  }
+  return value;
+}
+
 /** The `tools/list` payload (exported for tests): name + description + schema. */
 export function toolList(): {
   name: string;
@@ -478,7 +495,8 @@ export function buildServer(ctx: ToolContext): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     try {
-      const result = await dispatch(ctx, name, (args ?? {}) as Record<string, unknown>);
+      const callArgs = (args ?? {}) as Record<string, unknown>;
+      const result = await remoteizeHandbacks(ctx, await dispatch(ctx, name, callArgs), typeof callArgs['account'] === 'string' ? callArgs['account'] : undefined);
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
