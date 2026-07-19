@@ -50,6 +50,7 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
   };
   const source = new GmailRestAdapter({ fetchImpl, tokenProvider: accessTokenProvider(driver, message.account, env, fetchImpl) });
   const progress: Record<string, unknown> = {};
+  console.log(JSON.stringify({ event: 'job_start', job_id: message.jobId, kind: message.kind }));
   await update('running', progress);
   try {
     if (message.kind === 'webhook_delivery') {
@@ -70,10 +71,25 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       progress['enrich'] = { fetched: enriched.fetched, enriched: enriched.enriched };
     }
     await update('done', progress);
+    console.log(JSON.stringify({ event: 'job_finish', job_id: message.jobId, kind: message.kind, counts: logCounts(progress) }));
   } catch (error) {
     await update('failed', progress, error instanceof Error ? error.message : String(error));
+    console.log(JSON.stringify({ event: 'job_fail', job_id: message.jobId, kind: message.kind, error_name: error instanceof Error ? error.name : 'Error' }));
     throw error;
   }
+}
+
+function logCounts(progress: Record<string, unknown>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const phase of ['sync', 'triggers', 'enrich', 'graph', 'delivery']) {
+    const values = progress[phase]; if (!values || typeof values !== 'object') continue;
+    for (const key of ['fetched', 'indexed', 'deliveries', 'enriched', 'nodes', 'edges', 'communities', 'delivered']) {
+      const value = (values as Record<string, unknown>)[key];
+      if (typeof value === 'number') out[`${phase}_${key}`] = value;
+      else if (typeof value === 'boolean') out[`${phase}_${key}`] = value ? 1 : 0;
+    }
+  }
+  return out;
 }
 
 export async function jobStatus(env: Env, account?: string) {
@@ -81,5 +97,7 @@ export async function jobStatus(env: Env, account?: string) {
   const where = account ? 'WHERE account=?' : '';
   const recent = await driver.prepare(`SELECT id,kind,account,status,progress_json,error,created_at,started_at,finished_at FROM jobs ${where} ORDER BY created_at DESC LIMIT 20`).all(...(account ? [account] : [])) as Record<string, unknown>[];
   const depth = await driver.prepare(`SELECT count(*) AS n FROM jobs WHERE status IN ('queued','running')${account ? ' AND account=?' : ''}`).get(...(account ? [account] : [])) as { n: number };
-  return { sync_interval: env.SYNC_INTERVAL, queue_depth: depth.n, recent: recent.map((row) => ({ ...row, progress: JSON.parse(String(row['progress_json'])), progress_json: undefined })) };
+  const normalized: Record<string, unknown>[] = recent.map((row) => ({ ...row, progress: JSON.parse(String(row['progress_json'])), progress_json: undefined }));
+  const lastCron = await driver.prepare(`SELECT created_at FROM jobs WHERE kind='sync'${account ? ' AND account=?' : ''} ORDER BY created_at DESC LIMIT 1`).get(...(account ? [account] : [])) as { created_at: string } | undefined;
+  return { sync_interval: env.SYNC_INTERVAL, last_cron_run: lastCron?.created_at ?? null, queue_depth: depth.n, failed_jobs: normalized.filter((row) => row['status'] === 'failed'), recent: normalized };
 }

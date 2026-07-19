@@ -77,7 +77,19 @@ test('failed Job records failure and remains retryable', async () => {
     let retried = false;
     await worker.queue({ messages: [{ body: { jobId: 'missing', kind: 'sync', account: 'acct-a', params: {} }, ack() {}, retry() { retried = true; } }] }, env);
     assert.equal(retried, true);
+    const status = await jobStatus(env, 'acct-a');
+    assert.ok(status.last_cron_run); assert.equal(status.queue_depth, 0); assert.equal(status.failed_jobs[0]?.error, row.error);
   } finally { await mf.dispose(); }
+});
+
+test('structured Job logs expose ids and counts but no Message content', async () => {
+  const { mf, env, sent } = await fixture(); const lines: string[] = []; const original = console.log;
+  console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+  try {
+    await enqueueScheduledSyncs(env); await runJob(env, sent[0] as never, gmailFetch);
+    const text = lines.join('\n'); assert.match(text, /job_start/); assert.match(text, /job_finish/); assert.match(text, /indexed/);
+    assert.doesNotMatch(text, /Hello|person@example\.com|Hello body|snippet|subject|address/i);
+  } finally { console.log = original; await mf.dispose(); }
 });
 
 test('sync Job evaluates Trigger rules and signed webhook retries until 2xx', async () => {

@@ -5,6 +5,7 @@ import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { D1Driver, type D1DatabaseBinding } from '../src/index/drivers/d1.js';
 import { Repo } from '../src/index/repo.js';
 import { getUserVersion, runMigrations } from '../src/index/migrations.js';
+import { SCHEMA_VERSION } from '../src/index/schema.js';
 import { buildServer } from '../src/mcp/server.js';
 import type { ToolContext } from '../src/mcp/tools.js';
 import { GmailRestAdapter } from '../src/source/adapters/gmail-rest/index.js';
@@ -99,7 +100,7 @@ function allowed(email: string, env: Env): boolean { return env.OPERATOR_EMAILS.
 export async function handlePublicRequest(request: Request, env: Partial<Env>, ctx: WorkerContext, dependencies: WorkerDependencies = {}): Promise<Response> {
   assertBindings(env); const url = new URL(request.url); const fetchImpl = dependencies.fetchImpl ?? fetch;
   if (request.method === 'GET' && url.pathname === '/.well-known/agent-card.json') return Response.json(agentCard(url.origin));
-  if (request.method === 'GET' && url.pathname === '/healthz') { const { driver } = await storage(env); return Response.json({ ok: true, name: 'mail-index', version: VERSION, schema_version: await getUserVersion(driver) }); }
+  if (request.method === 'GET' && url.pathname === '/healthz') { const { driver } = await storage(env); const schemaVersion = await getUserVersion(driver); return Response.json({ ok: true, name: 'mail-index', version: VERSION, schema_version: schemaVersion, migration_state: schemaVersion === SCHEMA_VERSION ? 'current' : 'pending' }); }
   if (url.pathname === '/authorize') {
     if (!env.OAUTH_PROVIDER) throw new Error('Missing OAuth provider helpers');
     const auth = await env.OAUTH_PROVIDER.parseAuthRequest(request);

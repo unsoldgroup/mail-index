@@ -1,7 +1,8 @@
 # Threat model
 
-mail-index indexes a mailbox into a local database and exposes it to an AI agent
-over a local MCP server. It touches sensitive data (your email), so this document
+mail-index indexes a mailbox into either a local database or an opt-in,
+single-tenant remote Deployment owned by the operator. It touches sensitive data
+(your email), so this document
 states plainly what it protects, what it does **not**, where the trust boundaries
 are, and how you can verify the claims yourself ([SECURITY.md](../.github/SECURITY.md#verify-our-claims-yourself)).
 
@@ -10,8 +11,9 @@ are, and how you can verify the claims yourself ([SECURITY.md](../.github/SECURI
 - **The index** (`${XDG_DATA_HOME:-~/.local/share}/mail-index/mail.sqlite`) —
   message metadata, distilled bodies, and summaries. Plaintext SQLite.
 - **The curated profile** — who/what you marked important (in the same DB).
-- **Provider credentials** — OAuth tokens. **mail-index never holds these.**
-  They live in the adapter's own store (for gws, its per-account config dir).
+- **Provider credentials** — locally, tokens stay in the adapter's store. A
+  remote Deployment necessarily holds encrypted Google refresh tokens as
+  described below.
 
 ## Trust boundaries & data flow
 
@@ -66,10 +68,11 @@ launcher that fires it. Disable entirely with `MAIL_INDEX_NO_AUTOUPDATE=1`.
   as two clearly-marked tools (`archive_message` / `modify_labels`). Even opted
   in, the tool can only archive/relabel — it requests no `gmail.send` and no
   delete scope ([ADR-0007](adr/0007-opt-in-mailbox-writes.md), [ADR-0001](adr/0001-inline-enrichment-is-o1-only.md)).
-- **No credential handling.** Tokens are the adapter's concern, never stored by
-  mail-index or written to the index DB.
-- **Local-only data.** The index never leaves the machine; no cloud, account, or
-  sync ([ADR-0002](adr/0002-local-index-only-for-privacy.md)).
+- **Local Deployment credential isolation.** Tokens are the adapter's concern
+  and never enter the local index DB.
+- **Operator-owned placement.** Local data stays on the machine. Remote data
+  stays in the operator's own Cloudflare account; mail-index operates no hosting
+  service ([ADR-0008](adr/0008-self-hosted-remote-deployment.md)).
 
 ## What it does NOT protect against (non-goals)
 
@@ -92,10 +95,57 @@ launcher that fires it. Disable entirely with `MAIL_INDEX_NO_AUTOUPDATE=1`.
 
 ## Permissions / least privilege
 
-mail-index only ever reads. Grant the adapter a **read-only** provider scope
-(for Gmail, `https://www.googleapis.com/auth/gmail.readonly`) — the tool never
-calls a mutating endpoint, so a read-only token is sufficient and is what we
-recommend.
+mail-index reads by default. Grant a **read-only** provider scope (for Gmail,
+`https://www.googleapis.com/auth/gmail.readonly`). Only explicit archive/label
+actions use the separately consented `gmail.modify` scope; send/delete scopes
+are never requested.
+
+## Remote Deployment: widened trust boundary
+
+The optional Worker changes the promise from “never leaves your machine” to
+“never leaves infrastructure you own.” Mailbox data, Summaries, curation, and
+Interest profiles rest in D1 under the operator’s Cloudflare account. Cloudflare
+encrypts D1 at rest, but Cloudflare and the security of that account are now in
+the trusted computing base. This is a materially wider posture than plaintext
+SQLite on an encrypted local disk.
+
+The Worker holds Google refresh-token ciphertext in D1. Tokens use AES-GCM; the
+key exists only as the `TOKEN_ENC_KEY` Worker secret. A D1 export alone cannot
+decrypt them. The operator supplies and controls the Google OAuth client. The
+default grant is `gmail.readonly`; `gmail.modify` is a separate explicit
+re-consent and still cannot send or delete mail.
+
+The audited remote seams are the Gmail REST adapter, D1 StorageDriver, and
+webhook delivery in the queue consumer. Webhook HTTP runs in `worker/`, not the
+guarded engine. `src/` remains network-free except the explicitly pinned serving
+and adapter seams; [`test/egress-guard.test.ts`](../test/egress-guard.test.ts)
+fails when a new primitive appears or a named seam silently moves. This makes
+egress reviewable, not harmless.
+
+MCP and A2A are reachable over the network. The OAuth provider authenticates
+bearer tokens, Google sign-in is restricted to `OPERATOR_EMAILS`, and that
+single-tenant allowlist is the complete authorization model. A mistaken
+allowlist entry has access to the exposed index tools. The public agent card and
+health endpoint contain discovery/health metadata, never mailbox rows.
+
+Trigger rule consumers are operator-chosen trusted endpoints. Deliveries carry
+`X-MailIndex-Signature: sha256=<HMAC>` over the raw body and a Unix timestamp;
+consumers must reject timestamps outside five minutes and deduplicate the stable
+`delivery_id`. Queues provide at-least-once delivery, so duplicates are expected.
+HTTPS protects transit; the consumer controls data after receipt.
+
+Compromise impact is component-specific:
+
+- Cloudflare account: an attacker can read index data, alter Worker code or
+  secrets, and therefore recover live Google tokens and impersonate the service.
+- D1 alone: an attacker gets indexed mail and earned state, plus unusable token
+  ciphertext, but not the Worker secret key.
+- Google OAuth client secret alone: an installed/web client secret is not a
+  refresh token; existing grants remain protected, though phishing/flow abuse is
+  possible and the client should be rotated.
+- Consumer endpoint or its HMAC secret: an attacker can read that consumer’s
+  delivered matches and forge future-looking deliveries to it; this does not
+  grant MCP, D1, or Gmail access.
 
 ## Integrity & releases
 
