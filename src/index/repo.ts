@@ -1112,6 +1112,21 @@ export class Repo {
     return Number(res.lastInsertRowid);
   }
 
+  /** Atomically acquire the per-Account sync lock across SQLite connections and D1 isolates. */
+  async acquireSyncRun(input: SyncRunStart): Promise<number | undefined> {
+    if (!SYNC_PHASES.includes(input.phase)) throw new IndexError(`invalid sync phase: ${String(input.phase)}`);
+    const cutoff = new Date(Date.now() - STALE_LOCK_MS).toISOString();
+    const row = await this.#prepare(
+      `INSERT INTO sync_runs (account, phase, selector, started_at)
+       SELECT ?, ?, ?, ?
+       WHERE NOT EXISTS (
+         SELECT 1 FROM sync_runs WHERE account = ? AND finished_at IS NULL AND started_at > ?
+       )
+       RETURNING id`,
+    ).get(input.account, input.phase, input.selector ?? null, new Date().toISOString(), input.account, cutoff) as { id: number } | undefined;
+    return row?.id;
+  }
+
   /**
    * The id of a LIVE in-progress sync_runs row for `account` (started, not yet
    * finished, and started within {@link STALE_LOCK_MS}), or undefined when none.

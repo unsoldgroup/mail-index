@@ -20,8 +20,14 @@ export async function encryptRefreshToken(token: string, encodedKey: string): Pr
   return { ciphertext, iv };
 }
 
-export async function decryptRefreshToken(ciphertext: ArrayBuffer, iv: ArrayBuffer, encodedKey: string): Promise<string> {
-  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(iv) }, await aesKey(encodedKey), ciphertext);
+function binary(value: ArrayBuffer | ArrayBufferView | number[]): Uint8Array {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  return Uint8Array.from(value);
+}
+
+export async function decryptRefreshToken(ciphertext: ArrayBuffer | ArrayBufferView | number[], iv: ArrayBuffer | ArrayBufferView | number[], encodedKey: string): Promise<string> {
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: binary(iv) }, await aesKey(encodedKey), binary(ciphertext));
   return new TextDecoder().decode(plain);
 }
 

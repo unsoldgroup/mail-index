@@ -116,15 +116,9 @@ async function acquireLock(
   account: string,
   selector: string | null,
 ): Promise<number> {
-  return await repo.transaction(async () => {
-    const held = await repo.activeSyncRun(account);
-    if (held != null) {
-      throw new SyncError(
-        `a sync for account "${account}" is already in progress (sync_runs id ${held}); refusing to start a second concurrent run`,
-      );
-    }
-    return await repo.startSyncRun({ account, phase: 'sync', selector });
-  });
+  const id = await repo.acquireSyncRun({ account, phase: 'sync', selector });
+  if (id == null) throw new SyncError(`a sync for account "${account}" is already in progress; refusing to start a second concurrent run`);
+  return id;
 }
 
 /**

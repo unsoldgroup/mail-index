@@ -9,12 +9,15 @@ import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { GMAIL_MODIFY, GMAIL_READONLY, saveGrant, signState, verifyGoogleIdentity, verifyState, exchangeToken } from './google-oauth.js';
 import { accessTokenProvider } from './google-oauth.js';
 import { GmailRestAdapter } from '../src/source/adapters/gmail-rest/index.js';
+import { enqueueScheduledSyncs, jobStatus, runJob, type JobMessage } from './jobs.js';
 
 const VERSION = '1.4.0';
 
 interface QueueBinding {
   send(message: unknown): Promise<void>;
 }
+interface QueueMessage<T> { body: T; ack(): void; retry(): void }
+interface QueueBatch<T> { messages: QueueMessage<T>[] }
 
 interface KvBinding {
   get(key: string): Promise<string | null>;
@@ -28,6 +31,7 @@ export interface Env {
   TOKEN_ENC_KEY: string;
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
+  SYNC_INTERVAL: string;
 }
 
 interface WorkerContext {
@@ -39,7 +43,7 @@ const transports = new Map<string, WebStandardStreamableHTTPServerTransport>();
 const servers = new Map<string, Server>();
 
 function assertBindings(env: Partial<Env>): asserts env is Env {
-  for (const name of ['DB', 'SYNC_QUEUE', 'OAUTH_KV', 'DEV_BEARER_TOKEN', 'TOKEN_ENC_KEY', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'] as const) {
+  for (const name of ['DB', 'SYNC_QUEUE', 'OAUTH_KV', 'DEV_BEARER_TOKEN', 'TOKEN_ENC_KEY', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'SYNC_INTERVAL'] as const) {
     if (!env[name]) throw new Error(`Missing required Worker binding: ${name}`);
   }
 }
@@ -78,6 +82,7 @@ async function handleMcp(request: Request, env: Env): Promise<Response> {
         fetchImpl: fetch,
         tokenProvider: accessTokenProvider(driver, account.account ?? '', env, fetch),
       }),
+      jobStatus: (account) => jobStatus(env, account),
     });
     transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: randomUUID,
@@ -157,5 +162,14 @@ function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, (c
 export default {
   fetch(request: Request, env: Env, _ctx: WorkerContext): Promise<Response> {
     return handleRequest(request, env);
+  },
+  scheduled(_controller: unknown, env: Env, ctx: WorkerContext): void {
+    ctx.waitUntil(enqueueScheduledSyncs(env));
+  },
+  async queue(batch: QueueBatch<JobMessage>, env: Env): Promise<void> {
+    for (const message of batch.messages) {
+      try { await runJob(env, message.body); message.ack(); }
+      catch { message.retry(); }
+    }
   },
 };

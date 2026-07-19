@@ -213,15 +213,9 @@ export async function enrichOne(options: EnrichOneOptions): Promise<boolean> {
  * phase-1 sync. Returns the new run's id.
  */
 async function acquireLock(repo: Repo, account: string, selector: string): Promise<number> {
-  return await repo.transaction(async () => {
-    const held = await repo.activeSyncRun(account);
-    if (held != null) {
-      throw new EnrichError(
-        `a sync/enrich for account "${account}" is already in progress (sync_runs id ${held}); refusing to start a second concurrent run`,
-      );
-    }
-    return await repo.startSyncRun({ account, phase: 'enrich', selector });
-  });
+  const id = await repo.acquireSyncRun({ account, phase: 'enrich', selector });
+  if (id == null) throw new EnrichError(`a sync/enrich for account "${account}" is already in progress; refusing to start a second concurrent run`);
+  return id;
 }
 
 /**

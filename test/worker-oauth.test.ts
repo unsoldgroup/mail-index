@@ -13,7 +13,7 @@ test('Google connect encrypts independent Accounts and write re-consent replaces
   const db = await mf.getD1Database('DB');
   const env = {
     DB: db, OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async () => undefined },
-    DEV_BEARER_TOKEN: bearer, TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret',
+    DEV_BEARER_TOKEN: bearer, TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', SYNC_INTERVAL: '15m',
   };
   const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);

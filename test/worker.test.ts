@@ -22,6 +22,7 @@ async function fixture() {
     SYNC_QUEUE: { send: async () => undefined },
     DEV_BEARER_TOKEN: bearer,
     ...oauthSecrets,
+    SYNC_INTERVAL: '15m',
   };
   const ctx = { waitUntil() {}, passThroughOnException() {} };
   return { mf, env, ctx };

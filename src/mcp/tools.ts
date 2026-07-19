@@ -101,6 +101,8 @@ export interface ToolContext {
   backgroundSync?: BackgroundSync;
   /** Clock seam for deterministic freshness tests. Defaults to `Date`. */
   now?: () => Date;
+  /** Remote Deployment Job status; absent locally so the local response shape is unchanged. */
+  jobStatus?: (account?: string) => Promise<unknown>;
 }
 
 /** The freshness staleness threshold for reads (ADR-0005): "a few hours" (3h).
@@ -1119,7 +1121,9 @@ export async function syncStatus(ctx: ToolContext, args: SyncStatusArgs): Promis
       bodyStates: counts,
     };
   }));
-  return await withMeta(ctx, args.account, { accounts });
+  const body: { accounts: SyncStatusEntry[]; jobs?: unknown } = { accounts };
+  if (ctx.jobStatus) body.jobs = await ctx.jobStatus(args.account);
+  return await withMeta(ctx, args.account, body);
 }
 
 // ---- relay/menu status ----------------------------------------------------

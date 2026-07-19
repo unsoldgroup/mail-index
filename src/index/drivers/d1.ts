@@ -32,7 +32,7 @@ interface D1ResultBinding<T> {
 
 const VERSION_READ = /^\s*PRAGMA\s+user_version\s*;?\s*$/i;
 const VERSION_WRITE = /^\s*PRAGMA\s+user_version\s*=\s*(\d+)\s*;?\s*$/i;
-const TRANSACTION_CONTROL = /^\s*(?:BEGIN|COMMIT|ROLLBACK)(?:\s+TRANSACTION)?\s*;?\s*$/i;
+const TRANSACTION_CONTROL = /^\s*(?:BEGIN(?:\s+(?:DEFERRED|IMMEDIATE|EXCLUSIVE))?|COMMIT|ROLLBACK)(?:\s+TRANSACTION)?\s*;?\s*$/i;
 const VERSION_TABLE = `CREATE TABLE IF NOT EXISTS schema_version (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   version INTEGER NOT NULL

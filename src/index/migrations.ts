@@ -465,6 +465,29 @@ const m010_google_tokens: Migration = {
   },
 };
 
+const m011_jobs: Migration = {
+  version: 11,
+  name: 'remote queued jobs',
+  up: async (db) => {
+    await db.exec(`
+      CREATE TABLE jobs (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        account TEXT NOT NULL,
+        params_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued','running','done','failed')),
+        progress_json TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT
+      );
+      CREATE INDEX idx_jobs_status_created ON jobs(status, created_at);
+      CREATE INDEX idx_jobs_account_created ON jobs(account, created_at);
+    `);
+  },
+};
+
 /** All migrations, in ascending version order. Append-only. */
 export const MIGRATIONS: readonly Migration[] = [
   m001_initial,
@@ -477,6 +500,7 @@ export const MIGRATIONS: readonly Migration[] = [
   m008_topics,
   m009_labels,
   m010_google_tokens,
+  m011_jobs,
 ];
 
 /**
