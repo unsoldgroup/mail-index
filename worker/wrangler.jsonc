@@ -15,6 +15,8 @@
     { "binding": "OAUTH_KV", "id": "replace-with-operator-kv-id" }
   ],
   "observability": { "enabled": true, "head_sampling_rate": 1 }
+  // 30s gives 2.69× headroom over the 11.15s 1,000-Message measurement in bench/RESULTS-WORKER.md.
+  ,"limits": { "cpu_ms": 30000 }
   ,"triggers": { "crons": ["*/15 * * * *"] }
   ,"vars": { "SYNC_INTERVAL": "15m", "OPERATOR_EMAILS": "operator@example.com" }
 

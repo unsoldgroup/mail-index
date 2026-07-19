@@ -30,5 +30,14 @@ test('Worker context exposes the complete registry and gates mailbox writes by s
     await dispatch(writable, 'archive_message', { ref: 'acct-write:m1' });
     assert.equal(modified, 1);
     assert.ok(!(await repo.getMessage('acct-write', 'm1'))?.labels_json?.includes('INBOX'));
+    const run = await repo.startSyncRun({ account: 'acct-write', phase: 'sync' });
+    await repo.finishSyncRun(run, { fetched: 0, indexed: 0 });
+    let intelligenceJobs = 0;
+    writable.enqueueJob = async () => { intelligenceJobs += 1; return 'unexpected'; };
+    await dispatch(writable, 'graph_neighbors', { account: 'acct-write', address: 'person@example.com' });
+    await dispatch(writable, 'graph_communities', { account: 'acct-write' });
+    await dispatch(writable, 'cadence', { account: 'acct-write' });
+    await dispatch(writable, 'interest_propose', { account: 'acct-write' });
+    assert.equal(intelligenceJobs, 0, 'intelligence tools read precomputed state without inline rebuild Jobs');
   } finally { await mf.dispose(); }
 });
