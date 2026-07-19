@@ -21,6 +21,7 @@ INSTANCE.local.md
 # Node
 node_modules/
 dist/
+dist-worker/
 build/
 *.tsbuildinfo
 .npm/

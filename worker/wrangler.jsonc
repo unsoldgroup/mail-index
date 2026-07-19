@@ -1,0 +1,22 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "mail-index",
+  "main": "index.ts",
+  "compatibility_date": "2026-07-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "mail-index", "database_id": "replace-with-operator-d1-id" }
+  ],
+  "queues": {
+    "producers": [{ "binding": "SYNC_QUEUE", "queue": "mail-index-jobs" }],
+    "consumers": [{ "queue": "mail-index-jobs" }]
+  },
+  "kv_namespaces": [
+    { "binding": "OAUTH_KV", "id": "replace-with-operator-kv-id" }
+  ],
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+
+  // Secrets (set with `wrangler secret put`):
+  // TOKEN_ENC_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET.
+  // TEMPORARY — DEV_BEARER_TOKEN is replaced by Ticket 007 MCP OAuth.
+}
