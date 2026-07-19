@@ -85,6 +85,13 @@ export class McpToolError extends Error {
  */
 export type BackgroundSync = (account: string, since?: string) => boolean;
 export type EnqueueJob = (kind: 'sync' | 'backfill' | 'enrich_bulk', account: string, params?: Record<string, unknown>) => Promise<string>;
+export interface TriggerAdmin {
+  saveRule(input: Record<string, unknown>): Promise<unknown>;
+  listRules(): Promise<unknown>;
+  deleteRule(id: string): Promise<unknown>;
+  registerConsumer(input: Record<string, unknown>): Promise<unknown>;
+  deleteConsumer(id: string): Promise<unknown>;
+}
 
 /** Everything the tools read/write. INDEX-ONLY except the one O(1) enrich seam. */
 export interface ToolContext {
@@ -105,6 +112,8 @@ export interface ToolContext {
   /** Remote Deployment Job status; absent locally so the local response shape is unchanged. */
   jobStatus?: (account?: string) => Promise<unknown>;
   enqueueJob?: EnqueueJob;
+  /** Remote-Deployment Trigger rule administration; absent on local Deployment. */
+  triggerAdmin?: TriggerAdmin;
 }
 
 /** The freshness staleness threshold for reads (ADR-0005): "a few hours" (3h).

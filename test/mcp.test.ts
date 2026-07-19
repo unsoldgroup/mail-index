@@ -629,6 +629,8 @@ test('surface: exactly the PLAN §12 tools are advertised, all with schemas, all
     'interest_propose', 'interest_set', 'interest_get', 'save_summary',
     'domains_to_categorize', 'save_domain_category', 'cadence', 'sync_status',
     'relay_menu_status', 'sync_now', 'catch_up', 'digest_sources', 'archive_message', 'modify_labels',
+    'trigger_rule_save', 'trigger_rule_list', 'trigger_rule_delete',
+    'webhook_consumer_register', 'webhook_consumer_delete',
   ];
   const names = TOOLS.map((t) => t.name);
   assert.deepEqual(new Set(names), new Set(expected), 'the full §12 surface');
@@ -680,7 +682,7 @@ test('setup mode: with config present the full tool surface is what serve() woul
   // here so the bootstrapping branch never silently shrinks the real surface.
   // 21 original read tools + the 2 opt-in writers (archive_message,
   // modify_labels) + 2 relay/status quick-action tools.
-  assert.equal(TOOLS.length, 25, 'full surface is 25 tools');
+  assert.equal(TOOLS.length, 30, 'full surface includes five remote Trigger rule tools');
 });
 
 test('setup_status reports observation and does not crash with no config', async () => {

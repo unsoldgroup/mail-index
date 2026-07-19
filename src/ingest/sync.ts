@@ -85,6 +85,8 @@ export interface SyncResult {
   indexed: number;
   /** The selector recorded for the run (a human-readable scope summary). */
   selector: string | null;
+  /** Message ids returned by this source sweep; consumers must evaluate only this set. */
+  messageIds: string[];
 }
 
 /**
@@ -200,6 +202,7 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
 
   let fetched = 0;
   let indexed = 0;
+  const messageIds: string[] = [];
   try {
     // Enumerate the scope lazily, fetching metadata in bounded batches so a
     // large mailbox never buffers every id in memory at once.
@@ -240,6 +243,7 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
           bodyState: 'meta',
         });
         indexed += 1;
+        messageIds.push(meta.id);
       }
       batch = [];
     };
@@ -289,5 +293,5 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
     }
   }
 
-  return { runId, account, fetched, indexed, selector };
+  return { runId, account, fetched, indexed, selector, messageIds };
 }

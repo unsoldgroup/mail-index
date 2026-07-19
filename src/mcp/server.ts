@@ -393,7 +393,33 @@ export const TOOLS: ToolDef[] = [
         ...(Array.isArray(a['remove']) ? { remove: (a['remove'] as unknown[]).map(String) } : {}),
       }),
   },
+  {
+    name: 'trigger_rule_save', description: 'Create or update a remote Deployment Trigger rule.',
+    inputSchema: obj({ id: str, name: str, account: str, predicate: { type: 'object' }, consumer_ids: strArr, enabled: bool }, ['name', 'predicate', 'consumer_ids']),
+    run: (ctx, a) => requireTriggerAdmin(ctx).saveRule(a),
+  },
+  {
+    name: 'trigger_rule_list', description: 'List Trigger rules on this remote Deployment.', inputSchema: obj({}),
+    run: (ctx) => requireTriggerAdmin(ctx).listRules(),
+  },
+  {
+    name: 'trigger_rule_delete', description: 'Delete a Trigger rule from this remote Deployment.', inputSchema: obj({ id: str }, ['id']),
+    run: (ctx, a) => requireTriggerAdmin(ctx).deleteRule(String(a['id'])),
+  },
+  {
+    name: 'webhook_consumer_register', description: 'Register a signed-webhook consumer for Trigger rule deliveries.', inputSchema: obj({ id: str, url: str, secret: str }, ['url', 'secret']),
+    run: (ctx, a) => requireTriggerAdmin(ctx).registerConsumer(a),
+  },
+  {
+    name: 'webhook_consumer_delete', description: 'Delete a signed-webhook consumer from this remote Deployment.', inputSchema: obj({ id: str }, ['id']),
+    run: (ctx, a) => requireTriggerAdmin(ctx).deleteConsumer(String(a['id'])),
+  },
 ];
+
+function requireTriggerAdmin(ctx: ToolContext) {
+  if (!ctx.triggerAdmin) throw new McpToolError('Trigger rules are not available on this local Deployment');
+  return ctx.triggerAdmin;
+}
 
 /** Pull an optional string arg into a spread-able partial (omit when absent). */
 function optStr(a: Record<string, unknown>, key: string): Record<string, string> {

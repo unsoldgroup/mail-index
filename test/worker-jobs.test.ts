@@ -7,6 +7,7 @@ import { runMigrations } from '../dist/index/migrations.js';
 import { saveGrant } from '../dist-worker/worker/google-oauth.js';
 import { enqueueScheduledSyncs, jobStatus, runJob } from '../dist-worker/worker/jobs.js';
 import worker from '../dist-worker/worker/index.js';
+import { triggerAdmin } from '../dist-worker/worker/triggers.js';
 
 const key = Buffer.alloc(32, 4).toString('base64');
 
@@ -76,5 +77,26 @@ test('failed Job records failure and remains retryable', async () => {
     let retried = false;
     await worker.queue({ messages: [{ body: { jobId: 'missing', kind: 'sync', account: 'acct-a', params: {} }, ack() {}, retry() { retried = true; } }] }, env);
     assert.equal(retried, true);
+  } finally { await mf.dispose(); }
+});
+
+test('sync Job evaluates Trigger rules and signed webhook retries until 2xx', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    const admin = triggerAdmin(driver);
+    const consumer = await admin.registerConsumer({ url: 'https://consumer.example/hook', secret: 'shared-secret' }) as { id: string };
+    await admin.saveRule({ name: 'Primary mail', predicate: { conditions: [{ type: 'category', value: 'primary' }] }, consumer_ids: [consumer.id] });
+    await enqueueScheduledSyncs(env); await runJob(env, sent[0] as never, gmailFetch);
+    const delivery = sent[1] as { jobId: string; kind: 'webhook_delivery'; account: string; params: Record<string, unknown> };
+    assert.equal(delivery.kind, 'webhook_delivery');
+    let attempts = 0; let captured: RequestInit | undefined;
+    const consumerFetch = (async (_input: RequestInfo | URL, init?: RequestInit) => { attempts++; captured = init; return new Response('', { status: attempts === 1 ? 500 : 200 }); }) as typeof fetch;
+    await assert.rejects(() => runJob(env, delivery as never, consumerFetch), /500/);
+    await runJob(env, delivery as never, consumerFetch); assert.equal(attempts, 2);
+    const body = String(captured?.body); const payload = JSON.parse(body);
+    assert.equal(payload.delivery_id, delivery.params['deliveryId']); assert.equal(payload.matches[0].id, 'm1');
+    const expected = await crypto.subtle.sign('HMAC', await crypto.subtle.importKey('raw', new TextEncoder().encode('shared-secret'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']), new TextEncoder().encode(body));
+    assert.equal(new Headers(captured?.headers).get('x-mailindex-signature'), `sha256=${Buffer.from(expected).toString('hex')}`);
+    assert.ok(new Headers(captured?.headers).get('x-mailindex-timestamp'));
   } finally { await mf.dispose(); }
 });

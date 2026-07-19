@@ -11,6 +11,7 @@ import { GmailRestAdapter } from '../src/source/adapters/gmail-rest/index.js';
 import { InsufficientScopeError } from '../src/source/index.js';
 import { accessTokenProvider, exchangeToken, GMAIL_MODIFY, GMAIL_READONLY, saveGrant, signPayload, signState, verifyGoogleIdentity, verifyPayload, verifyState } from './google-oauth.js';
 import { enqueueJob, enqueueScheduledSyncs, jobStatus, runJob, type JobMessage } from './jobs.js';
+import { triggerAdmin } from './triggers.js';
 
 const VERSION = '1.4.0';
 const SESSION_COOKIE = 'mail_index_operator';
@@ -69,7 +70,7 @@ export async function buildWorkerToolContext(env: Env, fetchImpl: typeof fetch =
     const source = new GmailRestAdapter({ fetchImpl, tokenProvider: accessTokenProvider(driver, label, env, fetchImpl) });
     if (!scopes.get(label)?.includes(GMAIL_MODIFY)) Object.defineProperty(source, 'modify', { value: async () => { throw new InsufficientScopeError('gmail-rest', `/setup?account=${encodeURIComponent(label)}&writes=1`, 'Reconnect this Account with mailbox writes enabled.'); } });
     return source;
-  }, jobStatus: (account) => jobStatus(env, account), enqueueJob: (kind, account, params) => enqueueJob(env, kind, account, params) };
+  }, jobStatus: (account) => jobStatus(env, account), enqueueJob: (kind, account, params) => enqueueJob(env, kind, account, params), triggerAdmin: triggerAdmin(driver) };
 }
 
 export interface WorkerDependencies { fetchImpl?: typeof fetch }

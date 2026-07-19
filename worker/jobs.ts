@@ -8,8 +8,9 @@ import { buildGraph } from '../src/graph/index.js';
 import { GmailRestAdapter } from '../src/source/adapters/gmail-rest/index.js';
 import { accessTokenProvider } from './google-oauth.js';
 import type { Env } from './index.js';
+import { deliverWebhook, evaluateRules, type DeliveryParams } from './triggers.js';
 
-export type JobKind = 'sync' | 'backfill' | 'enrich_bulk';
+export type JobKind = 'sync' | 'backfill' | 'enrich_bulk' | 'webhook_delivery';
 export interface JobMessage { jobId: string; kind: JobKind; account: string; params: Record<string, unknown> }
 
 export async function enqueueJob(env: Env, kind: JobKind, account: string, params: Record<string, unknown> = {}): Promise<string> {
@@ -48,9 +49,13 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
   const progress: Record<string, unknown> = {};
   await update('running', progress);
   try {
-    if (message.kind === 'sync' || message.kind === 'backfill') {
+    if (message.kind === 'webhook_delivery') {
+      await deliverWebhook(driver, message.params as unknown as DeliveryParams, fetchImpl);
+      progress['delivery'] = { delivered: true, delivery_id: message.params['deliveryId'] };
+    } else if (message.kind === 'sync' || message.kind === 'backfill') {
       const sync = await syncMetadata({ account: message.account, source, repo, scope: typeof message.params['since'] === 'string' ? { since: message.params['since'] } : undefined });
       progress['sync'] = { fetched: sync.fetched, indexed: sync.indexed }; await update('running', progress);
+      progress['triggers'] = { deliveries: await evaluateRules(env, driver, repo, message.account, sync.messageIds) }; await update('running', progress);
       const enriched = await enrich({ account: message.account, source, repo, selector: { rule: 'direct' } });
       progress['enrich'] = { fetched: enriched.fetched, enriched: enriched.enriched }; await update('running', progress);
       const graphRun = await repo.startSyncRun({ account: message.account, phase: 'graph', selector: null });

@@ -488,6 +488,24 @@ const m011_jobs: Migration = {
   },
 };
 
+const m012_trigger_rules: Migration = {
+  version: 12,
+  name: 'Trigger rules and webhook consumers',
+  up: async (db) => {
+    await db.exec(`
+      CREATE TABLE trigger_rules (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, account TEXT,
+        predicate_json TEXT NOT NULL, consumer_ids_json TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE webhook_consumers (
+        id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_trigger_rules_account_enabled ON trigger_rules(account, enabled);
+    `);
+  },
+};
+
 /** All migrations, in ascending version order. Append-only. */
 export const MIGRATIONS: readonly Migration[] = [
   m001_initial,
@@ -501,6 +519,7 @@ export const MIGRATIONS: readonly Migration[] = [
   m009_labels,
   m010_google_tokens,
   m011_jobs,
+  m012_trigger_rules,
 ];
 
 /**
