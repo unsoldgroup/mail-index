@@ -4,7 +4,7 @@ import internalWorker, { apiHandler, defaultHandler, type Env } from './index.js
 interface OAuthExecutionContext { waitUntil(promise: Promise<unknown>): void; passThroughOnException(): void }
 
 export const oauthProvider = new OAuthProvider<Env>({
-  apiRoute: '/mcp',
+  apiRoute: ['/mcp', '/a2a'],
   apiHandler: apiHandler as never,
   defaultHandler: defaultHandler as never,
   authorizeEndpoint: '/authorize',

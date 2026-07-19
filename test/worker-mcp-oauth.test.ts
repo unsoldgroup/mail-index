@@ -21,6 +21,10 @@ test('OAuth provider challenges MCP, exposes health, protects setup, and support
     assert.equal(setup.status, 401);
     const denied = await mf.dispatchFetch('https://worker.example/mcp', { method: 'POST' });
     assert.equal(denied.status, 401); assert.ok(denied.headers.get('www-authenticate'));
+    const a2aCard = await mf.dispatchFetch('https://worker.example/.well-known/agent-card.json');
+    assert.equal(a2aCard.status, 200);
+    const deniedA2a = await mf.dispatchFetch('https://worker.example/a2a', { method: 'POST' });
+    assert.equal(deniedA2a.status, 401); assert.ok(deniedA2a.headers.get('www-authenticate'));
     const registered = await mf.dispatchFetch('https://worker.example/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Claude test', redirect_uris: ['https://claude.ai/api/mcp/auth_callback'], token_endpoint_auth_method: 'none' }) });
     assert.equal(registered.status, 201); assert.ok(((await registered.json()) as { client_id?: string }).client_id);
   } finally { await mf.dispose(); }

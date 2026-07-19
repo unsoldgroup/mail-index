@@ -12,6 +12,7 @@ import { InsufficientScopeError } from '../src/source/index.js';
 import { accessTokenProvider, exchangeToken, GMAIL_MODIFY, GMAIL_READONLY, saveGrant, signPayload, signState, verifyGoogleIdentity, verifyPayload, verifyState } from './google-oauth.js';
 import { enqueueJob, enqueueScheduledSyncs, jobStatus, runJob, type JobMessage } from './jobs.js';
 import { triggerAdmin } from './triggers.js';
+import { agentCard, handleA2a } from './a2a.js';
 
 const VERSION = '1.4.0';
 const SESSION_COOKIE = 'mail_index_operator';
@@ -79,6 +80,7 @@ export async function handleAuthorizedRequest(request: Request, env: Partial<Env
   assertBindings(env);
   const url = new URL(request.url);
   if (url.pathname === '/mcp' && ['GET', 'POST', 'DELETE'].includes(request.method)) return handleMcp(request, env);
+  if (url.pathname === '/a2a' && request.method === 'POST') return handleA2a(request, await buildWorkerToolContext(env));
   return Response.json({ error: 'not_found' }, { status: 404 });
 }
 
@@ -96,6 +98,7 @@ function allowed(email: string, env: Env): boolean { return env.OPERATOR_EMAILS.
 
 export async function handlePublicRequest(request: Request, env: Partial<Env>, ctx: WorkerContext, dependencies: WorkerDependencies = {}): Promise<Response> {
   assertBindings(env); const url = new URL(request.url); const fetchImpl = dependencies.fetchImpl ?? fetch;
+  if (request.method === 'GET' && url.pathname === '/.well-known/agent-card.json') return Response.json(agentCard(url.origin));
   if (request.method === 'GET' && url.pathname === '/healthz') { const { driver } = await storage(env); return Response.json({ ok: true, name: 'mail-index', version: VERSION, schema_version: await getUserVersion(driver) }); }
   if (url.pathname === '/authorize') {
     if (!env.OAUTH_PROVIDER) throw new Error('Missing OAuth provider helpers');
