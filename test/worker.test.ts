@@ -60,7 +60,7 @@ test('Worker health reports package and migrated schema versions', async () => {
 });
 
 test('Authorized Worker MCP serves initialize, tools/list, and a D1-backed call', async () => {
-  const { mf, env, ctx, queued } = await fixture();
+  const { mf, env, queued } = await fixture();
   try {
     const initialized = await handleAuthorizedRequest(mcpRequest({
       jsonrpc: '2.0',

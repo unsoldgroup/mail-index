@@ -58,7 +58,7 @@ test('Job consumer runs sync→Enrichment→graph, is duplicate-safe, and report
   const { mf, env, driver, sent } = await fixture();
   try {
     await enqueueScheduledSyncs(env);
-    const message = sent[0] as { jobId: string; kind: 'sync'; account: string; params: {} };
+    const message = sent[0] as { jobId: string; kind: 'sync'; account: string; params: Record<string, unknown> };
     await runJob(env, message, gmailFetch);
     const first = await driver.prepare('SELECT count(*) n FROM messages').get() as { n: number };
     await runJob(env, message, gmailFetch);
