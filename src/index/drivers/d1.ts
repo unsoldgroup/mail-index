@@ -32,7 +32,9 @@ interface D1ResultBinding<T> {
 
 const VERSION_READ = /^\s*PRAGMA\s+user_version\s*;?\s*$/i;
 const VERSION_WRITE = /^\s*PRAGMA\s+user_version\s*=\s*(\d+)\s*;?\s*$/i;
-const TRANSACTION_CONTROL = /^\s*(?:BEGIN(?:\s+(?:DEFERRED|IMMEDIATE|EXCLUSIVE))?|COMMIT|ROLLBACK)(?:\s+TRANSACTION)?\s*;?\s*$/i;
+const BEGIN = /^\s*BEGIN(?:\s+(?:DEFERRED|IMMEDIATE|EXCLUSIVE))?(?:\s+TRANSACTION)?\s*;?\s*$/i;
+const COMMIT = /^\s*COMMIT(?:\s+TRANSACTION)?\s*;?\s*$/i;
+const ROLLBACK = /^\s*ROLLBACK(?:\s+TRANSACTION)?\s*;?\s*$/i;
 const VERSION_TABLE = `CREATE TABLE IF NOT EXISTS schema_version (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   version INTEGER NOT NULL
@@ -69,10 +71,13 @@ class D1Statement implements PreparedStatement {
   constructor(
     private readonly statement: D1PreparedStatementBinding,
     private readonly versionRead = false,
+    private readonly enqueue?: (statement: D1PreparedStatementBinding) => boolean,
   ) {}
 
   async run(...params: SqlParam[]): Promise<RunResult> {
-    const result = await this.statement.bind(...d1Params(params)).run();
+    const bound = this.statement.bind(...d1Params(params));
+    if (this.enqueue?.(bound)) return { changes: 0, lastInsertRowid: 0 };
+    const result = await bound.run();
     return {
       changes: result.meta?.changes ?? 0,
       lastInsertRowid: result.meta?.last_row_id ?? 0,
@@ -95,6 +100,8 @@ class D1Statement implements PreparedStatement {
 
 export class D1Driver implements StorageDriver {
   #versionTableReady: Promise<void> | undefined;
+  #transaction: D1PreparedStatementBinding[] | undefined;
+  #pendingVersion: number | undefined;
 
   constructor(readonly db: D1DatabaseBinding) {}
 
@@ -104,25 +111,48 @@ export class D1Driver implements StorageDriver {
   }
 
   async exec(sql: string): Promise<void> {
-    // D1 rejects interactive SQL transactions; its atomic API is batch().
-    // Migrations are forward-only and publish their version only after all
-    // steps succeed, so these runner boundaries intentionally become no-ops.
-    if (TRANSACTION_CONTROL.test(sql)) return;
+    // Ordinary Repo transactions need read-after-write visibility and D1 has no
+    // interactive transaction, so their SQL controls remain no-ops. Migrations
+    // use the explicit atomic hooks below instead.
+    if (BEGIN.test(sql) || ROLLBACK.test(sql) || COMMIT.test(sql)) return;
     const version = VERSION_WRITE.exec(sql)?.[1];
     if (version !== undefined) {
       await this.#ensureVersionTable();
-      await this.db
-        .prepare(
+      const statement = this.db.prepare(
           `INSERT INTO schema_version(singleton, version) VALUES (1, ?)
            ON CONFLICT(singleton) DO UPDATE SET version = excluded.version`,
-        )
-        .bind(Number(version))
-        .run();
+        ).bind(Number(version));
+      if (this.#transaction) { this.#transaction.push(statement); this.#pendingVersion = Number(version); }
+      else await statement.run();
       return;
     }
     const normalized = normalizeExecSql(sql);
-    if (normalized) await this.db.exec(normalized);
+    if (!normalized) return;
+    if (this.#transaction) {
+      for (const statement of normalized.split(';').map((value) => value.trim()).filter(Boolean)) this.#transaction.push(this.db.prepare(statement));
+    } else await this.db.exec(normalized);
   }
+
+  async beginMigration(): Promise<void> {
+    if (this.#transaction) throw new Error('nested D1 migration transaction');
+    this.#transaction = []; this.#pendingVersion = undefined;
+  }
+
+  async commitMigration(): Promise<void> {
+    const statements = this.#transaction; const expected = this.#pendingVersion;
+    this.#transaction = undefined; this.#pendingVersion = undefined;
+    if (!statements) throw new Error('D1 migration commit without begin');
+    try { if (statements.length) await this.db.batch(statements); }
+    catch (error) {
+      if (expected != null) {
+        const row = await this.db.prepare('SELECT version FROM schema_version WHERE singleton=1').first<{ version: number }>();
+        if ((row?.version ?? 0) >= expected) return;
+      }
+      throw error;
+    }
+  }
+
+  async rollbackMigration(): Promise<void> { this.#transaction = undefined; this.#pendingVersion = undefined; }
 
   prepare(sql: string): PreparedStatement {
     if (VERSION_READ.test(sql)) {
@@ -139,7 +169,10 @@ export class D1Driver implements StorageDriver {
       };
       return new D1Statement(statement, true);
     }
-    return new D1Statement(this.db.prepare(sql));
+    return new D1Statement(this.db.prepare(sql), false, (statement) => {
+      if (!this.#transaction) return false;
+      this.#transaction.push(statement); return true;
+    });
   }
 
   async batch(statements: readonly BatchStatement[]): Promise<void> {

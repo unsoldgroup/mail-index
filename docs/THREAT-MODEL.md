@@ -138,8 +138,9 @@ Compromise impact is component-specific:
 
 - Cloudflare account: an attacker can read index data, alter Worker code or
   secrets, and therefore recover live Google tokens and impersonate the service.
-- D1 alone: an attacker gets indexed mail and earned state, plus unusable token
-  ciphertext, but not the Worker secret key.
+- D1 alone: an attacker gets indexed mail, earned state, consumer HMAC secrets
+  (and can forge deliveries to those consumers), plus unusable Google-token
+  ciphertext, but not the Worker encryption key.
 - Google OAuth client secret alone: an installed/web client secret is not a
   refresh token; existing grants remain protected, though phishing/flow abuse is
   possible and the client should be rotated.

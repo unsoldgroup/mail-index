@@ -535,8 +535,9 @@ export async function getUserVersion(db: StorageDriver): Promise<number> {
 }
 
 /**
- * Apply all pending migrations in a single transaction. Forward-only: throws
- * if the database version is newer than the code knows about (a downgrade).
+ * Apply each pending migration atomically and publish its version in the same
+ * commit. Forward-only: throws if the database version is newer than the code
+ * knows about (a downgrade).
  */
 export async function runMigrations(db: StorageDriver): Promise<void> {
   const current = await getUserVersion(db);
@@ -553,17 +554,18 @@ export async function runMigrations(db: StorageDriver): Promise<void> {
     (a, b) => a.version - b.version,
   );
 
-  await db.exec('BEGIN');
-  try {
-    for (const migration of pending) {
+  for (const migration of pending) {
+    if (db.beginMigration) await db.beginMigration(); else await db.exec('BEGIN');
+    try {
       await migration.up(db);
+      // Publish each migration atomically with its DDL. This lets later
+      // migrations read tables created by earlier commits and makes a failed
+      // retry resume at the last complete version on both sqlite and D1.
+      await db.exec(`PRAGMA user_version = ${migration.version}`);
+      if (db.commitMigration) await db.commitMigration(); else await db.exec('COMMIT');
+    } catch (err) {
+      if (db.rollbackMigration) await db.rollbackMigration(); else await db.exec('ROLLBACK');
+      throw err;
     }
-    // user_version does not accept a bound parameter; the value is an integer
-    // from our own constant list, so direct interpolation is safe.
-    await db.exec(`PRAGMA user_version = ${latest}`);
-    await db.exec('COMMIT');
-  } catch (err) {
-    await db.exec('ROLLBACK');
-    throw err;
   }
 }

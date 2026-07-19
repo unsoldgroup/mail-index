@@ -40,6 +40,7 @@ test('Worker context exposes the complete registry and gates mailbox writes by s
     await dispatch(writable, 'interest_propose', { account: 'acct-write' });
     assert.equal(intelligenceJobs, 0, 'intelligence tools read precomputed state without inline rebuild Jobs');
     const registered = await dispatch(writable, 'webhook_consumer_register', { url: 'https://consumer.example/hook', secret: 'secret' }) as { id: string };
+    await assert.rejects(() => dispatch(writable, 'webhook_consumer_register', { url: 'http://consumer.example/hook', secret: 'secret' }), /HTTPS/);
     const saved = await dispatch(writable, 'trigger_rule_save', { name: 'Primary', predicate: { conditions: [{ type: 'category', value: 'primary' }] }, consumer_ids: [registered.id] }) as { id: string };
     const listed = await dispatch(writable, 'trigger_rule_list', {}) as { rules: { id: string }[] };
     assert.equal(listed.rules[0]?.id, saved.id);

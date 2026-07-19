@@ -40,6 +40,20 @@ test('cron enqueues one sync Job per connected Account without Gmail', async () 
   finally { await mf.dispose(); }
 });
 
+test('a Queue send failure is marked failed and never strands Job deduplication', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    env.SYNC_QUEUE.send = async () => { throw new Error('queue unavailable'); };
+    await assert.rejects(() => enqueueScheduledSyncs(env), /queue unavailable/);
+    const failed = await driver.prepare('SELECT id,status,error FROM jobs').get() as { id: string; status: string; error: string };
+    assert.equal(failed.status, 'failed'); assert.equal(failed.error, 'queue enqueue failed');
+    env.SYNC_QUEUE.send = async (message: unknown) => { sent.push(message); };
+    await enqueueScheduledSyncs(env);
+    const rows = await driver.prepare('SELECT id,status FROM jobs ORDER BY created_at').all() as { id: string; status: string }[];
+    assert.equal(rows.length, 2); assert.notEqual(rows[1]?.id, failed.id); assert.equal(sent.length, 1);
+  } finally { await mf.dispose(); }
+});
+
 test('Job consumer runs sync→Enrichment→graph, is duplicate-safe, and reports progress', async () => {
   const { mf, env, driver, sent } = await fixture();
   try {

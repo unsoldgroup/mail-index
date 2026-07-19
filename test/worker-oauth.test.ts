@@ -3,7 +3,9 @@ import { test } from 'node:test';
 import { Miniflare } from 'miniflare';
 
 import { handlePublicRequest } from '../dist-worker/worker/index.js';
-import { decryptRefreshToken, signPayload } from '../dist-worker/worker/google-oauth.js';
+import { accessTokenProvider, decryptRefreshToken, saveGrant, signPayload } from '../dist-worker/worker/google-oauth.js';
+import { D1Driver } from '../dist/index/drivers/d1.js';
+import { runMigrations } from '../dist/index/migrations.js';
 
 const key = Buffer.alloc(32, 7).toString('base64');
 
@@ -49,5 +51,18 @@ test('Google connect encrypts independent Accounts and write re-consent replaces
     const html = await setup.text();
     assert.match(html, /one@example\.com/);
     assert.match(html, /two@example\.com/);
+  } finally { await mf.dispose(); }
+});
+
+test('re-consent invalidates the cached Google access token immediately', async () => {
+  const mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok") } }', d1Databases: ['DB'] });
+  try {
+    const driver = new D1Driver(await mf.getD1Database('DB')); await runMigrations(driver);
+    const env = { TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret' }; let exchanges = 0;
+    const fetchImpl = (async () => Response.json({ access_token: `access-${++exchanges}`, expires_in: 3600 })) as typeof fetch;
+    await saveGrant(driver, { account: 'acct', address: 'a@example.com', scopes: ['readonly'], refreshToken: 'one', key });
+    const provider = accessTokenProvider(driver, 'acct', env, fetchImpl); assert.equal(await provider(), 'access-1'); assert.equal(await provider(), 'access-1');
+    await saveGrant(driver, { account: 'acct', address: 'a@example.com', scopes: ['modify'], refreshToken: 'two', key });
+    assert.equal(await provider(), 'access-2'); assert.equal(exchanges, 2);
   } finally { await mf.dispose(); }
 });

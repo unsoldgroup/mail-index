@@ -21,7 +21,7 @@ export function triggerAdmin(driver: StorageDriver): TriggerAdmin {
     },
     async listRules() { const rows = await driver.prepare('SELECT * FROM trigger_rules ORDER BY created_at').all() as Record<string, unknown>[]; return { rules: rows.map((r) => ({ ...r, predicate: JSON.parse(String(r['predicate_json'])), consumer_ids: JSON.parse(String(r['consumer_ids_json'])), enabled: Boolean(r['enabled']), predicate_json: undefined, consumer_ids_json: undefined })) }; },
     async deleteRule(id) { const result = await driver.prepare('DELETE FROM trigger_rules WHERE id=?').run(id); return { deleted: result.changes > 0 }; },
-    async registerConsumer(input) { const id = String(input['id'] ?? crypto.randomUUID()); const url = new URL(String(input['url'])); if (!['https:', 'http:'].includes(url.protocol)) throw new Error('webhook consumer URL must use HTTP(S)'); const secret = String(input['secret'] ?? ''); if (!secret) throw new Error('webhook consumer secret is required'); await driver.prepare('INSERT INTO webhook_consumers(id,url,secret,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET url=excluded.url,secret=excluded.secret').run(id, url.toString(), secret, new Date().toISOString()); return { id }; },
+    async registerConsumer(input) { const id = String(input['id'] ?? crypto.randomUUID()); const url = new URL(String(input['url'])); if (url.protocol !== 'https:') throw new Error('webhook consumer URL must use HTTPS'); const secret = String(input['secret'] ?? ''); if (!secret) throw new Error('webhook consumer secret is required'); await driver.prepare('INSERT INTO webhook_consumers(id,url,secret,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET url=excluded.url,secret=excluded.secret').run(id, url.toString(), secret, new Date().toISOString()); return { id }; },
     async deleteConsumer(id) { const result = await driver.prepare('DELETE FROM webhook_consumers WHERE id=?').run(id); return { deleted: result.changes > 0 }; },
   };
 }
@@ -35,7 +35,8 @@ export async function evaluateRules(env: Env, driver: StorageDriver, repo: Repo,
       const params: DeliveryParams = { deliveryId: crypto.randomUUID(), rule: { id: rule.id, name: rule.name }, consumerId, matches };
       const jobId = crypto.randomUUID(); const now = new Date().toISOString();
       await driver.prepare(`INSERT INTO jobs(id,kind,account,params_json,status,progress_json,created_at) VALUES(?,?,?,?,?,?,?)`).run(jobId, 'webhook_delivery', account, JSON.stringify(params), 'queued', '{}', now);
-      await env.SYNC_QUEUE.send({ jobId, kind: 'webhook_delivery', account, params }); queued++;
+      try { await env.SYNC_QUEUE.send({ jobId, kind: 'webhook_delivery', account, params }); queued++; }
+      catch (error) { await driver.prepare(`UPDATE jobs SET status='failed',error=?,finished_at=? WHERE id=?`).run('queue enqueue failed', new Date().toISOString(), jobId); throw error; }
     }
   }
   return queued;

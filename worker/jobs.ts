@@ -20,7 +20,11 @@ export async function enqueueJob(env: Env, kind: JobKind, account: string, param
   const id = crypto.randomUUID();
   await driver.prepare(`INSERT INTO jobs(id,kind,account,params_json,status,progress_json,created_at) VALUES(?,?,?,?,?,?,?)`)
     .run(id, kind, account, JSON.stringify(params), 'queued', '{}', new Date().toISOString());
-  await env.SYNC_QUEUE.send({ jobId: id, kind, account, params });
+  try { await env.SYNC_QUEUE.send({ jobId: id, kind, account, params }); }
+  catch (error) {
+    await driver.prepare(`UPDATE jobs SET status='failed',error=?,finished_at=? WHERE id=?`).run('queue enqueue failed', new Date().toISOString(), id);
+    throw error;
+  }
   return id;
 }
 

@@ -49,6 +49,10 @@ export interface StorageDriver {
   prepare(sql: string): PreparedStatement;
   /** Apply a list of write statements atomically (D1 `batch()` model). */
   batch(statements: readonly BatchStatement[]): Promise<void>;
+  /** Optional DDL transaction hooks for engines whose migration atomicity uses a batch API. */
+  beginMigration?(): Promise<void>;
+  commitMigration?(): Promise<void>;
+  rollbackMigration?(): Promise<void>;
   /** Release the underlying connection. */
   close(): void;
 }

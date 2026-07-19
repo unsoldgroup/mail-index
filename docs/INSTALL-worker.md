@@ -90,6 +90,6 @@ From a clean Miniflare D1/KV/Queue fixture, migrations reached schema 12,
 read-only and write-consent Accounts remained independent, OAuth challenged MCP
 and A2A, a cron Job ran sync → Enrichment → graph, failed Jobs surfaced errors,
 signed webhook retry stopped on 2xx, seed replay converged after interruption,
-and all 420 tests passed. `wrangler deploy --dry-run` validated the production
+and all 426 tests passed. `wrangler deploy --dry-run` validated the production
 bundle and every declared binding. No real Cloudflare deploy is required by the
 implementation tickets.

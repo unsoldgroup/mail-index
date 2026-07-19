@@ -136,3 +136,30 @@ test('D1 and node:sqlite have identical porter stemming and weighted bm25 rankin
     assert.ok(Math.abs(d1Rows[i].score - sqliteRows[i].score) < 1e-12);
   }
 });
+
+test('D1 migration batches roll back on failure and concurrent first requests converge', async (t) => {
+  let Miniflare; try { ({ Miniflare } = await import('miniflare')); } catch { t.skip('Miniflare unavailable'); return; }
+  const mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok") } }', d1Databases: ['DB'] });
+  try {
+    const binding = await mf.getD1Database('DB'); const probe = new D1Driver(binding);
+    await probe.beginMigration(); await probe.exec('CREATE TABLE atomic_probe(id INTEGER PRIMARY KEY)'); await probe.exec('INSERT INTO missing_table VALUES(1)');
+    await assert.rejects(() => probe.commitMigration()); await probe.rollbackMigration();
+    assert.equal(await probe.prepare("SELECT name FROM sqlite_master WHERE name='atomic_probe'").get(), undefined);
+    await Promise.all([runMigrations(new D1Driver(binding)), runMigrations(new D1Driver(binding))]);
+    assert.equal(await getUserVersion(new D1Driver(binding)), SCHEMA_VERSION);
+  } finally { await mf.dispose(); }
+});
+
+test('D1 porter-FTS migration is atomic on a populated v6 database', async (t) => {
+  const fixture = await d1(t); if (!fixture) return;
+  try {
+    for (const migration of MIGRATIONS.filter(({ version }) => version <= 6)) await migration.up(fixture.driver);
+    await fixture.driver.exec('PRAGMA user_version = 6');
+    await fixture.driver.prepare(`INSERT INTO messages(account,gmail_message_id,subject,from_addr,snippet,body_state) VALUES(?,?,?,?,?,?)`).run('acct', 'm1', 'Refunds pending', 'billing@example.com', 'refund status', 'meta');
+    const row = await fixture.driver.prepare(`SELECT rowid FROM messages WHERE account='acct' AND gmail_message_id='m1'`).get();
+    await fixture.driver.prepare('INSERT INTO messages_fts(rowid,subject,sender,body) VALUES(?,?,?,?)').run(row.rowid, 'Refunds pending', 'billing@example.com', 'refund status');
+    await runMigrations(fixture.driver);
+    assert.equal(await getUserVersion(fixture.driver), SCHEMA_VERSION);
+    assert.equal((await fixture.driver.prepare(`SELECT count(*) n FROM messages_fts WHERE messages_fts MATCH 'refund'`).get()).n, 1);
+  } finally { await fixture.dispose(); }
+});

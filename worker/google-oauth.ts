@@ -70,6 +70,8 @@ export async function exchangeToken(fetchImpl: typeof fetch, params: Record<stri
   return payload as Record<string, unknown>;
 }
 
+const accessCache = new Map<string, { token: string; expiresAt: number }>();
+
 export async function saveGrant(driver: D1Driver, input: { account: string; address: string; scopes: string[]; refreshToken: string; key: string }): Promise<void> {
   const encrypted = await encryptRefreshToken(input.refreshToken, input.key);
   const now = new Date().toISOString();
@@ -77,9 +79,8 @@ export async function saveGrant(driver: D1Driver, input: { account: string; addr
     VALUES(?,?,?,?,?,?,?) ON CONFLICT(account) DO UPDATE SET address=excluded.address,scopes=excluded.scopes,
     refresh_token_ciphertext=excluded.refresh_token_ciphertext,iv=excluded.iv,updated_at=excluded.updated_at`)
     .run(input.account, input.address, input.scopes.join(' '), new Uint8Array(encrypted.ciphertext), encrypted.iv, now, now);
+  accessCache.delete(input.account);
 }
-
-const accessCache = new Map<string, { token: string; expiresAt: number }>();
 
 export function accessTokenProvider(driver: D1Driver, account: string, env: { TOKEN_ENC_KEY: string; GOOGLE_CLIENT_ID: string; GOOGLE_CLIENT_SECRET: string }, fetchImpl: typeof fetch): () => Promise<string> {
   return async () => {
