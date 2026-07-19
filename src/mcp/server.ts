@@ -393,7 +393,33 @@ export const TOOLS: ToolDef[] = [
         ...(Array.isArray(a['remove']) ? { remove: (a['remove'] as unknown[]).map(String) } : {}),
       }),
   },
+  {
+    name: 'trigger_rule_save', description: 'Create or update a remote Deployment Trigger rule.',
+    inputSchema: obj({ id: str, name: str, account: str, predicate: { type: 'object' }, consumer_ids: strArr, enabled: bool }, ['name', 'predicate', 'consumer_ids']),
+    run: (ctx, a) => requireTriggerAdmin(ctx).saveRule(a),
+  },
+  {
+    name: 'trigger_rule_list', description: 'List Trigger rules on this remote Deployment.', inputSchema: obj({}),
+    run: (ctx) => requireTriggerAdmin(ctx).listRules(),
+  },
+  {
+    name: 'trigger_rule_delete', description: 'Delete a Trigger rule from this remote Deployment.', inputSchema: obj({ id: str }, ['id']),
+    run: (ctx, a) => requireTriggerAdmin(ctx).deleteRule(String(a['id'])),
+  },
+  {
+    name: 'webhook_consumer_register', description: 'Register a signed-webhook consumer for Trigger rule deliveries.', inputSchema: obj({ id: str, url: str, secret: str }, ['url', 'secret']),
+    run: (ctx, a) => requireTriggerAdmin(ctx).registerConsumer(a),
+  },
+  {
+    name: 'webhook_consumer_delete', description: 'Delete a signed-webhook consumer from this remote Deployment.', inputSchema: obj({ id: str }, ['id']),
+    run: (ctx, a) => requireTriggerAdmin(ctx).deleteConsumer(String(a['id'])),
+  },
 ];
+
+function requireTriggerAdmin(ctx: ToolContext) {
+  if (!ctx.triggerAdmin) throw new McpToolError('Trigger rules are not available on this local Deployment');
+  return ctx.triggerAdmin;
+}
 
 /** Pull an optional string arg into a spread-able partial (omit when absent). */
 function optStr(a: Record<string, unknown>, key: string): Record<string, string> {
@@ -420,6 +446,23 @@ export async function dispatch(
   const tool = BY_NAME.get(name);
   if (!tool) throw new McpToolError(`unknown tool "${name}"`);
   return tool.run(ctx, args);
+}
+
+async function remoteizeHandbacks(ctx: ToolContext, value: unknown, fallbackAccount?: string): Promise<unknown> {
+  if (!ctx.enqueueJob) return value;
+  if (typeof value === 'string' && value.startsWith('mail-index ')) {
+    const account = /--account\s+([^\s]+)/.exec(value)?.[1] ?? fallbackAccount;
+    if (!account) return { status: 'requires_account', poll: 'sync_status' };
+    const kind = value.includes(' enrich ') ? 'enrich_bulk' : value.includes(' graph ') ? 'backfill' : 'sync';
+    const jobId = await ctx.enqueueJob(kind, account, { command: value });
+    return { job_id: jobId, status: 'queued', poll: 'sync_status' };
+  }
+  if (Array.isArray(value)) return Promise.all(value.map((item) => remoteizeHandbacks(ctx, item, fallbackAccount)));
+  if (value && typeof value === 'object') {
+    const entries = await Promise.all(Object.entries(value).map(async ([key, item]) => [key, await remoteizeHandbacks(ctx, item, fallbackAccount)] as const));
+    return Object.fromEntries(entries);
+  }
+  return value;
 }
 
 /** The `tools/list` payload (exported for tests): name + description + schema. */
@@ -478,7 +521,8 @@ export function buildServer(ctx: ToolContext): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     try {
-      const result = await dispatch(ctx, name, (args ?? {}) as Record<string, unknown>);
+      const callArgs = (args ?? {}) as Record<string, unknown>;
+      const result = await remoteizeHandbacks(ctx, await dispatch(ctx, name, callArgs), typeof callArgs['account'] === 'string' ? callArgs['account'] : undefined);
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

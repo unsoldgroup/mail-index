@@ -54,7 +54,7 @@ const NEWSLETTER_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-test('htmlToText strips scripts, styles, head and tags but keeps prose', () => {
+test('htmlToText strips scripts, styles, head and tags but keeps prose', async () => {
   const text = htmlToText(NEWSLETTER_HTML);
   assert.ok(text.includes('new zodiac schedules'), 'real content survives');
   assert.ok(!/<[a-z]/i.test(text), 'no leftover HTML tags');
@@ -62,11 +62,11 @@ test('htmlToText strips scripts, styles, head and tags but keeps prose', () => {
   assert.ok(!text.includes('font-family'), 'style body gone');
 });
 
-test('htmlToText decodes entities', () => {
+test('htmlToText decodes entities', async () => {
   assert.equal(htmlToText('a &amp; b &copy; &#8212; &#x2014;').trim(), 'a & b © — —');
 });
 
-test('distill shrinks a newsletter dramatically and drops footer chrome', () => {
+test('distill shrinks a newsletter dramatically and drops footer chrome', async () => {
   const out = distill({ bodyText: null, bodyHtml: NEWSLETTER_HTML, mimeType: 'text/html' });
 
   // The real prose is retained.
@@ -87,7 +87,7 @@ test('distill shrinks a newsletter dramatically and drops footer chrome', () => 
   );
 });
 
-test('distill removes quoted reply history ("On … wrote:" + > lines)', () => {
+test('distill removes quoted reply history ("On … wrote:" + > lines)', async () => {
   const body =
     'Hi Al,\n\nConfirming the 20% deposit is due Friday. Wire details below.\n\n' +
     'Best,\nJordan\n\n' +
@@ -102,7 +102,7 @@ test('distill removes quoted reply history ("On … wrote:" + > lines)', () => {
   assert.ok(!/^\s*>/m.test(out), 'no quote-prefixed lines remain');
 });
 
-test('distill removes a signature block after the -- delimiter', () => {
+test('distill removes a signature block after the -- delimiter', async () => {
   const body =
     'Sounds good, see you Friday.\n\n--\nJordan Partner\nVP, Charters\n+1 555 0100\njordan@partner.example.com';
   const out = distill({ bodyText: body, bodyHtml: null });
@@ -112,7 +112,7 @@ test('distill removes a signature block after the -- delimiter', () => {
   assert.ok(!out.includes('555 0100'), 'signature phone removed');
 });
 
-test('distill prefers plain bodyText over HTML when both present', () => {
+test('distill prefers plain bodyText over HTML when both present', async () => {
   const out = distill({
     bodyText: 'the plain text version',
     bodyHtml: '<p>the <b>html</b> version</p>',
@@ -121,28 +121,28 @@ test('distill prefers plain bodyText over HTML when both present', () => {
   assert.equal(out, 'the plain text version');
 });
 
-test('distill falls back to stripped HTML when bodyText is empty/blank', () => {
+test('distill falls back to stripped HTML when bodyText is empty/blank', async () => {
   const out = distill({ bodyText: '   \n  ', bodyHtml: '<p>html fallback content</p>', mimeType: null });
   assert.equal(out, 'html fallback content');
 });
 
-test('distill is deterministic and returns "" for a bodyless message', () => {
+test('distill is deterministic and returns "" for a bodyless message', async () => {
   const a = distill({ bodyText: null, bodyHtml: NEWSLETTER_HTML });
   const b = distill({ bodyText: null, bodyHtml: NEWSLETTER_HTML });
   assert.equal(a, b, 'same input → same output');
   assert.equal(distill({ bodyText: null, bodyHtml: null }), '');
 });
 
-test('normalizeWhitespace collapses blank-line runs and trims', () => {
+test('normalizeWhitespace collapses blank-line runs and trims', async () => {
   assert.equal(normalizeWhitespace('a\n\n\n\nb\n   \n c '), 'a\n\nb\n\nc');
 });
 
-test('deboilerplate keeps content when there is no boilerplate', () => {
+test('deboilerplate keeps content when there is no boilerplate', async () => {
   const text = 'Line one.\nLine two.\nLine three.';
   assert.equal(deboilerplate(text), text);
 });
 
-test('decodeQuotedPrintable strips soft breaks and decodes multibyte =XX', () => {
+test('decodeQuotedPrintable strips soft breaks and decodes multibyte =XX', async () => {
   // Soft line break splitting a word: "o=\n ur" → "o ur" (the `=` + newline go).
   assert.equal(decodeQuotedPrintable('jo=\nin us'), 'join us');
   // Multibyte UTF-8: en dash (=E2=80=93) and zero-width space (=E2=80=8B).
@@ -152,7 +152,7 @@ test('decodeQuotedPrintable strips soft breaks and decodes multibyte =XX', () =>
   assert.equal(decodeQuotedPrintable('2 = 2'), '2 = 2');
 });
 
-test('distill decodes a quoted-printable body and leaves no mojibake', () => {
+test('distill decodes a quoted-printable body and leaves no mojibake', async () => {
   // A real text/plain alternative as a provider hands it over, QP-encoded:
   // soft breaks (=\n) wrapping long lines, a zero-width space (=E2=80=8B),
   // an en dash (=E2=80=93), and a curly apostrophe (=E2=80=99).
@@ -170,7 +170,7 @@ test('distill decodes a quoted-printable body and leaves no mojibake', () => {
   assert.ok(out.includes('deposit by Friday'), 'soft break inside a word rejoined');
 });
 
-test('distill decodes HTML entities and strips zero-width padding (image-only inflation)', () => {
+test('distill decodes HTML entities and strips zero-width padding (image-only inflation)', async () => {
   // An entity-padded, image-only body (e.g. a Silversea offer where the prose
   // lives in images and the text is just invisible padding around alt copy).
   const html =
@@ -187,20 +187,20 @@ test('distill decodes HTML entities and strips zero-width padding (image-only in
   assert.equal(out, 'View this beautiful offer — Antarctica’s 2026 season…');
 });
 
-test('looksQuotedPrintable: lone =XX is not QP; soft break / multibyte run is', () => {
+test('looksQuotedPrintable: lone =XX is not QP; soft break / multibyte run is', async () => {
   assert.equal(looksQuotedPrintable('Invoice total=42, code=CD'), false);
   assert.equal(looksQuotedPrintable('a=b and c=d'), false);
   assert.equal(looksQuotedPrintable('wrap=\nhere'), true);
   assert.equal(looksQuotedPrintable('dash =E2=80=93 here'), true);
 });
 
-test('distill leaves a normal plain-text body untouched (no QP/entity mangling)', () => {
+test('distill leaves a normal plain-text body untouched (no QP/entity mangling)', async () => {
   // Contains a lone =42 / =CD and literal visible entities — none must be rewritten.
   const body = 'Invoice total=42 USD. Use Q&amp;A and <tag> literally; part=CD.';
   assert.equal(distill({ bodyText: body, bodyHtml: null }), body);
 });
 
-test('distill strips invisible-padding entities from a plain-text body but keeps visible ones', () => {
+test('distill strips invisible-padding entities from a plain-text body but keeps visible ones', async () => {
   // Silversea-style padding can also arrive in a text/plain alternative.
   const body = 'Save&zwnj; &shy;up&#8203; to 40% &amp; more';
   // &zwnj;/&shy;/&#8203; (invisible) removed; &amp; stays LITERAL (it's content here).

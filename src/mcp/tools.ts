@@ -84,6 +84,14 @@ export class McpToolError extends Error {
  * `false` when it was debounced/declined (e.g. a sync is already running).
  */
 export type BackgroundSync = (account: string, since?: string) => boolean;
+export type EnqueueJob = (kind: 'sync' | 'backfill' | 'enrich_bulk', account: string, params?: Record<string, unknown>) => Promise<string>;
+export interface TriggerAdmin {
+  saveRule(input: Record<string, unknown>): Promise<unknown>;
+  listRules(): Promise<unknown>;
+  deleteRule(id: string): Promise<unknown>;
+  registerConsumer(input: Record<string, unknown>): Promise<unknown>;
+  deleteConsumer(id: string): Promise<unknown>;
+}
 
 /** Everything the tools read/write. INDEX-ONLY except the one O(1) enrich seam. */
 export interface ToolContext {
@@ -101,6 +109,11 @@ export interface ToolContext {
   backgroundSync?: BackgroundSync;
   /** Clock seam for deterministic freshness tests. Defaults to `Date`. */
   now?: () => Date;
+  /** Remote Deployment Job status; absent locally so the local response shape is unchanged. */
+  jobStatus?: (account?: string) => Promise<unknown>;
+  enqueueJob?: EnqueueJob;
+  /** Remote-Deployment Trigger rule administration; absent on local Deployment. */
+  triggerAdmin?: TriggerAdmin;
 }
 
 /** The freshness staleness threshold for reads (ADR-0005): "a few hours" (3h).
@@ -117,24 +130,24 @@ export const SYNC_ETA_SECONDS = 90;
  * Cross-account (no `account`) returns the OLDEST such timestamp across accounts
  * — the index is only as fresh as its stalest mailbox. Null when never synced.
  */
-function indexAsOf(repo: Repo, account?: string): string | null {
+async function indexAsOf(repo: Repo, account?: string): Promise<string | null> {
   if (account) {
-    const row = repo.db
+    const row = (await repo.driver
       .prepare(
         `SELECT finished_at FROM sync_runs
           WHERE account = ? AND finished_at IS NOT NULL AND error IS NULL
           ORDER BY finished_at DESC LIMIT 1`,
       )
-      .get(account) as { finished_at: string | null } | undefined;
+      .get(account)) as { finished_at: string | null } | undefined;
     return row?.finished_at ?? null;
   }
-  const rows = repo.db
+  const rows = (await repo.driver
     .prepare(
       `SELECT account, max(finished_at) AS f FROM sync_runs
         WHERE finished_at IS NOT NULL AND error IS NULL
         GROUP BY account`,
     )
-    .all() as { account: string; f: string | null }[];
+    .all()) as { account: string; f: string | null }[];
   if (rows.length === 0) return null;
   let oldest: string | null = null;
   for (const r of rows) {
@@ -158,7 +171,7 @@ export interface Freshness {
   /** True when a sync for this account is in flight right now. */
   syncing: boolean;
   /** The CLI command to refresh this scope manually. */
-  refresh_command: string;
+  refresh_command: unknown;
 }
 
 /** A response carrying the ADR-0005 freshness stamp. */
@@ -184,20 +197,20 @@ export interface WithMeta {
  * writer; the sync_runs lock is the guard) makes calling this on every response
  * safe — this is the single freshness + auto-refresh authority for the server.
  */
-function withMeta<T extends object>(ctx: ToolContext, account: string | undefined, body: T): T & WithMeta {
+async function withMeta<T extends object>(ctx: ToolContext, account: string | undefined, body: T): Promise<T & WithMeta> {
   // When the caller omitted `account` but there's a single mailbox, scope
   // freshness (and the auto-refresh) to it — otherwise a no-account read (the
   // common single-mailbox case) would never auto-refresh. A genuinely
   // multi-account cross read stays cross-account (oldest stamp, no single spawn).
-  const acct = account ?? soleAccount(ctx);
-  const asOf = indexAsOf(ctx.repo, acct);
+  const acct = account ?? await soleAccount(ctx);
+  const asOf = await indexAsOf(ctx.repo, acct);
   const now = (ctx.now?.() ?? new Date()).getTime();
   const ageMs = asOf == null ? null : now - new Date(asOf).getTime();
   const stale = ageMs == null || ageMs > STALE_AFTER_MS;
-  const syncing = acct != null && ctx.repo.activeSyncRun(acct) != null;
-  const refresh_command = acct
-    ? handback('sync', '--account', acct)
-    : handback('sync', '--all-accounts');
+  const syncing = acct != null && await ctx.repo.activeSyncRun(acct) != null;
+  const refresh_command: unknown = ctx.enqueueJob
+    ? { kind: 'sync', account: acct ?? null, status: 'available', poll: 'sync_status' }
+    : acct ? handback('sync', '--account', acct) : handback('sync', '--all-accounts');
 
   const meta: WithMeta = {
     index_as_of: asOf,
@@ -208,7 +221,14 @@ function withMeta<T extends object>(ctx: ToolContext, account: string | undefine
   // INCREMENTAL sync. `since` = days elapsed + 1 day of overlap (idempotent
   // upsert makes re-fetching the boundary day harmless); a never-synced account
   // passes no `since`, so its first sweep is a correct initial full sync.
-  if (acct && stale && !syncing && ctx.backgroundSync) {
+  if (acct && stale && !syncing && ctx.enqueueJob) {
+    const since = asOf == null ? undefined : `${Math.ceil(ageMs! / 86_400_000) + 1}d`;
+    const jobId = await ctx.enqueueJob('sync', acct, since ? { since } : {});
+    meta.sync_started = true;
+    meta.eta_seconds = SYNC_ETA_SECONDS;
+    meta.freshness.syncing = true;
+    meta.freshness.refresh_command = { job_id: jobId, status: 'queued', poll: 'sync_status' };
+  } else if (acct && stale && !syncing && ctx.backgroundSync) {
     const since = asOf == null ? undefined : `${Math.ceil(ageMs! / 86_400_000) + 1}d`;
     if (ctx.backgroundSync(acct, since)) {
       meta.sync_started = true;
@@ -274,12 +294,12 @@ export interface HitShape {
  * {@link Repo.labelMap} so a result set spanning many rows (and accounts) does
  * one map fetch per account, not per row. Unknown ids pass through.
  */
-function labelRenderer(repo: ToolContext['repo']): (account: string, ids: string[]) => string[] {
+function labelRenderer(repo: ToolContext['repo']): (account: string, ids: string[]) => Promise<string[]> {
   const cache = new Map<string, Map<string, string>>();
-  return (account, ids) => {
+  return async (account, ids) => {
     let map = cache.get(account);
     if (!map) {
-      map = repo.labelMap(account);
+      map = await repo.labelMap(account);
       cache.set(account, map);
     }
     return ids.map((id) => map.get(id) ?? id);
@@ -287,7 +307,7 @@ function labelRenderer(repo: ToolContext['repo']): (account: string, ids: string
 }
 
 /** Project a row to a compact hit. `render` translates its label ids → names. */
-function toHit(row: MessageRow, render: (account: string, ids: string[]) => string[]): HitShape {
+async function toHit(row: MessageRow, render: (account: string, ids: string[]) => Promise<string[]>): Promise<HitShape> {
   return {
     ref: messageRef(row),
     account: row.account,
@@ -299,7 +319,7 @@ function toHit(row: MessageRow, render: (account: string, ids: string[]) => stri
     has_summary: row.summary_text != null,
     unread: row.unread === 1,
     direction: row.direction,
-    labels: render(row.account, parseLabels(row.labels_json)),
+    labels: await render(row.account, parseLabels(row.labels_json)),
   };
 }
 
@@ -408,15 +428,15 @@ export interface SearchArgs {
  * detail still surfaces neighbours rather than nothing. Never dumps bodies — the
  * agent opts in per hit via `get_message`.
  */
-export function search(ctx: ToolContext, args: SearchArgs): WithMeta & { hits: HitShape[] } {
+export async function search(ctx: ToolContext, args: SearchArgs): Promise<WithMeta & { hits: HitShape[] }> {
   const terms = args.query.split(/\s+/).filter((t) => t !== '');
   const q = buildMatch(terms, { expand: true });
-  const rows = q === '' ? [] : ctx.repo.searchMessages(q, {
+  const rows = q === '' ? [] : await ctx.repo.searchMessages(q, {
     ...(args.account ? { account: args.account } : {}),
     limit: args.limit ?? 15,
   });
   const render = labelRenderer(ctx.repo);
-  return withMeta(ctx, args.account, { hits: rows.map((r) => toHit(r, render)) });
+  return await withMeta(ctx, args.account, { hits: await Promise.all(rows.map((r) => toHit(r, render))) });
 }
 
 export interface ListLabeledArgs {
@@ -432,18 +452,18 @@ export interface ListLabeledArgs {
  * exact by the per-sync inbox reconcile); `UNREAD` answers "what's unread";
  * any user label filters to that label. Snippet-first like {@link search}.
  */
-export function listLabeled(ctx: ToolContext, args: ListLabeledArgs): WithMeta & { hits: HitShape[] } {
+export async function listLabeled(ctx: ToolContext, args: ListLabeledArgs): Promise<WithMeta & { hits: HitShape[] }> {
   // Accept a friendly label NAME as well as an id: resolve "Coverage Review" →
   // Label_123… (scoped to the account when given) before the membership query.
   const label =
-    (args.account ? ctx.repo.labelNameToId(args.account).get(args.label.toLowerCase()) : undefined) ??
+    (args.account ? (await ctx.repo.labelNameToId(args.account)).get(args.label.toLowerCase()) : undefined) ??
     args.label;
-  const rows = ctx.repo.messagesByLabel(label, {
+  const rows = await ctx.repo.messagesByLabel(label, {
     ...(args.account ? { account: args.account } : {}),
     limit: args.limit ?? 15,
   });
   const render = labelRenderer(ctx.repo);
-  return withMeta(ctx, args.account, { hits: rows.map((r) => toHit(r, render)) });
+  return await withMeta(ctx, args.account, { hits: await Promise.all(rows.map((r) => toHit(r, render))) });
 }
 
 export interface RefreshInboxArgs {
@@ -478,13 +498,13 @@ export interface RefreshInboxResult extends WithMeta {
  * `refreshed=false`, so the tool is always answerable.
  */
 export async function refreshInbox(ctx: ToolContext, args: RefreshInboxArgs): Promise<RefreshInboxResult> {
-  const account = requireAccount(ctx, args.account, 'refresh_inbox');
+  const account = await requireAccount(ctx, args.account, 'refresh_inbox');
   const limit = args.limit ?? 15;
 
   let refreshed = false;
   let counts = { added: 0, archived: 0, restored: 0 };
   const accCfg = ctx.config.accounts[account];
-  if (ctx.buildSource && accCfg && ctx.repo.activeSyncRun(account) == null) {
+  if (ctx.buildSource && accCfg && await ctx.repo.activeSyncRun(account) == null) {
     try {
       const source = ctx.buildSource(accCfg);
       // Probe own-address so newly-indexed inbox mail classifies direction (§8).
@@ -503,9 +523,9 @@ export async function refreshInbox(ctx: ToolContext, args: RefreshInboxArgs): Pr
     }
   }
 
-  const rows = ctx.repo.messagesByLabel('INBOX', { account, limit });
+  const rows = await ctx.repo.messagesByLabel('INBOX', { account, limit });
   const render = labelRenderer(ctx.repo);
-  return withMeta(ctx, account, { refreshed, ...counts, hits: rows.map((r) => toHit(r, render)) });
+  return await withMeta(ctx, account, { refreshed, ...counts, hits: await Promise.all(rows.map((r) => toHit(r, render))) });
 }
 
 export interface GetMessageArgs {
@@ -555,7 +575,7 @@ export interface MessageDetail extends WithMeta {
 export async function getMessage(ctx: ToolContext, args: GetMessageArgs): Promise<MessageDetail> {
   const { account, id } = parseToolRef(args.ref);
   const level = args.level ?? 'summary';
-  let row = ctx.repo.getMessage(account, id);
+  let row = await ctx.repo.getMessage(account, id);
   if (!row) {
     throw new McpToolError(
       `message ${account}:${id} is not in the index — sync the account first ` +
@@ -572,7 +592,7 @@ export async function getMessage(ctx: ToolContext, args: GetMessageArgs): Promis
       if (accCfg) {
         const source = ctx.buildSource(accCfg);
         enriched = await enrichOne({ account, id, source, repo: ctx.repo });
-        const refreshed = ctx.repo.getMessage(account, id);
+        const refreshed = await ctx.repo.getMessage(account, id);
         if (refreshed) row = refreshed;
       }
     } catch {
@@ -588,7 +608,7 @@ export async function getMessage(ctx: ToolContext, args: GetMessageArgs): Promis
   // meaning is in the images, not the text.
   const ocrImages = parseOcrImages(row.ocr_images_json);
   const needsOcr = isLikelyImageOnly(row.body_text, ocrImages.length);
-  return withMeta(ctx, account, {
+  return await withMeta(ctx, account, {
     ref: messageRef(row),
     account: row.account,
     from: row.from_addr,
@@ -603,7 +623,7 @@ export async function getMessage(ctx: ToolContext, args: GetMessageArgs): Promis
     important: row.important === 1,
     isList: row.is_list === 1,
     direction: row.direction,
-    labels: ctx.repo.labelNames(account, parseLabels(row.labels_json)),
+    labels: await ctx.repo.labelNames(account, parseLabels(row.labels_json)),
     bodyState: row.body_state,
     summary: row.summary_text,
     body,
@@ -660,7 +680,7 @@ async function mutateLabels(
   const source = ctx.buildSource(accCfg);
   try {
     const result = await applyMailboxLabelChange({ account, id, source, repo: ctx.repo, change });
-    return withMeta(ctx, account, {
+    return await withMeta(ctx, account, {
       ref: `${account}:${id}`,
       labels: result.labelNames,
       indexed: result.indexed,
@@ -677,7 +697,7 @@ async function mutateLabels(
  * `archive_message` — OPT-IN write. Archive one message (drop its `INBOX`
  * label). Mutates the mailbox; requires a `gmail.modify` grant.
  */
-export function archiveMessage(
+export async function archiveMessage(
   ctx: ToolContext,
   args: ArchiveMessageArgs,
 ): Promise<MutateToolResult & WithMeta> {
@@ -721,25 +741,25 @@ export interface GetThreadArgs {
 }
 
 /** `get_thread` — thread metadata + its messages + the thread summary (PLAN §12). */
-export function getThread(
+export async function getThread(
   ctx: ToolContext,
   args: GetThreadArgs,
-): WithMeta & {
+): Promise<WithMeta & {
   thread: ThreadShape | null;
   summary: string | null;
   messages: HitShape[];
-} {
+}> {
   const { account, id } = parseToolRef(args.ref);
-  const row = ctx.repo.getThread(account, id);
-  const messages = ctx.repo.threadMessages(account, id);
+  const row = await ctx.repo.getThread(account, id);
+  const messages = await ctx.repo.threadMessages(account, id);
   if (!row && messages.length === 0) {
     throw new McpToolError(`thread ${account}:${id} is not in the index`);
   }
   const render = labelRenderer(ctx.repo);
-  return withMeta(ctx, account, {
+  return await withMeta(ctx, account, {
     thread: row ? toThread(row) : null,
     summary: row?.summary_text ?? null,
-    messages: messages.map((m) => toHit(m, render)),
+    messages: await Promise.all(messages.map((m) => toHit(m, render))),
   });
 }
 
@@ -752,22 +772,22 @@ export interface ListContactsArgs {
 }
 
 /** `list_contacts` — ranked, filterable contact list (PLAN §12, DESIGN TEST recall). */
-export function listContacts(
+export async function listContacts(
   ctx: ToolContext,
   args: ListContactsArgs,
-): WithMeta & { contacts: ContactShape[] } {
+): Promise<WithMeta & { contacts: ContactShape[] }> {
   const filter: { correspondent?: boolean; curation?: Curation } = {};
   if (args.filter === 'correspondent') filter.correspondent = true;
   else if (args.filter && (CURATIONS as readonly string[]).includes(args.filter)) {
     filter.curation = args.filter as Curation;
   }
-  const rows = ctx.repo.listContacts({
+  const rows = await ctx.repo.listContacts({
     ...(args.account ? { account: args.account } : {}),
     ...(args.sort ? { sort: args.sort } : {}),
     filter,
     limit: args.limit ?? 20,
   });
-  return withMeta(ctx, args.account, { contacts: rows.map(toContact) });
+  return await withMeta(ctx, args.account, { contacts: rows.map(toContact) });
 }
 
 export interface GetContactArgs {
@@ -781,20 +801,20 @@ export interface GetContactArgs {
  * On a non-exact hit it falls back to {@link findContacts} so a near-miss returns
  * the ranked candidates rather than nothing (DESIGN TEST recall).
  */
-export function getContact(
+export async function getContact(
   ctx: ToolContext,
   args: GetContactArgs,
-): WithMeta & {
+): Promise<WithMeta & {
   contact: ContactShape | null;
   recentThreads: ThreadShape[];
   candidates?: ContactShape[];
-} {
+}> {
   let account = args.account;
-  let row = account ? ctx.repo.getContactDetail(account, args.address) : undefined;
+  let row = account ? await ctx.repo.getContactDetail(account, args.address) : undefined;
   if (!row && !account) {
     // Cross-account exact resolution: the first account that has the address.
-    const found = ctx.repo
-      .findContacts(args.address, { limit: 25 })
+    const found = (await ctx.repo
+      .findContacts(args.address, { limit: 25 }))
       .find((c) => c.address === args.address);
     if (found) {
       account = found.account;
@@ -803,13 +823,13 @@ export function getContact(
   }
   if (!row) {
     // Near-miss: return ranked candidates so the answer is never a bare empty.
-    const candidates = ctx.repo
-      .findContacts(args.address, { ...(account ? { account } : {}), limit: 10 })
+    const candidates = (await ctx.repo
+      .findContacts(args.address, { ...(account ? { account } : {}), limit: 10 }))
       .map(toContact);
-    return withMeta(ctx, account, { contact: null, recentThreads: [], candidates });
+    return await withMeta(ctx, account, { contact: null, recentThreads: [], candidates });
   }
-  const recentThreads = ctx.repo.threadsForContact(row.account, row.address, 10).map(toThread);
-  return withMeta(ctx, row.account, { contact: toContact(row), recentThreads });
+  const recentThreads = (await ctx.repo.threadsForContact(row.account, row.address, 10)).map(toThread);
+  return await withMeta(ctx, row.account, { contact: toContact(row), recentThreads });
 }
 
 export interface FindPersonArgs {
@@ -825,15 +845,15 @@ export interface FindPersonArgs {
  * substrings of name/address/domain, so a half-remembered fragment resolves and
  * never returns a bare empty set where a near-miss exists (DESIGN TEST recall).
  */
-export function findPerson(
+export async function findPerson(
   ctx: ToolContext,
   args: FindPersonArgs,
-): WithMeta & { matches: ContactShape[] } {
-  const rows = ctx.repo.findContacts(args.hint, {
+): Promise<WithMeta & { matches: ContactShape[] }> {
+  const rows = await ctx.repo.findContacts(args.hint, {
     ...(args.account ? { account: args.account } : {}),
     limit: args.limit ?? 10,
   });
-  return withMeta(ctx, args.account, { matches: rows.map(toContact) });
+  return await withMeta(ctx, args.account, { matches: rows.map(toContact) });
 }
 
 export interface ListThreadsArgs {
@@ -844,30 +864,30 @@ export interface ListThreadsArgs {
 }
 
 /** `list_threads` — conversations by contact OR by query (PLAN §12). */
-export function listThreads(
+export async function listThreads(
   ctx: ToolContext,
   args: ListThreadsArgs,
-): WithMeta & { threads: ThreadShape[] } {
+): Promise<WithMeta & { threads: ThreadShape[] }> {
   let rows: ThreadRow[];
   if (args.contact) {
     // By-contact needs an account to scope the participant search; default to
     // the contact's resolved account when omitted.
     let account = args.account;
     if (!account) {
-      const found = ctx.repo.findContacts(args.contact, { limit: 1 })[0];
+      const found = (await ctx.repo.findContacts(args.contact, { limit: 1 }))[0];
       account = found?.account;
     }
-    rows = account ? ctx.repo.threadsForContact(account, args.contact, args.limit ?? 20) : [];
+    rows = account ? await ctx.repo.threadsForContact(account, args.contact, args.limit ?? 20) : [];
   } else if (args.query) {
     const q = buildMatch(args.query.split(/\s+/).filter((t) => t !== ''));
-    rows = q === '' ? [] : ctx.repo.threadsForQuery(q, {
+    rows = q === '' ? [] : await ctx.repo.threadsForQuery(q, {
       ...(args.account ? { account: args.account } : {}),
       limit: args.limit ?? 20,
     });
   } else {
     throw new McpToolError('list_threads requires either "contact" or "query"');
   }
-  return withMeta(ctx, args.account, { threads: rows.map(toThread) });
+  return await withMeta(ctx, args.account, { threads: rows.map(toThread) });
 }
 
 export interface GraphNeighborsArgs {
@@ -882,25 +902,25 @@ export interface GraphNeighborsArgs {
  * to ranked near-misses via {@link findContacts} so the answer is never a bare
  * empty set (DESIGN TEST recall); `fallback` flags that.
  */
-export function graphNeighbors(
+export async function graphNeighbors(
   ctx: ToolContext,
   args: GraphNeighborsArgs,
-): WithMeta & { neighbors: GraphNeighborRow[]; fallback: boolean } {
+): Promise<WithMeta & { neighbors: GraphNeighborRow[]; fallback: boolean }> {
   let account = args.account;
   if (!account) {
-    const found = ctx.repo.findContacts(args.address, { limit: 1 })[0];
+    const found = (await ctx.repo.findContacts(args.address, { limit: 1 }))[0];
     account = found?.account;
   }
   const neighbors = account
-    ? ctx.repo.graphNeighbors(account, args.address, args.limit ?? 15)
+    ? await ctx.repo.graphNeighbors(account, args.address, args.limit ?? 15)
     : [];
   if (neighbors.length > 0) {
-    return withMeta(ctx, account, { neighbors, fallback: false });
+    return await withMeta(ctx, account, { neighbors, fallback: false });
   }
   // Near-miss fallback: project the ranked contact candidates as zero-weight
   // neighbours so the agent still gets ranked entry points.
-  const fb = ctx.repo.findContacts(args.address, { ...(account ? { account } : {}), limit: 10 });
-  return withMeta(ctx, account, {
+  const fb = await ctx.repo.findContacts(args.address, { ...(account ? { account } : {}), limit: 10 });
+  return await withMeta(ctx, account, {
     neighbors: fb
       .filter((c) => c.address !== args.address)
       .map((c) => ({
@@ -922,25 +942,25 @@ export interface GraphCommunitiesArgs {
 }
 
 /** `graph_communities` — detected social circles (PLAN §12, D8). */
-export function graphCommunities(
+export async function graphCommunities(
   ctx: ToolContext,
   args: GraphCommunitiesArgs,
-): WithMeta & {
-  communities: ReturnType<Repo['graphCommunities']>;
+): Promise<WithMeta & {
+  communities: Awaited<ReturnType<Repo['graphCommunities']>>;
   /** A handback to (re)build the graph when none exists (ADR-0001, O(N)). */
   build_command?: string;
-} {
+}> {
   // Communities require an account scope (community ids are per-account); default
   // to the sole account when omitted.
-  const account = args.account ?? soleAccount(ctx);
+  const account = args.account ?? await soleAccount(ctx);
   const communities = account
-    ? ctx.repo.graphCommunities(account, args.memberLimit ?? 10)
+    ? await ctx.repo.graphCommunities(account, args.memberLimit ?? 10)
     : [];
   const body: { communities: typeof communities; build_command?: string } = { communities };
   if (communities.length === 0 && account) {
     body.build_command = handback('graph', 'build', '--account', account);
   }
-  return withMeta(ctx, account, body);
+  return await withMeta(ctx, account, body);
 }
 
 // ---- curation write-back loop (M3.1, PLAN §11) ----------------------------
@@ -952,15 +972,15 @@ export interface InterestProposeArgs {
 }
 
 /** `interest_propose` — the curation SEED shortlist (PLAN §11/§12, D13). */
-export function interestPropose(ctx: ToolContext, args: InterestProposeArgs): WithMeta & {
-  proposal: ReturnType<typeof propose>;
-} {
-  const account = requireAccount(ctx, args.account, 'interest_propose');
-  const proposal = propose(ctx.repo, account, {
+export async function interestPropose(ctx: ToolContext, args: InterestProposeArgs): Promise<WithMeta & {
+  proposal: Awaited<ReturnType<typeof propose>>;
+}> {
+  const account = await requireAccount(ctx, args.account, 'interest_propose');
+  const proposal = await propose(ctx.repo, account, {
     ...(args.contactLimit != null ? { contactLimit: args.contactLimit } : {}),
     ...(args.domainLimit != null ? { domainLimit: args.domainLimit } : {}),
   });
-  return withMeta(ctx, account, { proposal });
+  return await withMeta(ctx, account, { proposal });
 }
 
 export interface InterestSetArgs {
@@ -971,16 +991,16 @@ export interface InterestSetArgs {
 }
 
 /** `interest_set` — persist the curation disposition (PLAN §11/§12, D14). */
-export function interestSet(ctx: ToolContext, args: InterestSetArgs): WithMeta & {
-  result: ReturnType<typeof curationSet>;
-} {
-  const account = requireAccount(ctx, args.account, 'interest_set');
-  const result = curationSet(ctx.repo, account, {
+export async function interestSet(ctx: ToolContext, args: InterestSetArgs): Promise<WithMeta & {
+  result: Awaited<ReturnType<typeof curationSet>>;
+}> {
+  const account = await requireAccount(ctx, args.account, 'interest_set');
+  const result = await curationSet(ctx.repo, account, {
     ...(args.contacts ? { contacts: args.contacts } : {}),
     ...(args.domains ? { domains: args.domains } : {}),
     ...(args.keywords ? { keywords: args.keywords } : {}),
   });
-  return withMeta(ctx, account, { result });
+  return await withMeta(ctx, account, { result });
 }
 
 export interface InterestGetArgs {
@@ -988,11 +1008,11 @@ export interface InterestGetArgs {
 }
 
 /** `interest_get` — read back the curated profile (PLAN §11/§12). */
-export function interestGet(ctx: ToolContext, args: InterestGetArgs): WithMeta & {
-  profile: ReturnType<typeof curationGet>;
-} {
-  const account = requireAccount(ctx, args.account, 'interest_get');
-  return withMeta(ctx, account, { profile: curationGet(ctx.repo, account) });
+export async function interestGet(ctx: ToolContext, args: InterestGetArgs): Promise<WithMeta & {
+  profile: Awaited<ReturnType<typeof curationGet>>;
+}> {
+  const account = await requireAccount(ctx, args.account, 'interest_get');
+  return await withMeta(ctx, account, { profile: await curationGet(ctx.repo, account) });
 }
 
 // ---- summarization write-back (M3.5, ADR-0003) ----------------------------
@@ -1005,13 +1025,13 @@ export interface SaveSummaryArgs {
 }
 
 /** `save_summary` — persist an agent summary at message/thread level (PLAN §12, ADR-0003). */
-export function saveSummaryTool(ctx: ToolContext, args: SaveSummaryArgs): WithMeta & {
-  result: ReturnType<typeof saveSummary>;
-} {
+export async function saveSummaryTool(ctx: ToolContext, args: SaveSummaryArgs): Promise<WithMeta & {
+  result: Awaited<ReturnType<typeof saveSummary>>;
+}> {
   const { account, id } = parseToolRef(args.ref);
   const level = args.level ?? 'message';
-  const result = saveSummary(ctx.repo, account, level, id, args.text);
-  return withMeta(ctx, account, { result });
+  const result = await saveSummary(ctx.repo, account, level, id, args.text);
+  return await withMeta(ctx, account, { result });
 }
 
 // ---- domain categorization write-back (M3.5, PLAN §12) --------------------
@@ -1023,16 +1043,16 @@ export interface DomainsToCategorizeArgs {
 }
 
 /** `domains_to_categorize` — PROPOSE domains for the categorization loop (PLAN §12). */
-export function domainsToCategorizeTool(
+export async function domainsToCategorizeTool(
   ctx: ToolContext,
   args: DomainsToCategorizeArgs,
-): WithMeta & { candidates: ReturnType<typeof wbDomainsToCategorize> } {
-  const account = requireAccount(ctx, args.account, 'domains_to_categorize');
-  const candidates = wbDomainsToCategorize(ctx.repo, account, {
+): Promise<WithMeta & { candidates: Awaited<ReturnType<typeof wbDomainsToCategorize>> }> {
+  const account = await requireAccount(ctx, args.account, 'domains_to_categorize');
+  const candidates = await wbDomainsToCategorize(ctx.repo, account, {
     ...(args.includeCategorized != null ? { includeCategorized: args.includeCategorized } : {}),
     ...(args.limit != null ? { limit: args.limit } : {}),
   });
-  return withMeta(ctx, account, { candidates });
+  return await withMeta(ctx, account, { candidates });
 }
 
 export interface SaveDomainCategoryArgs {
@@ -1043,13 +1063,13 @@ export interface SaveDomainCategoryArgs {
 }
 
 /** `save_domain_category` — PERSIST an agent-assigned domain category (PLAN §12). */
-export function saveDomainCategoryTool(
+export async function saveDomainCategoryTool(
   ctx: ToolContext,
   args: SaveDomainCategoryArgs,
-): WithMeta & { result: ReturnType<typeof wbSaveDomainCategory> } {
-  const account = requireAccount(ctx, args.account, 'save_domain_category');
-  const result = wbSaveDomainCategory(ctx.repo, account, args.domain, args.category, args.note ?? null);
-  return withMeta(ctx, account, { result });
+): Promise<WithMeta & { result: Awaited<ReturnType<typeof wbSaveDomainCategory>> }> {
+  const account = await requireAccount(ctx, args.account, 'save_domain_category');
+  const result = await wbSaveDomainCategory(ctx.repo, account, args.domain, args.category, args.note ?? null);
+  return await withMeta(ctx, account, { result });
 }
 
 // ---- cadence (deterministic correspondent frequency) ----------------------
@@ -1070,15 +1090,15 @@ export interface CadenceArgs {
  * tag a vertical once, then pass `category` here to scope to it (e.g. every
  * expedition operator's cadence in one call).
  */
-export function cadenceTool(ctx: ToolContext, args: CadenceArgs): WithMeta & { cadence: CadenceRow[] } {
-  const account = requireAccount(ctx, args.account, 'cadence');
+export async function cadenceTool(ctx: ToolContext, args: CadenceArgs): Promise<WithMeta & { cadence: CadenceRow[] }> {
+  const account = await requireAccount(ctx, args.account, 'cadence');
   const now = ctx.now ? ctx.now() : new Date();
   const opts: Parameters<typeof computeCadence>[2] = {};
   if (args.category != null) opts.category = args.category;
   if (args.since != null) opts.sinceMs = parseSince(args.since, now);
   if (args.limit != null) opts.limit = args.limit;
-  const cadence = computeCadence(ctx.repo, account, opts);
-  return withMeta(ctx, account, { cadence });
+  const cadence = await computeCadence(ctx.repo, account, opts);
+  return await withMeta(ctx, account, { cadence });
 }
 
 // ---- sync status (PLAN §12, ADR-0005) -------------------------------------
@@ -1097,15 +1117,15 @@ export interface SyncStatusEntry {
 }
 
 /** `sync_status` — counts, last run, body-ladder split, freshness (PLAN §12). */
-export function syncStatus(ctx: ToolContext, args: SyncStatusArgs): WithMeta & {
+export async function syncStatus(ctx: ToolContext, args: SyncStatusArgs): Promise<WithMeta & {
   accounts: SyncStatusEntry[];
-} {
-  const labels = args.account ? [args.account] : discoverAccounts(ctx.repo);
-  const accounts: SyncStatusEntry[] = labels.map((account) => {
+}> {
+  const labels = args.account ? [args.account] : await discoverAccounts(ctx.repo);
+  const accounts: SyncStatusEntry[] = await Promise.all(labels.map(async (account) => {
     const counts = { meta: 0, full: 0, 'summary-only': 0 };
-    const rows = ctx.repo.db
+    const rows = (await ctx.repo.driver
       .prepare(`SELECT body_state, count(*) c FROM messages WHERE account = ? GROUP BY body_state`)
-      .all(account) as { body_state: string; c: number }[];
+      .all(account)) as { body_state: string; c: number }[];
     for (const r of rows) {
       if (r.body_state === 'meta' || r.body_state === 'full' || r.body_state === 'summary-only') {
         counts[r.body_state] = r.c;
@@ -1113,13 +1133,15 @@ export function syncStatus(ctx: ToolContext, args: SyncStatusArgs): WithMeta & {
     }
     return {
       account,
-      index_as_of: indexAsOf(ctx.repo, account),
-      syncing: ctx.repo.activeSyncRun(account) != null,
-      messages: ctx.repo.countMessages(account),
+      index_as_of: await indexAsOf(ctx.repo, account),
+      syncing: await ctx.repo.activeSyncRun(account) != null,
+      messages: await ctx.repo.countMessages(account),
       bodyStates: counts,
     };
-  });
-  return withMeta(ctx, args.account, { accounts });
+  }));
+  const body: { accounts: SyncStatusEntry[]; jobs?: unknown } = { accounts };
+  if (ctx.jobStatus) body.jobs = await ctx.jobStatus(args.account);
+  return await withMeta(ctx, args.account, body);
 }
 
 // ---- relay/menu status ----------------------------------------------------
@@ -1166,31 +1188,31 @@ function formatAge(seconds: number | null): string {
  * Menu-bar status for local relay hosts. This is intentionally read-only and
  * does not call `withMeta`, because status polling must not auto-spawn syncs.
  */
-export function relayMenuStatus(ctx: ToolContext): RelayMenuStatus {
+export async function relayMenuStatus(ctx: ToolContext): Promise<RelayMenuStatus> {
   const now = ctx.now?.() ?? new Date();
-  const labels = [...new Set([...Object.keys(ctx.config.accounts), ...discoverAccounts(ctx.repo)])].sort();
-  const accounts = labels.map((account) => {
+  const labels = [...new Set([...Object.keys(ctx.config.accounts), ...await discoverAccounts(ctx.repo)])].sort();
+  const accounts = await Promise.all(labels.map(async (account) => {
     const counts = { meta: 0, full: 0, 'summary-only': 0 };
-    const rows = ctx.repo.db
+    const rows = (await ctx.repo.driver
       .prepare(`SELECT body_state, count(*) c FROM messages WHERE account = ? GROUP BY body_state`)
-      .all(account) as { body_state: string; c: number }[];
+      .all(account)) as { body_state: string; c: number }[];
     for (const r of rows) {
       if (r.body_state === 'meta' || r.body_state === 'full' || r.body_state === 'summary-only') {
         counts[r.body_state] = r.c;
       }
     }
-    const index_as_of = indexAsOf(ctx.repo, account);
+    const index_as_of = await indexAsOf(ctx.repo, account);
     const age = ageSeconds(now, index_as_of);
     return {
       account,
       index_as_of,
-      syncing: ctx.repo.activeSyncRun(account) != null,
-      messages: ctx.repo.countMessages(account),
+      syncing: await ctx.repo.activeSyncRun(account) != null,
+      messages: await ctx.repo.countMessages(account),
       bodyStates: counts,
       age_seconds: age,
       stale: age == null || age * 1000 > STALE_AFTER_MS,
     };
-  });
+  }));
 
   const totalMessages = accounts.reduce((sum, a) => sum + a.messages, 0);
   const syncing = accounts.some((a) => a.syncing);
@@ -1237,19 +1259,19 @@ export interface SyncNowArgs {
   account?: string;
 }
 
-export function syncNow(ctx: ToolContext, args: SyncNowArgs): WithMeta & {
+export async function syncNow(ctx: ToolContext, args: SyncNowArgs): Promise<WithMeta & {
   started: boolean;
   started_accounts: string[];
   skipped_accounts: string[];
   command: string;
-} {
+}> {
   const labels = args.account
     ? [args.account]
-    : [...new Set([...Object.keys(ctx.config.accounts), ...discoverAccounts(ctx.repo)])].sort();
+    : [...new Set([...Object.keys(ctx.config.accounts), ...await discoverAccounts(ctx.repo)])].sort();
   const started: string[] = [];
   const skipped: string[] = [];
   for (const account of labels) {
-    if (ctx.repo.activeSyncRun(account) != null) {
+    if (await ctx.repo.activeSyncRun(account) != null) {
       skipped.push(account);
       continue;
     }
@@ -1257,7 +1279,7 @@ export function syncNow(ctx: ToolContext, args: SyncNowArgs): WithMeta & {
     else skipped.push(account);
   }
   const command = args.account ? handback('sync', '--account', args.account) : handback('sync', '--all-accounts');
-  return withMeta(ctx, args.account, {
+  return await withMeta(ctx, args.account, {
     started: started.length > 0,
     started_accounts: started,
     skipped_accounts: skipped,
@@ -1298,36 +1320,36 @@ export interface CatchUpResult extends WithMeta {
  * it returns current data immediately AND spawns a detached incremental sync,
  * reporting `sync_started` + `eta_seconds`; it never blocks.
  */
-export function catchUp(ctx: ToolContext, args: CatchUpArgs): CatchUpResult {
-  const account = requireAccount(ctx, args.account, 'catch_up');
+export async function catchUp(ctx: ToolContext, args: CatchUpArgs): Promise<CatchUpResult> {
+  const account = await await requireAccount(ctx, args.account, 'catch_up');
   const sinceMs = parseSince(args.since, ctx.now?.() ?? new Date());
 
-  const fromImportant = ctx.repo.db
+  const fromImportant = (await ctx.repo.driver
     .prepare(catchUpFromImportantSql())
-    .all(account, sinceMs) as unknown as MessageRow[];
-  const inUserThreads = ctx.repo.db
+    .all(account, sinceMs)) as unknown as MessageRow[];
+  const inUserThreads = (await ctx.repo.driver
     .prepare(catchUpUserThreadsSql())
-    .all(account, sinceMs) as unknown as MessageRow[];
+    .all(account, sinceMs)) as unknown as MessageRow[];
 
-  const keywords = ctx.repo.getInterestProfile(account).keywords;
+  const keywords = (await ctx.repo.getInterestProfile(account)).keywords;
   let keywordHits: MessageRow[] = [];
   if (keywords.length > 0) {
     const q = keywords.map((k) => `"${k.replace(/"/g, '""')}"`).join(' OR ');
-    keywordHits = ctx.repo.db
+    keywordHits = (await ctx.repo.driver
       .prepare(
         `SELECT m.* FROM messages_fts f JOIN messages m ON m.rowid = f.rowid
           WHERE messages_fts MATCH ? AND m.account = ? AND m.internal_date >= ?
           ORDER BY m.internal_date DESC LIMIT 25`,
       )
-      .all(q, account, sinceMs) as unknown as MessageRow[];
+      .all(q, account, sinceMs)) as unknown as MessageRow[];
   }
 
   const render = labelRenderer(ctx.repo);
-  const base: CatchUpResult = withMeta(ctx, account, {
+  const base: CatchUpResult = await withMeta(ctx, account, {
     since_ms: sinceMs,
-    fromImportant: fromImportant.map((r) => toHit(r, render)),
-    inUserThreads: inUserThreads.map((r) => toHit(r, render)),
-    keywordHits: keywordHits.map((r) => toHit(r, render)),
+    fromImportant: await Promise.all(fromImportant.map((r) => toHit(r, render))),
+    inUserThreads: await Promise.all(inUserThreads.map((r) => toHit(r, render))),
+    keywordHits: await Promise.all(keywordHits.map((r) => toHit(r, render))),
     bodies_command: handback('enrich', '--account', account, '--profile'),
   });
   return base;
@@ -1368,13 +1390,13 @@ export interface DigestSourcesResult extends WithMeta {
  * (ADR-0003). Like `catch_up`, a stale index returns current data immediately
  * and spawns a detached incremental sync (ADR-0005).
  */
-export function digestSources(ctx: ToolContext, args: DigestSourcesArgs): DigestSourcesResult {
-  const account = requireAccount(ctx, args.account, 'digest_sources');
+export async function digestSources(ctx: ToolContext, args: DigestSourcesArgs): Promise<DigestSourcesResult> {
+  const account = await await requireAccount(ctx, args.account, 'digest_sources');
   const sinceMs = args.since ? parseSince(args.since, ctx.now?.() ?? new Date()) : 0;
 
-  const rows = ctx.repo.db
+  const rows = (await ctx.repo.driver
     .prepare(digestSourcesSql())
-    .all(account, sinceMs) as {
+    .all(account, sinceMs)) as {
       address: string;
       display_name: string | null;
       domain: string | null;
@@ -1385,7 +1407,7 @@ export function digestSources(ctx: ToolContext, args: DigestSourcesArgs): Digest
       unsummarized: number;
     }[];
 
-  const base: DigestSourcesResult = withMeta(ctx, account, {
+  const base: DigestSourcesResult = await withMeta(ctx, account, {
     sources: rows.map((r) => ({
       address: r.address,
       displayName: r.display_name,
@@ -1482,23 +1504,23 @@ export function parseSince(since: string, now: Date): number {
 }
 
 /** Discover every account label that appears anywhere in the index. */
-function discoverAccounts(repo: Repo): string[] {
-  const rows = repo.db
+async function discoverAccounts(repo: Repo): Promise<string[]> {
+  const rows = (await repo.driver
     .prepare(
       `SELECT account FROM messages
        UNION SELECT account FROM contacts
        UNION SELECT account FROM sync_runs
        ORDER BY account`,
     )
-    .all() as { account: string }[];
+    .all()) as { account: string }[];
   return rows.map((r) => r.account);
 }
 
 /** The sole configured/indexed account, or undefined when ambiguous/none. */
-function soleAccount(ctx: ToolContext): string | undefined {
+async function soleAccount(ctx: ToolContext): Promise<string | undefined> {
   const cfg = Object.keys(ctx.config.accounts);
   if (cfg.length === 1) return cfg[0]!;
-  const seen = discoverAccounts(ctx.repo);
+  const seen = await discoverAccounts(ctx.repo);
   return seen.length === 1 ? seen[0]! : undefined;
 }
 
@@ -1507,11 +1529,11 @@ function soleAccount(ctx: ToolContext): string | undefined {
  * sole configured/indexed account. Throws {@link McpToolError} when ambiguous so
  * the agent passes one rather than silently picking.
  */
-function requireAccount(ctx: ToolContext, account: string | undefined, tool: string): string {
+async function requireAccount(ctx: ToolContext, account: string | undefined, tool: string): Promise<string> {
   if (account) return account;
-  const sole = soleAccount(ctx);
+  const sole = await await soleAccount(ctx);
   if (sole) return sole;
-  const known = [...new Set([...Object.keys(ctx.config.accounts), ...discoverAccounts(ctx.repo)])];
+  const known = [...new Set([...Object.keys(ctx.config.accounts), ...await discoverAccounts(ctx.repo)])];
   throw new McpToolError(
     `${tool} needs an "account" — configured/indexed: ${known.length ? known.join(', ') : '(none)'}`,
   );

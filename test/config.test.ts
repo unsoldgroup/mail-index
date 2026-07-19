@@ -24,7 +24,7 @@ import {
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
-test('validateConfig accepts a minimal valid config', () => {
+test('validateConfig accepts a minimal valid config', async () => {
   const cfg = validateConfig({
     accounts: { 'acct-a': { adapter: 'gws', configDir: '~/.config/gws-acct-a' } },
   });
@@ -32,7 +32,7 @@ test('validateConfig accepts a minimal valid config', () => {
   assert.equal(cfg.accounts['acct-a']?.configDir, '~/.config/gws-acct-a');
 });
 
-test('validateConfig parses an optional syncPolicy', () => {
+test('validateConfig parses an optional syncPolicy', async () => {
   const cfg = validateConfig({
     accounts: {
       'acct-a': {
@@ -50,27 +50,27 @@ test('validateConfig parses an optional syncPolicy', () => {
   });
 });
 
-test('validateConfig rejects a non-object top level', () => {
+test('validateConfig rejects a non-object top level', async () => {
   assert.throws(() => validateConfig(42), ConfigError);
   assert.throws(() => validateConfig([]), ConfigError);
 });
 
-test('validateConfig rejects a missing accounts map', () => {
+test('validateConfig rejects a missing accounts map', async () => {
   assert.throws(() => validateConfig({}), /missing required "accounts"/);
 });
 
-test('validateConfig rejects an empty accounts map', () => {
+test('validateConfig rejects an empty accounts map', async () => {
   assert.throws(() => validateConfig({ accounts: {} }), /at least one account/);
 });
 
-test('validateConfig rejects an unknown adapter', () => {
+test('validateConfig rejects an unknown adapter', async () => {
   assert.throws(
     () => validateConfig({ accounts: { a: { adapter: 'imap', configDir: '/x' } } }),
     /unknown adapter "imap"/,
   );
 });
 
-test('validateConfig rejects a missing/blank configDir', () => {
+test('validateConfig rejects a missing/blank configDir', async () => {
   assert.throws(
     () => validateConfig({ accounts: { a: { adapter: 'gws' } } }),
     /missing a non-empty string "configDir"/,
@@ -81,7 +81,7 @@ test('validateConfig rejects a missing/blank configDir', () => {
   );
 });
 
-test('validateConfig rejects a malformed syncPolicy', () => {
+test('validateConfig rejects a malformed syncPolicy', async () => {
   assert.throws(
     () =>
       validateConfig({ accounts: { a: { adapter: 'gws', configDir: '/x', syncPolicy: 'no' } } }),
@@ -96,31 +96,31 @@ test('validateConfig rejects a malformed syncPolicy', () => {
   );
 });
 
-test('resolveAccount returns the account by label', () => {
+test('resolveAccount returns the account by label', async () => {
   const cfg = validateConfig({ accounts: { 'acct-a': { adapter: 'gws', configDir: '/x' } } });
   assert.equal(resolveAccount(cfg, 'acct-a').configDir, '/x');
 });
 
-test('resolveAccount throws a clear error listing known labels', () => {
+test('resolveAccount throws a clear error listing known labels', async () => {
   const cfg = validateConfig({ accounts: { 'acct-a': { adapter: 'gws', configDir: '/x' } } });
   assert.throws(() => resolveAccount(cfg, 'nope'), /unknown account "nope".*acct-a/s);
 });
 
-test('loadConfig throws ConfigError with guidance when the file is missing', () => {
+test('loadConfig throws ConfigError with guidance when the file is missing', async () => {
   assert.throws(
     () => loadConfig(join(tmpdir(), 'mail-index-does-not-exist-xyz.json')),
     /no operator config at/,
   );
 });
 
-test('loadConfig rejects invalid JSON', () => {
+test('loadConfig rejects invalid JSON', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mail-index-cfg-'));
   const p = join(dir, 'config.json');
   writeFileSync(p, '{ not json ');
   assert.throws(() => loadConfig(p), /not valid JSON/);
 });
 
-test('the shipped config.example.json is valid against the loader', () => {
+test('the shipped config.example.json is valid against the loader', async () => {
   const p = join(REPO_ROOT, 'config.example.json');
   const cfg = loadConfig(p);
   assert.ok(Object.keys(cfg.accounts).length >= 1);
@@ -135,7 +135,7 @@ test('the shipped config.example.json is valid against the loader', () => {
   assert.match(readFileSync(p, 'utf8'), /example\.com|acct-/);
 });
 
-test('defaultConfigPath honours XDG_CONFIG_HOME', () => {
+test('defaultConfigPath honours XDG_CONFIG_HOME', async () => {
   const prev = process.env['XDG_CONFIG_HOME'];
   process.env['XDG_CONFIG_HOME'] = '/tmp/xdg';
   try {
@@ -146,7 +146,7 @@ test('defaultConfigPath honours XDG_CONFIG_HOME', () => {
   }
 });
 
-test('expandHome expands a leading tilde', () => {
+test('expandHome expands a leading tilde', async () => {
   assert.ok(!expandHome('~/x').startsWith('~'));
   assert.equal(expandHome('/abs/path'), '/abs/path');
 });

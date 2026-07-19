@@ -71,8 +71,8 @@ const FIXTURES = {
   ],
 };
 
-function freshRepo(): Repo {
-  return new Repo(openDb({ path: ':memory:' }));
+async function freshRepo(): Repo {
+  return new Repo(await openDb({ path: ':memory:' }));
 }
 
 function fakeSource(): FakeMailSource {
@@ -89,13 +89,13 @@ async function seed(repo: Repo): Promise<void> {
 
 // ---- parseRef ------------------------------------------------------------
 
-test('parseRef splits <account>:<id> on the first colon', () => {
+test('parseRef splits <account>:<id> on the first colon', async () => {
   assert.deepEqual(parseRef('personal:18f0a1b2c3'), { account: 'personal', id: '18f0a1b2c3' });
   // Id keeps any later colon intact.
   assert.deepEqual(parseRef('acct:a:b'), { account: 'acct', id: 'a:b' });
 });
 
-test('parseRef rejects refs missing an account or id', () => {
+test('parseRef rejects refs missing an account or id', async () => {
   for (const bad of ['', 'noColon', ':id', 'acct:']) {
     assert.throws(() => parseRef(bad), (e: unknown) => e instanceof RefError);
   }
@@ -104,16 +104,16 @@ test('parseRef rejects refs missing an account or id', () => {
 // ---- show / lazy enrichment ----------------------------------------------
 
 test('runShow auto-enriches a meta message, then prints the distilled body', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'meta');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'meta');
 
   const result = await runShow(CONFIG, repo, { account: ACCOUNT, id: 'm-direct' }, buildFake);
   assert.equal(result.enriched, true);
   assert.equal(result.row.body_state, 'full');
 
   // Persisted: the row is now full in the index (not just in the returned copy).
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'full');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'full');
 
   const out = formatShow(result);
   assert.match(out, /Confirming the 20% deposit/);
@@ -127,7 +127,7 @@ test('runShow auto-enriches a meta message, then prints the distilled body', asy
 });
 
 test('runShow on an already-full message does not re-fetch', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   // First show enriches it.
   await runShow(CONFIG, repo, { account: ACCOUNT, id: 'm-direct' }, buildFake);
@@ -148,20 +148,20 @@ test('runShow on an already-full message does not re-fetch', async () => {
 });
 
 test('runShow errors clearly for an unknown account', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   await assert.rejects(
-    runShow(CONFIG, repo, { account: 'nope', id: 'm-direct' }, buildFake),
+    () => runShow(CONFIG, repo, { account: 'nope', id: 'm-direct' }, buildFake),
     // Unknown account surfaces as the config error (resolveAccount).
     (e: unknown) => e instanceof Error && /unknown account/.test(e.message),
   );
 });
 
 test('runShow errors when the message is not in the index', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   await assert.rejects(
-    runShow(CONFIG, repo, { account: ACCOUNT, id: 'ghost' }, buildFake),
+    () => runShow(CONFIG, repo, { account: ACCOUNT, id: 'ghost' }, buildFake),
     (e: unknown) => e instanceof RefError && /not in the index/.test(e.message),
   );
 });
@@ -169,7 +169,7 @@ test('runShow errors when the message is not in the index', async () => {
 // ---- search --enrich -----------------------------------------------------
 
 test('search --enrich promotes the returned hits so a body-only term then matches', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
 
   // "repositioning" lives only in the body — before enrich it is not indexed.
@@ -180,7 +180,7 @@ test('search --enrich promotes the returned hits so a body-only term then matche
   // --enrich then promotes that hit's body.
   const enriched = await runSearchEnriching(CONFIG, repo, ['deposit'], { enrich: true }, buildFake);
   assert.ok(enriched.some((m) => m.gmail_message_id === 'm-direct'));
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'full');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'full');
 
   // Now the body-only term matches because the hit was enriched + re-indexed.
   const warm = await runSearchEnriching(CONFIG, repo, ['repositioning'], { enrich: false }, buildFake);
@@ -188,19 +188,19 @@ test('search --enrich promotes the returned hits so a body-only term then matche
 });
 
 test('search without --enrich does not promote anything', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   const hits = await runSearchEnriching(CONFIG, repo, ['deposit'], { enrich: false }, buildFake);
   assert.ok(hits.length > 0);
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'meta', 'still meta');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'meta', 'still meta');
 });
 
 test('search --enrich skips hits whose account is unconfigured (best-effort)', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   // Empty config → the hit account is unconfigured; enrich is skipped but the
   // ranked hit is still returned.
   const hits = await runSearchEnriching({ accounts: {} } as never, repo, ['deposit'], { enrich: true }, buildFake);
   assert.ok(hits.some((m) => m.gmail_message_id === 'm-direct'));
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'meta', 'not enriched');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'meta', 'not enriched');
 });

@@ -26,19 +26,19 @@ function withEnv(env: Record<string, string | undefined>, fn: () => void): void 
   }
 }
 
-test('MAIL_INDEX_DB overrides the default index path (worktree isolation seam)', () => {
-  withEnv({ MAIL_INDEX_DB: '/tmp/some-worktree/.mail-index-dev.sqlite' }, () => {
+test('MAIL_INDEX_DB overrides the default index path (worktree isolation seam)', async () => {
+  withEnv({ MAIL_INDEX_DB: '/tmp/some-worktree/.mail-index-dev.sqlite' }, async () => {
     assert.equal(defaultDbPath(), '/tmp/some-worktree/.mail-index-dev.sqlite');
   });
 });
 
-test('without MAIL_INDEX_DB the path is deterministic: production sqlite OR a worktree dev DB', () => {
+test('without MAIL_INDEX_DB the path is deterministic: production sqlite OR a worktree dev DB', async () => {
   // Context-robust: from the installed package / canonical checkout this resolves
   // the shared production index; from a LINKED worktree it auto-isolates to
   // `<worktree>/.mail-index-dev.sqlite`. Either is valid — assert the shape, not
   // the absolute path, so the suite passes in both. Blank MAIL_INDEX_DB == unset.
   for (const blank of [undefined, '   ']) {
-    withEnv({ MAIL_INDEX_DB: blank, XDG_DATA_HOME: '/tmp/xdg' }, () => {
+    withEnv({ MAIL_INDEX_DB: blank, XDG_DATA_HOME: '/tmp/xdg' }, async () => {
       const p = defaultDbPath();
       const ok = p === '/tmp/xdg/mail-index/mail.sqlite' || p.endsWith('/.mail-index-dev.sqlite');
       assert.ok(ok, `unexpected default db path: ${p}`);

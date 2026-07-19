@@ -90,8 +90,8 @@ const FIXTURES = {
   ],
 };
 
-function freshRepo(): Repo {
-  return new Repo(openDb({ path: ':memory:' }));
+async function freshRepo(): Repo {
+  return new Repo(await openDb({ path: ':memory:' }));
 }
 
 function fakeSource(): FakeMailSource {
@@ -104,14 +104,14 @@ async function seed(repo: Repo): Promise<void> {
 }
 
 test('enrich promotes a meta row to full with a distilled body', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'meta');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'meta');
 
   const result = await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { sender: 'jordan@partner.example.com' } });
   assert.equal(result.enriched, 1);
 
-  const row = repo.getMessage(ACCOUNT, 'm-direct');
+  const row = await repo.getMessage(ACCOUNT, 'm-direct');
   assert.ok(row);
   assert.equal(row.body_state, 'full');
   assert.ok(row.body_text?.includes('Confirming the 20% deposit'), 'distilled body stored');
@@ -125,19 +125,19 @@ test('enrich promotes a meta row to full with a distilled body', async () => {
 });
 
 test('rule=direct enriches direct mail and skips list + promotions', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
 
   const result = await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { rule: 'direct' } });
   assert.equal(result.enriched, 1, 'only the direct message');
 
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'full');
-  assert.equal(repo.getMessage(ACCOUNT, 'm-list')?.body_state, 'meta', 'list skipped');
-  assert.equal(repo.getMessage(ACCOUNT, 'm-promo')?.body_state, 'meta', 'promo skipped');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'full');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-list'))?.body_state, 'meta', 'list skipped');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-promo'))?.body_state, 'meta', 'promo skipped');
 });
 
 test('default selector is rule=direct', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   const result = await enrich({ account: ACCOUNT, source: fakeSource(), repo });
   assert.equal(result.enriched, 1);
@@ -145,20 +145,20 @@ test('default selector is rule=direct', async () => {
 });
 
 test('rule=all enriches every meta row including list + promotions', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   const result = await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { rule: 'all' } });
   assert.equal(result.enriched, 3);
-  assert.equal(repo.getMessage(ACCOUNT, 'm-list')?.body_state, 'full');
-  assert.equal(repo.getMessage(ACCOUNT, 'm-promo')?.body_state, 'full');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-list'))?.body_state, 'full');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-promo'))?.body_state, 'full');
 });
 
 test('list HTML body is distilled (footer + tracking removed) on enrich', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { sender: 'news@bulletin.example.org' } });
 
-  const row = repo.getMessage(ACCOUNT, 'm-list');
+  const row = await repo.getMessage(ACCOUNT, 'm-list');
   assert.ok(row?.body_text?.includes('new zodiac schedules'), 'real content kept');
   assert.ok(!/unsubscribe/i.test(row?.body_text ?? ''), 'unsubscribe footer gone');
   assert.ok(!/all rights reserved/i.test(row?.body_text ?? ''), 'copyright gone');
@@ -166,25 +166,25 @@ test('list HTML body is distilled (footer + tracking removed) on enrich', async 
 });
 
 test('match selector enriches only FTS-matching meta rows', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   const result = await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { rule: 'all', match: 'zodiac' } });
   assert.equal(result.enriched, 1);
-  assert.equal(repo.getMessage(ACCOUNT, 'm-list')?.body_state, 'full');
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'meta');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-list'))?.body_state, 'full');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'meta');
 });
 
 test('limit caps how many rows are enriched (newest first)', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   const result = await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { rule: 'all', limit: 1 } });
   assert.equal(result.enriched, 1);
   // Newest is m-direct (largest internal_date).
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'full');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'full');
 });
 
 test('enrich is incremental + idempotent — re-run promotes nothing new', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   const first = await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { rule: 'all' } });
   assert.equal(first.enriched, 3);
@@ -195,35 +195,35 @@ test('enrich is incremental + idempotent — re-run promotes nothing new', async
 });
 
 test('after enrich the distilled body is FTS-searchable', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   // Before enrich, a body-only term does not match (snippet lacks it).
-  const before = repo.searchMessages('repositioning', { account: ACCOUNT });
+  const before = await repo.searchMessages('repositioning', { account: ACCOUNT });
   assert.equal(before.length, 0);
 
   await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { sender: 'jordan@partner.example.com' } });
-  const after = repo.searchMessages('Friday', { account: ACCOUNT });
+  const after = await repo.searchMessages('Friday', { account: ACCOUNT });
   assert.ok(after.some((m) => m.gmail_message_id === 'm-direct'), 'body term now matches');
 });
 
 test('a phase-1 re-sync after enrich does not downgrade the full body', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { rule: 'direct' } });
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'full');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'full');
 
   await syncMetadata({ account: ACCOUNT, source: fakeSource(), repo });
-  const row = repo.getMessage(ACCOUNT, 'm-direct');
+  const row = await repo.getMessage(ACCOUNT, 'm-direct');
   assert.equal(row?.body_state, 'full', 'no downgrade');
   assert.ok(row?.body_text?.includes('Confirming the 20% deposit'), 'body preserved');
 });
 
 test('enrich writes a sync_runs row with phase=enrich and the selector', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   const result = await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { rule: 'all', limit: 2 } });
 
-  const row = repo.db
+  const row = await repo.driver
     .prepare('SELECT * FROM sync_runs WHERE id = ?')
     .get(result.runId) as Record<string, unknown>;
   assert.equal(row['phase'], 'enrich');
@@ -234,18 +234,18 @@ test('enrich writes a sync_runs row with phase=enrich and the selector', async (
 });
 
 test('enrich refuses to start while another run holds the account lock', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
-  repo.startSyncRun({ account: ACCOUNT, phase: 'sync', selector: null });
+  await repo.startSyncRun({ account: ACCOUNT, phase: 'sync', selector: null });
 
   await assert.rejects(
-    enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { rule: 'all' } }),
+    () => enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { rule: 'all' } }),
     (err: unknown) => err instanceof EnrichError && /already in progress/.test((err as Error).message),
   );
 });
 
 test('enrich skips ids the provider can no longer return', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   const src = fakeSource();
   // Provider returns null for the direct message (deleted upstream).
@@ -255,7 +255,7 @@ test('enrich skips ids the provider can no longer return', async () => {
   const result = await enrich({ account: ACCOUNT, source: src, repo, selector: { rule: 'direct' } });
   assert.equal(result.enriched, 0, 'nothing enriched');
   assert.equal(result.fetched, 0, 'gone id not counted as fetched');
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'meta', 'left as meta');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'meta', 'left as meta');
 });
 
 // ---- M3.2: profile-driven enrichment (SCOPE 3.2, PLAN §7 priority-1, D14) ----
@@ -265,81 +265,81 @@ test('enrich skips ids the provider can no longer return', async () => {
 // These tests curate the seeded fixtures then enrich with `{ profile: true }`.
 
 test('profile enrich: an important contact promotes its meta rows', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   // Curate Jordan (sender of m-direct) as important.
-  repo.upsertContact({ account: ACCOUNT, address: 'jordan@partner.example.com', curation: 'important' });
+  await repo.upsertContact({ account: ACCOUNT, address: 'jordan@partner.example.com', curation: 'important' });
 
   const result = await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { profile: true } });
   assert.equal(result.enriched, 1, 'only the important contact’s mail');
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'full');
-  assert.equal(repo.getMessage(ACCOUNT, 'm-list')?.body_state, 'meta', 'uncurated list untouched');
-  assert.equal(repo.getMessage(ACCOUNT, 'm-promo')?.body_state, 'meta', 'uncurated promo untouched');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'full');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-list'))?.body_state, 'meta', 'uncurated list untouched');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-promo'))?.body_state, 'meta', 'uncurated promo untouched');
   assert.match(result.selector ?? '', /profile/);
 });
 
 test('profile enrich: an important domain promotes mail from that domain', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   // Curate the newsletter's domain as important — matches `news@bulletin.example.org`.
-  repo.setDomainCuration(ACCOUNT, 'bulletin.example.org', 'important');
+  await repo.setDomainCuration(ACCOUNT, 'bulletin.example.org', 'important');
 
   const result = await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { profile: true } });
   assert.equal(result.enriched, 1);
-  assert.equal(repo.getMessage(ACCOUNT, 'm-list')?.body_state, 'full', 'domain match enriched');
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'meta');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-list'))?.body_state, 'full', 'domain match enriched');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'meta');
 });
 
 test('profile enrich: a muted contact is never enriched, even on a keyword hit', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   // Mute the newsletter sender, but add a keyword that its snippet matches.
-  repo.upsertContact({ account: ACCOUNT, address: 'news@bulletin.example.org', curation: 'muted' });
-  repo.setInterestKeywords(ACCOUNT, ['zodiac']); // m-list snippet has "zodiac schedules"
+  await repo.upsertContact({ account: ACCOUNT, address: 'news@bulletin.example.org', curation: 'muted' });
+  await repo.setInterestKeywords(ACCOUNT, ['zodiac']); // m-list snippet has "zodiac schedules"
 
   const result = await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { profile: true } });
-  assert.equal(repo.getMessage(ACCOUNT, 'm-list')?.body_state, 'meta', 'muted dominates the keyword match');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-list'))?.body_state, 'meta', 'muted dominates the keyword match');
   assert.equal(result.enriched, 0);
 });
 
 test('profile enrich: a blocked domain is excluded like muted', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
-  repo.setInterestKeywords(ACCOUNT, ['zodiac']);
-  repo.setDomainCuration(ACCOUNT, 'bulletin.example.org', 'blocked');
+  await repo.setInterestKeywords(ACCOUNT, ['zodiac']);
+  await repo.setDomainCuration(ACCOUNT, 'bulletin.example.org', 'blocked');
 
   const result = await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { profile: true } });
   assert.equal(result.enriched, 0, 'blocked domain excluded despite keyword hit');
-  assert.equal(repo.getMessage(ACCOUNT, 'm-list')?.body_state, 'meta');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-list'))?.body_state, 'meta');
 });
 
 test('profile enrich: keyword FTS matches are included', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   // "deposit" is in m-direct's subject/snippet — pure keyword inclusion, no
   // curated entities at all.
-  repo.setInterestKeywords(ACCOUNT, ['deposit']);
+  await repo.setInterestKeywords(ACCOUNT, ['deposit']);
 
   const result = await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { profile: true } });
   assert.equal(result.enriched, 1);
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'full', 'keyword match enriched');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'full', 'keyword match enriched');
 });
 
 test('profile enrich: an empty profile enriches nothing (no bare match-all)', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   const result = await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { profile: true } });
   assert.equal(result.enriched, 0, 'no important entities + no keywords → empty candidate set');
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'meta');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'meta');
 });
 
 test('profile enrich: limit caps the resolved candidate set (newest first)', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   await seed(repo);
   // Make all three senders' mail eligible via keyword, then cap to 1.
-  repo.setInterestKeywords(ACCOUNT, ['deposit', 'zodiac', 'parkas']);
+  await repo.setInterestKeywords(ACCOUNT, ['deposit', 'zodiac', 'parkas']);
   const result = await enrich({ account: ACCOUNT, source: fakeSource(), repo, selector: { profile: true, limit: 1 } });
   assert.equal(result.enriched, 1);
   // Newest is m-direct (largest internal_date).
-  assert.equal(repo.getMessage(ACCOUNT, 'm-direct')?.body_state, 'full');
+  assert.equal((await repo.getMessage(ACCOUNT, 'm-direct'))?.body_state, 'full');
 });

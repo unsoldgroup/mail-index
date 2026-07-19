@@ -15,8 +15,8 @@
  * methods guard, so it does not earn dedicated repo verbs.
  */
 
-import type { DatabaseSync } from 'node:sqlite';
 import { Repo } from '../index/repo.js';
+import type { StorageDriver } from '../index/driver.js';
 import { BODY_STATES, type BodyState } from '../index/schema.js';
 
 /** Per-account body-ladder counts (CONTEXT.md "Body state"). */
@@ -58,27 +58,27 @@ function emptyCounts(): BodyStateCounts {
  * had a (failed or in-flight) sync still shows up, which is what an operator
  * checking "did my sync start?" needs.
  */
-function discoverAccounts(db: DatabaseSync): string[] {
-  const rows = db
+async function discoverAccounts(db: StorageDriver): Promise<string[]> {
+  const rows = (await db
     .prepare(
       `SELECT account FROM messages
        UNION SELECT account FROM contacts
        UNION SELECT account FROM sync_runs
        ORDER BY account`,
     )
-    .all() as { account: string }[];
+    .all()) as { account: string }[];
   return rows.map((r) => r.account);
 }
 
-function bodyStateCounts(db: DatabaseSync, account?: string): BodyStateCounts {
+async function bodyStateCounts(db: StorageDriver, account?: string): Promise<BodyStateCounts> {
   const counts = emptyCounts();
-  const rows = (
+  const rows = (await (
     account
       ? db
           .prepare(`SELECT body_state, count(*) c FROM messages WHERE account = ? GROUP BY body_state`)
           .all(account)
       : db.prepare(`SELECT body_state, count(*) c FROM messages GROUP BY body_state`).all()
-  ) as { body_state: string; c: number }[];
+  )) as { body_state: string; c: number }[];
   for (const row of rows) {
     if ((BODY_STATES as readonly string[]).includes(row.body_state)) {
       counts[row.body_state as BodyState] = row.c;
@@ -87,46 +87,46 @@ function bodyStateCounts(db: DatabaseSync, account?: string): BodyStateCounts {
   return counts;
 }
 
-function indexAsOf(db: DatabaseSync, account: string): string | null {
-  const row = db
+async function indexAsOf(db: StorageDriver, account: string): Promise<string | null> {
+  const row = (await db
     .prepare(
       `SELECT finished_at FROM sync_runs
         WHERE account = ? AND finished_at IS NOT NULL AND error IS NULL
         ORDER BY finished_at DESC LIMIT 1`,
     )
-    .get(account) as { finished_at: string | null } | undefined;
+    .get(account)) as { finished_at: string | null } | undefined;
   return row?.finished_at ?? null;
 }
 
-function countContacts(db: DatabaseSync, account?: string): number {
-  const row = (
+async function countContacts(db: StorageDriver, account?: string): Promise<number> {
+  const row = (await (
     account
       ? db.prepare(`SELECT count(*) c FROM contacts WHERE account = ?`).get(account)
       : db.prepare(`SELECT count(*) c FROM contacts`).get()
-  ) as { c: number };
+  )) as { c: number };
   return row.c;
 }
 
 /** Build the full status report from the live index. */
-export function buildStatus(repo: Repo): StatusReport {
-  const db = repo.db;
-  const labels = discoverAccounts(db);
+export async function buildStatus(repo: Repo): Promise<StatusReport> {
+  const db = repo.driver;
+  const labels = await discoverAccounts(db);
 
-  const accounts: AccountStatus[] = labels.map((account) => ({
+  const accounts: AccountStatus[] = await Promise.all(labels.map(async (account) => ({
     account,
-    indexAsOf: indexAsOf(db, account),
-    syncing: repo.activeSyncRun(account) != null,
-    bodyStates: bodyStateCounts(db, account),
-    messages: repo.countMessages(account),
-    contacts: countContacts(db, account),
-  }));
+    indexAsOf: await indexAsOf(db, account),
+    syncing: await repo.activeSyncRun(account) != null,
+    bodyStates: await bodyStateCounts(db, account),
+    messages: await repo.countMessages(account),
+    contacts: await countContacts(db, account),
+  })));
 
   return {
     accounts,
     totals: {
-      messages: repo.countMessages(),
-      contacts: countContacts(db),
-      bodyStates: bodyStateCounts(db),
+      messages: await repo.countMessages(),
+      contacts: await countContacts(db),
+      bodyStates: await bodyStateCounts(db),
     },
   };
 }

@@ -3,8 +3,10 @@
  *
  * Each migration has a monotonically increasing `version` and an `up(db)` that
  * runs its DDL. `runMigrations` applies every migration whose version exceeds
- * the database's current `user_version` pragma, in order, inside a single
- * transaction, then bumps `user_version`. Migrations are append-only: never
+ * the database's current schema version, in order, then bumps that version.
+ * The node:sqlite driver supplies an interactive transaction; D1 treats those
+ * control statements as boundaries around its forward-only sequence.
+ * Migrations are append-only: never
  * edit or reorder an existing one — add a new one.
  *
  * The FTS5 table is external-content over `messages` (PLAN §6): it stores no
@@ -14,22 +16,22 @@
  * `body` column holds across the meta → full → summary-only ladder).
  */
 
-import type { DatabaseSync } from 'node:sqlite';
+import type { StorageDriver } from './driver.js';
 
 import { FTS_TABLE_DDL, projectFtsRow } from './fts.js';
 
 export interface Migration {
   version: number;
   name: string;
-  up: (db: DatabaseSync) => void;
+  up: (db: StorageDriver) => Promise<void>;
 }
 
 /** Migration 1 — full PLAN §6 data model. */
 const m001_initial: Migration = {
   version: 1,
   name: 'initial schema',
-  up: (db) => {
-    db.exec(`
+  up: async (db) => {
+    await db.exec(`
       CREATE TABLE messages (
         account             TEXT    NOT NULL,
         gmail_message_id    TEXT    NOT NULL,
@@ -179,8 +181,8 @@ const m001_initial: Migration = {
 const m002_thread_summary: Migration = {
   version: 2,
   name: 'thread summary columns',
-  up: (db) => {
-    db.exec(`
+  up: async (db) => {
+    await db.exec(`
       ALTER TABLE threads ADD COLUMN summary_text     TEXT;
       ALTER TABLE threads ADD COLUMN summary_is_model INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE threads ADD COLUMN summarized_at    TEXT;
@@ -208,8 +210,8 @@ const m002_thread_summary: Migration = {
 const m003_account_identity: Migration = {
   version: 3,
   name: 'account identity (adapter-switch safety)',
-  up: (db) => {
-    db.exec(`
+  up: async (db) => {
+    await db.exec(`
       CREATE TABLE account_identity (
         account       TEXT NOT NULL,
         address       TEXT NOT NULL,
@@ -237,8 +239,8 @@ const m003_account_identity: Migration = {
 const m004_ocr_images: Migration = {
   version: 4,
   name: 'ocr candidate images',
-  up: (db) => {
-    db.exec(`ALTER TABLE messages ADD COLUMN ocr_images_json TEXT;`);
+  up: async (db) => {
+    await db.exec(`ALTER TABLE messages ADD COLUMN ocr_images_json TEXT;`);
   },
 };
 
@@ -264,8 +266,8 @@ const m004_ocr_images: Migration = {
 const m005_rebuild_fts: Migration = {
   version: 5,
   name: 'rebuild messages_fts (canonical self-contained, rowid-aligned)',
-  up: (db) => {
-    db.exec(`
+  up: async (db) => {
+    await db.exec(`
       DROP TABLE IF EXISTS messages_fts;
 
       CREATE VIRTUAL TABLE messages_fts USING fts5(
@@ -319,8 +321,8 @@ const m005_rebuild_fts: Migration = {
 const m006_registrable_domain: Migration = {
   version: 6,
   name: 'registrable (eTLD+1) domain on domains',
-  up: (db) => {
-    db.exec(`ALTER TABLE domains ADD COLUMN registrable_domain TEXT;`);
+  up: async (db) => {
+    await db.exec(`ALTER TABLE domains ADD COLUMN registrable_domain TEXT;`);
   },
 };
 
@@ -338,15 +340,15 @@ const m006_registrable_domain: Migration = {
 const m007_porter_fts: Migration = {
   version: 7,
   name: 'porter-stemmed FTS rebuild',
-  up: (db) => {
-    db.exec(`DROP TABLE messages_fts;`);
-    db.exec(FTS_TABLE_DDL);
-    const rows = db
+  up: async (db) => {
+    await db.exec(`DROP TABLE messages_fts;`);
+    await db.exec(FTS_TABLE_DDL);
+    const rows = (await db
       .prepare(
         `SELECT rowid, subject, from_addr, to_addr, cc_addr, snippet, body_text, summary_text
            FROM messages`,
       )
-      .all() as {
+      .all()) as {
       rowid: number;
       subject: string | null;
       from_addr: string | null;
@@ -370,7 +372,7 @@ const m007_porter_fts: Migration = {
         bodyText: r.body_text,
         summary: r.summary_text,
       });
-      insert.run(r.rowid, fts.subject, fts.sender, fts.recipients, fts.body);
+      await insert.run(r.rowid, fts.subject, fts.sender, fts.recipients, fts.body);
     }
   },
 };
@@ -390,8 +392,8 @@ const m007_porter_fts: Migration = {
 const m008_topics: Migration = {
   version: 8,
   name: 'topic clustering tables',
-  up: (db) => {
-    db.exec(`
+  up: async (db) => {
+    await db.exec(`
       CREATE TABLE topics (
         account     TEXT    NOT NULL,
         topic_id    INTEGER NOT NULL,
@@ -429,8 +431,8 @@ const m008_topics: Migration = {
 const m009_labels: Migration = {
   version: 9,
   name: 'gmail label catalogue (id → name)',
-  up: (db) => {
-    db.exec(`
+  up: async (db) => {
+    await db.exec(`
       CREATE TABLE labels (
         account    TEXT NOT NULL,
         label_id   TEXT NOT NULL,        -- Gmail label id (INBOX, Label_123…)
@@ -441,6 +443,65 @@ const m009_labels: Migration = {
       );
 
       CREATE INDEX idx_labels_name ON labels (account, name);
+    `);
+  },
+};
+
+const m010_google_tokens: Migration = {
+  version: 10,
+  name: 'encrypted Google OAuth grants',
+  up: async (db) => {
+    await db.exec(`
+      CREATE TABLE google_tokens (
+        account TEXT PRIMARY KEY,
+        address TEXT NOT NULL,
+        scopes TEXT NOT NULL,
+        refresh_token_ciphertext BLOB NOT NULL,
+        iv BLOB NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+  },
+};
+
+const m011_jobs: Migration = {
+  version: 11,
+  name: 'remote queued jobs',
+  up: async (db) => {
+    await db.exec(`
+      CREATE TABLE jobs (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        account TEXT NOT NULL,
+        params_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued','running','done','failed')),
+        progress_json TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT
+      );
+      CREATE INDEX idx_jobs_status_created ON jobs(status, created_at);
+      CREATE INDEX idx_jobs_account_created ON jobs(account, created_at);
+    `);
+  },
+};
+
+const m012_trigger_rules: Migration = {
+  version: 12,
+  name: 'Trigger rules and webhook consumers',
+  up: async (db) => {
+    await db.exec(`
+      CREATE TABLE trigger_rules (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, account TEXT,
+        predicate_json TEXT NOT NULL, consumer_ids_json TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE webhook_consumers (
+        id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_trigger_rules_account_enabled ON trigger_rules(account, enabled);
     `);
   },
 };
@@ -456,22 +517,30 @@ export const MIGRATIONS: readonly Migration[] = [
   m007_porter_fts,
   m008_topics,
   m009_labels,
+  m010_google_tokens,
+  m011_jobs,
+  m012_trigger_rules,
 ];
 
-/** Read the database's applied schema version (SQLite `user_version`). */
-export function getUserVersion(db: DatabaseSync): number {
-  const row = db.prepare('PRAGMA user_version').get() as
+/**
+ * Read the database's applied schema version. Drivers expose the engine's
+ * durable version store through this SQLite-shaped query: node:sqlite uses the
+ * native pragma; D1 maps it to its one-row `schema_version` shim.
+ */
+export async function getUserVersion(db: StorageDriver): Promise<number> {
+  const row = (await db.prepare('PRAGMA user_version').get()) as
     | { user_version: number }
     | undefined;
   return row?.user_version ?? 0;
 }
 
 /**
- * Apply all pending migrations in a single transaction. Forward-only: throws
- * if the database version is newer than the code knows about (a downgrade).
+ * Apply each pending migration atomically and publish its version in the same
+ * commit. Forward-only: throws if the database version is newer than the code
+ * knows about (a downgrade).
  */
-export function runMigrations(db: DatabaseSync): void {
-  const current = getUserVersion(db);
+export async function runMigrations(db: StorageDriver): Promise<void> {
+  const current = await getUserVersion(db);
   const latest = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
 
   if (current > latest) {
@@ -485,17 +554,18 @@ export function runMigrations(db: DatabaseSync): void {
     (a, b) => a.version - b.version,
   );
 
-  db.exec('BEGIN');
-  try {
-    for (const migration of pending) {
-      migration.up(db);
+  for (const migration of pending) {
+    if (db.beginMigration) await db.beginMigration(); else await db.exec('BEGIN');
+    try {
+      await migration.up(db);
+      // Publish each migration atomically with its DDL. This lets later
+      // migrations read tables created by earlier commits and makes a failed
+      // retry resume at the last complete version on both sqlite and D1.
+      await db.exec(`PRAGMA user_version = ${migration.version}`);
+      if (db.commitMigration) await db.commitMigration(); else await db.exec('COMMIT');
+    } catch (err) {
+      if (db.rollbackMigration) await db.rollbackMigration(); else await db.exec('ROLLBACK');
+      throw err;
     }
-    // user_version does not accept a bound parameter; the value is an integer
-    // from our own constant list, so direct interpolation is safe.
-    db.exec(`PRAGMA user_version = ${latest}`);
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
   }
 }

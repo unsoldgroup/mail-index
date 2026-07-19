@@ -1,0 +1,26 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "mail-index",
+  "main": "oauth.ts",
+  "compatibility_date": "2026-07-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "mail-index", "database_id": "replace-with-operator-d1-id" }
+  ],
+  "queues": {
+    "producers": [{ "binding": "SYNC_QUEUE", "queue": "mail-index-jobs" }],
+    "consumers": [{ "queue": "mail-index-jobs" }]
+  },
+  "kv_namespaces": [
+    { "binding": "OAUTH_KV", "id": "replace-with-operator-kv-id" }
+  ],
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+  // 30s gives 2.69× headroom over the 11.15s 1,000-Message measurement in bench/RESULTS-WORKER.md.
+  ,"limits": { "cpu_ms": 30000 }
+  ,"triggers": { "crons": ["*/15 * * * *"] }
+  ,"vars": { "SYNC_INTERVAL": "15m", "OPERATOR_EMAILS": "operator@example.com" }
+
+  // Secrets (set with `wrangler secret put`):
+  // TOKEN_ENC_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET.
+  // OPERATOR_EMAILS is a comma-separated non-secret allowlist variable.
+}

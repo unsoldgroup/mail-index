@@ -36,6 +36,7 @@ export function providerUrl(account: AccountConfig, id: string): string {
   switch (account.adapter) {
     case 'gws':
     case 'gog':
+    case 'gmail-rest':
       // Gmail `#all` deep link: resolves the message id from any folder/label;
       // `/u/0` = first signed-in profile (Gmail redirects to the right one).
       // Both Gmail-backed adapters share the same web URL shape.
@@ -62,10 +63,14 @@ export interface OpenResult {
  * the message to be in the index — the URL is derivable from the id alone, so a
  * not-yet-synced id still resolves (an agent can hand `open` any provider id).
  */
-export function runOpen(config: OperatorConfig, repo: Repo, ref: MessageRef): OpenResult {
+export async function runOpen(
+  config: OperatorConfig,
+  repo: Repo,
+  ref: MessageRef,
+): Promise<OpenResult> {
   const account = resolveAccount(config, ref.account);
 
-  const stored = repo.getMessageUrl(ref.account, ref.id);
+  const stored = await repo.getMessageUrl(ref.account, ref.id);
   const url = stored ?? providerUrl(account, ref.id);
 
   return { ref, url };

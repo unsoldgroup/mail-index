@@ -439,7 +439,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<Set
   } else {
     const config = loadMergedConfig(configPath);
     const flags: SyncFlags = opts.since != null ? { since: opts.since } : {};
-    const db = openDb();
+    const db = await openDb();
     try {
       const repo = new Repo(db);
       const result = await deps.runSyncOne(config, label, flags, repo);

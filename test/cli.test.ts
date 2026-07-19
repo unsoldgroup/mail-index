@@ -37,7 +37,7 @@ function tmp(prefix: string): string {
 
 // ---- sync helpers --------------------------------------------------------
 
-test('composeScope overlays CLI flags onto the account policy', () => {
+test('composeScope overlays CLI flags onto the account policy', async () => {
   const account = {
     adapter: 'gws' as const,
     configDir: '/x',
@@ -49,7 +49,7 @@ test('composeScope overlays CLI flags onto the account policy', () => {
   assert.equal(scope?.includeSent, true);
 });
 
-test('composeScope --all clears since/limit bounds (whole mailbox)', () => {
+test('composeScope --all clears since/limit bounds (whole mailbox)', async () => {
   const account = {
     adapter: 'gws' as const,
     configDir: '/x',
@@ -59,7 +59,7 @@ test('composeScope --all clears since/limit bounds (whole mailbox)', () => {
   assert.equal(scope, undefined);
 });
 
-test('composeScope keeps query + includeSent even under --all', () => {
+test('composeScope keeps query + includeSent even under --all', async () => {
   const account = {
     adapter: 'gws' as const,
     configDir: '/x',
@@ -71,15 +71,15 @@ test('composeScope keeps query + includeSent even under --all', () => {
   assert.equal(scope?.since, undefined);
 });
 
-test('buildSource builds a gws adapter (expanding ~ in configDir)', () => {
+test('buildSource builds a gws adapter (expanding ~ in configDir)', async () => {
   const source = buildSource({ adapter: 'gws', configDir: '~/.config/gws-acct' });
   assert.equal(source.provider, 'gws');
 });
 
 // ---- search helpers ------------------------------------------------------
 
-function seedRepo(repo: Repo): void {
-  repo.upsertMessage({
+async function seedRepo(repo: Repo): void {
+  await repo.upsertMessage({
     account: 'acct-a',
     gmailMessageId: 'm1',
     threadId: 't1',
@@ -90,7 +90,7 @@ function seedRepo(repo: Repo): void {
     snippet: 'Confirming the 20% deposit is due Friday.',
     bodyState: 'meta',
   });
-  repo.upsertMessage({
+  await repo.upsertMessage({
     account: 'acct-a',
     gmailMessageId: 'm2',
     threadId: 't2',
@@ -104,12 +104,12 @@ function seedRepo(repo: Repo): void {
   });
 }
 
-test('runSearch ranks FTS hits and messageRef is account:id', () => {
-  const db = openDb({ path: ':memory:' });
+test('runSearch ranks FTS hits and messageRef is account:id', async () => {
+  const db = await openDb({ path: ':memory:' });
   try {
     const repo = new Repo(db);
-    seedRepo(repo);
-    const rows = runSearch(repo, ['deposit'], {});
+    await seedRepo(repo);
+    const rows = await runSearch(repo, ['deposit'], {});
     assert.equal(rows.length, 1);
     assert.equal(rows[0]?.gmail_message_id, 'm1');
     assert.equal(messageRef(rows[0]), 'acct-a:m1');
@@ -118,27 +118,27 @@ test('runSearch ranks FTS hits and messageRef is account:id', () => {
   }
 });
 
-test('runSearch is account-scoped + honours limit', () => {
-  const db = openDb({ path: ':memory:' });
+test('runSearch is account-scoped + honours limit', async () => {
+  const db = await openDb({ path: ':memory:' });
   try {
     const repo = new Repo(db);
-    seedRepo(repo);
+    await seedRepo(repo);
     // Both messages match a fuzzy OR query; limit 1 caps the result.
-    const rows = runSearch(repo, ['antarctica', 'polar'], { account: 'acct-a', limit: 1 });
+    const rows = await runSearch(repo, ['antarctica', 'polar'], { account: 'acct-a', limit: 1 });
     assert.equal(rows.length, 1);
-    const none = runSearch(repo, ['deposit'], { account: 'other' });
+    const none = await runSearch(repo, ['deposit'], { account: 'other' });
     assert.equal(none.length, 0);
   } finally {
     db.close();
   }
 });
 
-test('formatHit is the compact sender · subject · date · snippet · ref line', () => {
-  const db = openDb({ path: ':memory:' });
+test('formatHit is the compact sender · subject · date · snippet · ref line', async () => {
+  const db = await openDb({ path: ':memory:' });
   try {
     const repo = new Repo(db);
-    seedRepo(repo);
-    const row = runSearch(repo, ['deposit'], {})[0];
+    await seedRepo(repo);
+    const row = (await runSearch(repo, ['deposit'], {}))[0];
     const line = formatHit(row);
     assert.match(line, /jordan@partner\.example\.com/);
     assert.match(line, /Antarctica charter/);
@@ -149,21 +149,21 @@ test('formatHit is the compact sender · subject · date · snippet · ref line'
   }
 });
 
-test('formatResults reports an empty set without throwing', () => {
+test('formatResults reports an empty set without throwing', async () => {
   assert.match(formatResults([], ['nothing']), /No matches for "nothing"/);
 });
 
 // ---- status --------------------------------------------------------------
 
-test('buildStatus reports per-account counts, freshness, and totals', () => {
-  const db = openDb({ path: ':memory:' });
+test('buildStatus reports per-account counts, freshness, and totals', async () => {
+  const db = await openDb({ path: ':memory:' });
   try {
     const repo = new Repo(db);
-    seedRepo(repo);
-    const runId = repo.startSyncRun({ account: 'acct-a', phase: 'sync', selector: 'since=1mo' });
-    repo.finishSyncRun(runId, { fetched: 2, indexed: 2 });
+    await seedRepo(repo);
+    const runId = await repo.startSyncRun({ account: 'acct-a', phase: 'sync', selector: 'since=1mo' });
+    await repo.finishSyncRun(runId, { fetched: 2, indexed: 2 });
 
-    const report = buildStatus(repo);
+    const report = await buildStatus(repo);
     assert.equal(report.totals.messages, 2);
     assert.equal(report.totals.bodyStates.meta, 2);
     const a = report.accounts.find((x) => x.account === 'acct-a');
@@ -176,12 +176,12 @@ test('buildStatus reports per-account counts, freshness, and totals', () => {
   }
 });
 
-test('buildStatus flags an in-flight sync as syncing', () => {
-  const db = openDb({ path: ':memory:' });
+test('buildStatus flags an in-flight sync as syncing', async () => {
+  const db = await openDb({ path: ':memory:' });
   try {
     const repo = new Repo(db);
-    repo.startSyncRun({ account: 'acct-a', phase: 'sync' }); // left open = the lock
-    const report = buildStatus(repo);
+    await repo.startSyncRun({ account: 'acct-a', phase: 'sync' }); // left open = the lock
+    const report = await buildStatus(repo);
     const a = report.accounts.find((x) => x.account === 'acct-a');
     assert.ok(a);
     assert.equal(a.syncing, true);
@@ -191,12 +191,12 @@ test('buildStatus flags an in-flight sync as syncing', () => {
   }
 });
 
-test('formatStatus / formatStatusJson render without throwing', () => {
-  const db = openDb({ path: ':memory:' });
+test('formatStatus / formatStatusJson render without throwing', async () => {
+  const db = await openDb({ path: ':memory:' });
   try {
     const repo = new Repo(db);
-    seedRepo(repo);
-    const report = buildStatus(repo);
+    await seedRepo(repo);
+    const report = await buildStatus(repo);
     assert.match(formatStatus(report), /acct-a/);
     const parsed = JSON.parse(formatStatusJson(report));
     assert.equal(parsed.totals.messages, 2);
@@ -207,7 +207,7 @@ test('formatStatus / formatStatusJson render without throwing', () => {
 
 // ---- init ----------------------------------------------------------------
 
-test('runInit scaffolds config from the example and is non-destructive', () => {
+test('runInit scaffolds config from the example and is non-destructive', async () => {
   const dir = tmp('mi-init-');
   const configPath = join(dir, 'config.json');
   const dataDir = join(dir, 'data');
@@ -226,7 +226,7 @@ test('runInit scaffolds config from the example and is non-destructive', () => {
 
 // ---- bin smoke tests -----------------------------------------------------
 
-test('bin: top-level usage and per-command help', () => {
+test('bin: top-level usage and per-command help', async () => {
   const usage = execFileSync('node', [cliBin], { encoding: 'utf8' });
   assert.match(usage, /Usage:/);
   for (const cmd of ['sync', 'search', 'show', 'open', 'status']) {
@@ -235,11 +235,11 @@ test('bin: top-level usage and per-command help', () => {
   }
 });
 
-test('bin: unknown command exits non-zero', () => {
+test('bin: unknown command exits non-zero', async () => {
   assert.throws(() => execFileSync('node', [cliBin, 'bogus'], { encoding: 'utf8', stdio: 'pipe' }));
 });
 
-test('bin: search over a seeded tmp db prints a ranked hit', () => {
+test('bin: search over a seeded tmp db prints a ranked hit', async () => {
   const dir = tmp('mi-cli-');
   const dataDir = join(dir, 'mail-index');
   mkdirSync(dataDir, { recursive: true });
@@ -247,9 +247,9 @@ test('bin: search over a seeded tmp db prints a ranked hit', () => {
 
   // Seed via the index layer directly, then drive the bin against the same DB
   // through XDG_DATA_HOME so the CLI resolves the default path to our tmp file.
-  const db = openDb({ path: dbPath });
+  const db = await openDb({ path: dbPath });
   try {
-    seedRepo(new Repo(db));
+    await seedRepo(new Repo(db));
   } finally {
     db.close();
   }
@@ -262,7 +262,7 @@ test('bin: search over a seeded tmp db prints a ranked hit', () => {
   assert.match(out, /Antarctica charter/);
 });
 
-test('bin: open prints the provider URL for a ref (no provider fetch)', () => {
+test('bin: open prints the provider URL for a ref (no provider fetch)', async () => {
   const dir = tmp('mi-cli-');
   // A config dir with the shipped example config (has account "acct-a").
   const cfgHome = join(dir, 'config');
@@ -278,15 +278,15 @@ test('bin: open prints the provider URL for a ref (no provider fetch)', () => {
   assert.equal(out.trim(), 'https://mail.google.com/mail/u/0/#all/18f0a1b2c3');
 });
 
-test('bin: status --json over a seeded tmp db is machine-readable', () => {
+test('bin: status --json over a seeded tmp db is machine-readable', async () => {
   const dir = tmp('mi-cli-');
   const dataDir = join(dir, 'mail-index');
   mkdirSync(dataDir, { recursive: true });
   const dbPath = join(dataDir, 'mail.sqlite');
 
-  const db = openDb({ path: dbPath });
+  const db = await openDb({ path: dbPath });
   try {
-    seedRepo(new Repo(db));
+    await seedRepo(new Repo(db));
   } finally {
     db.close();
   }

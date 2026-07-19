@@ -124,12 +124,12 @@ function edgeKey(a: string, b: string): [string, string] {
  * An account with no non-list threads yields an empty graph and persists
  * nothing (a no-op build) — sync / search remain fully functional regardless.
  */
-export function buildGraph(
+export async function buildGraph(
   repo: Repo,
   account: string,
   options: GraphBuildOptions = {},
-): GraphBuildResult {
-  const threads = repo.graphThreads(account);
+): Promise<GraphBuildResult> {
+  const threads = await repo.graphThreads(account);
 
   // Undirected, weighted multigraph collapsed to a simple weighted graph: we
   // accumulate co-occurrence counts into a single edge per unordered pair.
@@ -197,7 +197,7 @@ export function buildGraph(
     });
   });
 
-  repo.persistGraphMetrics(account, metrics);
+  await repo.persistGraphMetrics(account, metrics);
 
   return {
     account,

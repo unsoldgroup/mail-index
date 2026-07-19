@@ -224,22 +224,22 @@ export interface InterestOptions {
  * Touches no `MailSource` and triggers no enrichment (D13). Returns the scored
  * contacts so callers (sync, CLI) can report without re-reading.
  */
-export function interestPass(
+export async function interestPass(
   repo: Repo,
   account: string,
   options: InterestOptions = {},
-): InterestResult {
+): Promise<InterestResult> {
   const now = options.now ?? new Date();
   const nowMs = now.getTime();
   const takenAt = now.toISOString();
 
-  const rows = repo.contactScoringRows(account);
+  const rows = await repo.contactScoringRows(account);
   const scored: ScoredContact[] = rows.map((row) => ({
     address: row.address,
     engagementScore: scoreContact(featuresFromRow(row, nowMs)),
   }));
 
-  repo.persistEngagementScores(account, scored, takenAt);
+  await repo.persistEngagementScores(account, scored, takenAt);
 
   return { account, scored, takenAt };
 }

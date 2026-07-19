@@ -15,6 +15,8 @@ import { homedir } from 'node:os';
 import { mkdirSync, existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { StorageDriver } from './driver.js';
+import { SqliteDriver } from './drivers/sqlite.js';
 import { getUserVersion, runMigrations } from './migrations.js';
 
 /** Error thrown for index-layer failures (open, migrate, repo invariants). */
@@ -80,9 +82,11 @@ export function defaultDbPath(): string {
 
 /**
  * Open (creating if needed) the index database. Enables WAL + foreign keys,
- * runs migrations, and returns the live connection. The caller owns closing it.
+ * runs migrations, and returns a {@link StorageDriver} over the live connection.
+ * The caller owns closing it. Async because migrations run over the async driver
+ * seam (the D1 driver is async-only, ticket 002).
  */
-export function openDb(options: OpenOptions = {}): DatabaseSync {
+export async function openDb(options: OpenOptions = {}): Promise<StorageDriver> {
   const path = options.path ?? defaultDbPath();
   const inMemory = path === ':memory:';
 
@@ -96,9 +100,9 @@ export function openDb(options: OpenOptions = {}): DatabaseSync {
     }
   }
 
-  let db: DatabaseSync;
+  let raw: DatabaseSync;
   try {
-    db = new DatabaseSync(path);
+    raw = new DatabaseSync(path);
   } catch (err) {
     throw new IndexError(`failed to open index at ${path}: ${(err as Error).message}`);
   }
@@ -106,10 +110,12 @@ export function openDb(options: OpenOptions = {}): DatabaseSync {
   // WAL is meaningless for :memory: and SQLite silently keeps it in `memory`
   // journal mode there, so only request it for file-backed databases.
   if (!inMemory) {
-    db.exec('PRAGMA journal_mode = WAL');
+    raw.exec('PRAGMA journal_mode = WAL');
   }
-  db.exec('PRAGMA foreign_keys = ON');
-  db.exec('PRAGMA busy_timeout = 5000');
+  raw.exec('PRAGMA foreign_keys = ON');
+  raw.exec('PRAGMA busy_timeout = 5000');
+
+  const db: StorageDriver = new SqliteDriver(raw);
 
   // Guard against opening the old single-file prototype DB (M1 carry-over). The
   // prototype created a `messages` table without ever setting `user_version`, so
@@ -118,14 +124,14 @@ export function openDb(options: OpenOptions = {}): DatabaseSync {
   // deep inside SQLite with a bare "table messages already exists". Detect that
   // shape up front and emit an actionable IndexError instead.
   if (!options.skipMigrations) {
-    if (getUserVersion(db) === 0 && hasAppTables(db)) {
+    if ((await getUserVersion(db)) === 0 && (await hasAppTables(db))) {
       throw new IndexError(
         `found a pre-existing un-versioned database at ${path} — looks like the old ` +
           `prototype; move it aside (e.g. rename to ${path}.prototype-bak) or set a ` +
           `different data dir (XDG_DATA_HOME) before running mail-index`,
       );
     }
-    runMigrations(db);
+    await runMigrations(db);
   }
 
   return db;
@@ -136,9 +142,9 @@ export function openDb(options: OpenOptions = {}): DatabaseSync {
  * the un-versioned prototype DB (see {@link openDb}). Checks for the `messages`
  * table, which both the prototype and the current schema create.
  */
-function hasAppTables(db: DatabaseSync): boolean {
-  const row = db
+async function hasAppTables(db: StorageDriver): Promise<boolean> {
+  const row = (await db
     .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'`)
-    .get() as { name: string } | undefined;
+    .get()) as { name: string } | undefined;
   return row != null;
 }

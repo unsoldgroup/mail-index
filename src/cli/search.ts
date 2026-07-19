@@ -29,10 +29,14 @@ export interface SearchFlags {
 }
 
 /** Run a search, returning ranked rows (best first). */
-export function runSearch(repo: Repo, terms: readonly string[], flags: SearchFlags): MessageRow[] {
+export async function runSearch(
+  repo: Repo,
+  terms: readonly string[],
+  flags: SearchFlags,
+): Promise<MessageRow[]> {
   const query = buildMatch(terms, { expand: true });
   if (query === '') return [];
-  return repo.searchMessages(query, { account: flags.account, limit: flags.limit ?? 20 });
+  return await repo.searchMessages(query, { account: flags.account, limit: flags.limit ?? 20 });
 }
 
 /**
@@ -57,7 +61,7 @@ export async function runSearchEnriching(
   flags: SearchFlags,
   buildSourceFn: (account: AccountConfig) => MailSource = buildSource,
 ): Promise<MessageRow[]> {
-  const hits = runSearch(repo, terms, flags);
+  const hits = await runSearch(repo, terms, flags);
   if (!flags.enrich || hits.length === 0) return hits;
 
   // Build (and cache) one source per distinct account across the hit set, so a

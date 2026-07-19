@@ -26,10 +26,11 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'src');
 const BIN = join(ROOT, 'bin');
+const WORKER = join(ROOT, 'worker');
 
 /** Direct network egress primitives. */
 const NETWORK = [
-  { re: /\bfetch\s*\(/, what: 'fetch()' },
+  { re: /\b(?:fetch|fetchImpl)\s*\(/, what: 'fetch()/injected fetch' },
   { re: /['"]node:(?:http|https|net|dgram|tls)['"]/, what: 'node net/http import' },
   { re: /\b(?:XMLHttpRequest|WebSocket|EventSource)\b/, what: 'browser network API' },
   { re: /['"](?:axios|node-fetch|undici|got|superagent|ws|request)['"]/, what: 'network library import' },
@@ -45,6 +46,19 @@ const SRC_PROC_ALLOW = new Set([
   'source/adapters/gog/runner.ts', // spawns the gog CLI — the provider boundary
   'mcp/server.ts', // detached re-exec of our own `mail-index sync` (ADR-0005)
   'cli/proc.ts', // onboarding: spawns gog/brew (mail-index setup) — the single auditable seam
+]);
+
+/** Core (src/) network seams — the local HTTP MCP transport (streamable HTTP, PR #10). */
+const SRC_NETWORK_ALLOW = new Set([
+  'mcp/server.ts', // node:http server for the streamable-HTTP MCP transport — serves, never fetches
+  'source/adapters/gmail-rest/runner.ts', // injected Gmail REST fetch — remote Deployment provider seam
+]);
+const WORKER_NETWORK_ALLOW = new Set([
+  'google-oauth.ts', // Google OAuth/token exchange
+  'index.ts', // public/API route handler and injected OAuth/Gmail seams
+  'oauth.ts', // OAuth provider serving entrypoint
+  'import-seed-entry.ts', // one-shot local Wrangler import endpoint
+  'triggers.ts', // HMAC-signed webhook delivery
 ]);
 
 /** The ONE bin/ file allowed to reach the network: the self-updater. */
@@ -78,10 +92,12 @@ function load(dir: string, ext: string) {
 
 const srcFiles = load(SRC, '.ts');
 const binFiles = load(BIN, '.mjs');
+const workerFiles = load(WORKER, '.ts');
 
 test('no direct network primitives anywhere in src/ (core is egress-free)', () => {
   const hits: string[] = [];
   for (const { rel, code } of srcFiles) {
+    if (SRC_NETWORK_ALLOW.has(rel)) continue;
     for (const { re, what } of NETWORK) {
       if (re.test(code)) hits.push(`${rel} → ${what}`);
     }
@@ -96,6 +112,15 @@ test('process spawning in src/ only in the allow-listed core seams', () => {
     if (PROC.test(code)) hits.push(rel);
   }
   assert.equal(hits.length, 0, `process spawn outside the allow-list (new egress surface):\n  ${hits.join('\n  ')}`);
+});
+
+test('Worker network primitives stay inside the pinned remote seams', () => {
+  const hits: string[] = [];
+  for (const { rel, code } of workerFiles) {
+    if (WORKER_NETWORK_ALLOW.has(rel)) continue;
+    for (const { re, what } of NETWORK) if (re.test(code)) hits.push(`${rel} → ${what}`);
+  }
+  assert.equal(hits.length, 0, `unexpected Worker network seam:\n  ${hits.join('\n  ')}`);
 });
 
 test('bin/ reaches the network only in the self-updater', () => {
@@ -121,6 +146,9 @@ test('bin/ spawns only in the updater + launcher', () => {
 test('the allow-listed seams still exist (guard cannot silently pass)', () => {
   const srcPresent = new Set(srcFiles.map((f) => f.rel));
   for (const a of SRC_PROC_ALLOW) assert.ok(srcPresent.has(a), `core seam missing: ${a}`);
+  for (const a of SRC_NETWORK_ALLOW) assert.ok(srcPresent.has(a), `core network seam missing: ${a}`);
+  const workerPresent = new Set(workerFiles.map((f) => f.rel));
+  for (const a of WORKER_NETWORK_ALLOW) assert.ok(workerPresent.has(a), `Worker network seam missing: ${a}`);
   const binPresent = new Set(binFiles.map((f) => f.rel));
   for (const a of BIN_NETWORK_ALLOW) assert.ok(binPresent.has(a), `bin network seam missing: ${a}`);
 });

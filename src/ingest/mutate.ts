@@ -65,7 +65,7 @@ export async function applyLabelChange(input: MutateInput): Promise<MutateResult
   // pass "Coverage Review" instead of Label_123…; the gws REST path requires the
   // id (gog accepts either). System labels (INBOX/STARRED), raw ids, and unknown
   // strings have no name entry and pass through unchanged. Both add + remove.
-  const nameToId = repo.labelNameToId(account);
+  const nameToId = await repo.labelNameToId(account);
   const add = resolveNames(change.addLabelIds ?? [], nameToId);
   const remove = resolveNames(change.removeLabelIds ?? [], nameToId);
 
@@ -79,8 +79,8 @@ export async function applyLabelChange(input: MutateInput): Promise<MutateResult
   await source.modify(id, resolved);
 
   // Then reflect it locally so search/recall stay consistent before next sync.
-  const labels = repo.applyLabelChange(account, id, { add, remove });
-  const labelNames = labels ? repo.labelNames(account, labels) : null;
+  const labels = await repo.applyLabelChange(account, id, { add, remove });
+  const labelNames = labels ? await repo.labelNames(account, labels) : null;
 
   return { account, id, labels, labelNames, indexed: labels !== null };
 }
