@@ -36,6 +36,7 @@ export function providerUrl(account: AccountConfig, id: string): string {
   switch (account.adapter) {
     case 'gws':
     case 'gog':
+    case 'gmail-rest':
       // Gmail `#all` deep link: resolves the message id from any folder/label;
       // `/u/0` = first signed-in profile (Gmail redirects to the right one).
       // Both Gmail-backed adapters share the same web URL shape.

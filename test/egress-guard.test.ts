@@ -50,6 +50,7 @@ const SRC_PROC_ALLOW = new Set([
 /** Core (src/) network seams — the local HTTP MCP transport (streamable HTTP, PR #10). */
 const SRC_NETWORK_ALLOW = new Set([
   'mcp/server.ts', // node:http server for the streamable-HTTP MCP transport — serves, never fetches
+  'source/adapters/gmail-rest/runner.ts', // injected Gmail REST fetch — remote Deployment provider seam
 ]);
 
 /** The ONE bin/ file allowed to reach the network: the self-updater. */
@@ -127,6 +128,7 @@ test('bin/ spawns only in the updater + launcher', () => {
 test('the allow-listed seams still exist (guard cannot silently pass)', () => {
   const srcPresent = new Set(srcFiles.map((f) => f.rel));
   for (const a of SRC_PROC_ALLOW) assert.ok(srcPresent.has(a), `core seam missing: ${a}`);
+  for (const a of SRC_NETWORK_ALLOW) assert.ok(srcPresent.has(a), `core network seam missing: ${a}`);
   const binPresent = new Set(binFiles.map((f) => f.rel));
   for (const a of BIN_NETWORK_ALLOW) assert.ok(binPresent.has(a), `bin network seam missing: ${a}`);
 });

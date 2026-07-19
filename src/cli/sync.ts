@@ -46,6 +46,8 @@ export function buildSource(account: AccountConfig): MailSource {
       return new GwsAdapter({ configDir: expandHome(account.configDir ?? '') });
     case 'gog':
       return new GogAdapter({ account: account.account ?? '' });
+    case 'gmail-rest':
+      throw new Error('gmail-rest is constructed by the remote Deployment with an injected token provider');
     default: {
       // Exhaustiveness guard: AccountConfig.adapter is a closed union, but a
       // future adapter id added to config must be wired here too.
