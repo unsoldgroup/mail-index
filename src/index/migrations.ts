@@ -3,8 +3,10 @@
  *
  * Each migration has a monotonically increasing `version` and an `up(db)` that
  * runs its DDL. `runMigrations` applies every migration whose version exceeds
- * the database's current `user_version` pragma, in order, inside a single
- * transaction, then bumps `user_version`. Migrations are append-only: never
+ * the database's current schema version, in order, then bumps that version.
+ * The node:sqlite driver supplies an interactive transaction; D1 treats those
+ * control statements as boundaries around its forward-only sequence.
+ * Migrations are append-only: never
  * edit or reorder an existing one — add a new one.
  *
  * The FTS5 table is external-content over `messages` (PLAN §6): it stores no
@@ -458,7 +460,11 @@ export const MIGRATIONS: readonly Migration[] = [
   m009_labels,
 ];
 
-/** Read the database's applied schema version (SQLite `user_version`). */
+/**
+ * Read the database's applied schema version. Drivers expose the engine's
+ * durable version store through this SQLite-shaped query: node:sqlite uses the
+ * native pragma; D1 maps it to its one-row `schema_version` shim.
+ */
 export async function getUserVersion(db: StorageDriver): Promise<number> {
   const row = (await db.prepare('PRAGMA user_version').get()) as
     | { user_version: number }
