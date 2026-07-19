@@ -33,6 +33,7 @@ import { formatCadence, formatCadenceJson, runCadence, type CadenceFlags } from 
 import { formatGraphResult, runGraphBuildAll, runGraphBuildOne } from './graph.js';
 import { formatCurate, readlinePrompter, runCurate } from './curate.js';
 import { compact } from '../writeback/index.js';
+import { writeExport } from './export.js';
 
 const USAGE = `mail-index — a local, agent-queryable mail intelligence layer
 
@@ -56,6 +57,7 @@ Commands:
   compact [--account <label>]   Demote summarized bulk bodies to summary-only (ADR-0003)
   cadence --account <label>     Inbound frequency per sender brand (optionally --category)
   status                        Show per-account index freshness + counts
+  export [--out <file>]         Export portable NDJSON seed data
 
 Run 'mail-index <command> --help' for command-specific options.
 `;
@@ -961,11 +963,20 @@ async function main(argv: string[]): Promise<number> {
       return cmdCadence(rest);
     case 'status':
       return cmdStatus(rest);
+    case 'export':
+      return cmdExport(rest);
     default:
       process.stderr.write(`unknown command "${command}"\n\n`);
       process.stderr.write(USAGE);
       return 2;
   }
+}
+
+async function cmdExport(argv: string[]): Promise<number> {
+  const { values } = parseArgs({ args: argv, options: { db: { type: 'string' }, out: { type: 'string' }, account: { type: 'string' }, 'schema-version': { type: 'string' }, help: { type: 'boolean' } }, allowPositionals: false });
+  if (values.help) { process.stdout.write('Usage: mail-index export [--db <path>] [--out <file>] [--account <label>] [--schema-version 12]\n'); return 0; }
+  if (values['schema-version'] != null && Number(values['schema-version']) !== 12) throw new CliError(`export schema-version must be 12, got ${values['schema-version']}`);
+  const db = await openDb(values.db ? { path: values.db } : {}); try { await writeExport(db, values.out, values.account); return 0; } finally { db.close(); }
 }
 
 main(process.argv.slice(2))

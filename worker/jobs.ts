@@ -31,7 +31,10 @@ export function enqueueSyncJob(env: Env, account: string, since?: string): Promi
 export async function enqueueScheduledSyncs(env: Env): Promise<string[]> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
   const rows = await driver.prepare('SELECT account FROM google_tokens ORDER BY account').all() as { account: string }[];
-  return Promise.all(rows.map((row) => enqueueSyncJob(env, row.account)));
+  return Promise.all(rows.map(async (row) => {
+    const watermark = await driver.prepare(`SELECT finished_at FROM sync_runs WHERE account=? AND phase='sync' AND finished_at IS NOT NULL AND error IS NULL ORDER BY finished_at DESC LIMIT 1`).get(row.account) as { finished_at: string } | undefined;
+    return enqueueSyncJob(env, row.account, watermark?.finished_at);
+  }));
 }
 
 export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fetch = fetch): Promise<void> {
