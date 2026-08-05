@@ -1,7 +1,5 @@
-import { randomUUID } from 'node:crypto';
 import type { AuthRequest, OAuthHelpers } from '@cloudflare/workers-oauth-provider';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { D1Driver, type D1DatabaseBinding } from '../src/index/drivers/d1.js';
 import { Repo } from '../src/index/repo.js';
 import { getUserVersion, runMigrations } from '../src/index/migrations.js';
@@ -10,7 +8,7 @@ import { buildServer } from '../src/mcp/server.js';
 import type { ToolContext } from '../src/mcp/tools.js';
 import { GmailRestAdapter } from '../src/source/adapters/gmail-rest/index.js';
 import { InsufficientScopeError } from '../src/source/index.js';
-import { accessTokenProvider, exchangeToken, GMAIL_MODIFY, GMAIL_READONLY, saveGrant, signPayload, signState, verifyGoogleIdentity, verifyPayload, verifyState } from './google-oauth.js';
+import { AccountMismatchError, accessTokenProvider, exchangeToken, GMAIL_MODIFY, GMAIL_READONLY, saveGrant, signPayload, signState, verifyGoogleIdentity, verifyPayload, verifyState } from './google-oauth.js';
 import { enqueueJob, enqueueScheduledSyncs, jobStatus, runJob, type JobMessage } from './jobs.js';
 import { triggerAdmin } from './triggers.js';
 import { agentCard, handleA2a } from './a2a.js';
@@ -35,9 +33,6 @@ export interface Env {
   SYNC_INTERVAL: string;
 }
 
-const transports = new Map<string, WebStandardStreamableHTTPServerTransport>();
-const servers = new Map<string, Server>();
-
 function assertBindings(env: Partial<Env>): asserts env is Env {
   for (const name of ['DB', 'SYNC_QUEUE', 'OAUTH_KV', 'TOKEN_ENC_KEY', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'OPERATOR_EMAILS', 'SYNC_INTERVAL'] as const) {
     if (!env[name]) throw new Error(`Missing required Worker binding: ${name}`);
@@ -46,18 +41,25 @@ function assertBindings(env: Partial<Env>): asserts env is Env {
 
 async function storage(env: Env) { const driver = new D1Driver(env.DB); await runMigrations(driver); return { driver, repo: new Repo(driver) }; }
 
+/**
+ * Serve one MCP request STATELESSLY (SDK "stateless mode", the documented
+ * Cloudflare Workers pattern).
+ *
+ * A session map keyed by `mcp-session-id` cannot work here: Workers give no
+ * cross-request isolate affinity, so the POST that follows `initialize`
+ * routinely lands in an isolate whose map is empty. The old code then built a
+ * fresh transport carrying a NEW session id while the client was still sending
+ * the old one, and the SDK rejected the mismatch — every connection went 200 on
+ * initialize then 400 on `tools/list`, surfacing in claude.ai as "couldn't
+ * reload tools from the server".
+ *
+ * Each request therefore gets its own server + transport. The tool surface is
+ * rebuilt from D1 per request, so nothing of value lived in that map anyway.
+ */
 async function handleMcp(request: Request, env: Env): Promise<Response> {
-  const sid = request.headers.get('mcp-session-id');
-  let transport = sid ? transports.get(sid) : undefined;
-  if (!transport) {
-    const context = await buildWorkerToolContext(env);
-    const server = buildServer(context);
-    transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: randomUUID, enableJsonResponse: true,
-      onsessioninitialized: (id) => { transports.set(id, transport!); servers.set(id, server); },
-      onsessionclosed: (id) => { transports.delete(id); const active = servers.get(id); servers.delete(id); void active?.close(); },
-    });
-    await server.connect(transport);
-  }
+  const server = buildServer(await buildWorkerToolContext(env));
+  const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+  await server.connect(transport);
   return transport.handleRequest(request);
 }
 
@@ -152,7 +154,12 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
     const refreshToken = String(token['refresh_token'] ?? '');
     if (!accessToken || !refreshToken) throw new Error('Google callback returned incomplete tokens');
     const address = await verifyGoogleIdentity(fetchImpl, accessToken); const { driver } = await storage(env);
-    await saveGrant(driver, { account: state.account, address, scopes: state.writes ? [GMAIL_READONLY, GMAIL_MODIFY] : [GMAIL_READONLY], refreshToken, key: env.TOKEN_ENC_KEY });
+    try {
+      await saveGrant(driver, { account: state.account, address, scopes: state.writes ? [GMAIL_READONLY, GMAIL_MODIFY] : [GMAIL_READONLY], refreshToken, key: env.TOKEN_ENC_KEY });
+    } catch (err) {
+      if (!(err instanceof AccountMismatchError)) throw err;
+      return new Response(`<h1>Wrong account label</h1><p>${escapeHtml(err.message)}</p><p><a href="/setup/google/start?account=${encodeURIComponent(address.split('@')[0] ?? 'account')}">Connect ${escapeHtml(address)} under its own label</a></p>`, { status: 409, headers: { 'content-type': 'text/html; charset=utf-8' } });
+    }
     return new Response(`<h1>Connected ${escapeHtml(state.account)}</h1><p>${escapeHtml(address)}</p>`, { headers: { 'content-type': 'text/html; charset=utf-8' } });
   }
   // Identity-only sign-in, reachable WITHOUT a session — this is how a browser

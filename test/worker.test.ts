@@ -69,8 +69,10 @@ test('Authorized Worker MCP serves initialize, tools/list, and a D1-backed call'
       params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
     }), env);
     assert.equal(initialized.status, 200);
+    // Stateless mode (Workers have no isolate affinity): no session id is
+    // issued, and every later call stands alone. See handleMcp.
     const sessionId = initialized.headers.get('mcp-session-id');
-    assert.ok(sessionId);
+    assert.equal(sessionId, null);
 
     const listed = await handleAuthorizedRequest(mcpRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, sessionId), env);
     const listBody = (await listed.json()) as { result: { tools: unknown[] } };
