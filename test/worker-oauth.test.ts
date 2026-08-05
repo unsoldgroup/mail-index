@@ -74,7 +74,7 @@ test('/setup/login mints an operator session without the MCP authorize flow', as
       DB: await mf.getD1Database('DB'), OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async () => undefined },
       TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m',
     };
-    const identity = (email: string) => (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const identity = (email: string) => (async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('oauth2.googleapis.com/token')) return Response.json({ access_token: 'access', expires_in: 3600 });
       if (url.includes('openidconnect.googleapis.com/v1/userinfo')) return Response.json({ email, email_verified: true });
