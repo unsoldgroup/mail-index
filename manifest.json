@@ -2,7 +2,7 @@
   "manifest_version": "0.2",
   "name": "mail-index",
   "display_name": "mail-index",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Local, agent-queryable Gmail intelligence — a read-only MCP server over a progressive local index of your mailbox.",
   "long_description": "mail-index keeps a local, read-only index of your Gmail (metadata-wide, bodies-narrow) and exposes it to your agent over MCP — recall and summarization across your whole mailbox without Gmail's search bar. This bundle only registers the server; you must first install the gog (or gws) adapter, authenticate a mailbox once (read-only), and run an initial sync — follow docs/agent-install.md. The server requires an existing config and will exit with a clear error if none is present. Local-first: the index never leaves your machine; read-only by default — it never sends or deletes mail, and only archives/relabels when you explicitly opt into the gmail.modify scope.",
   "author": {
@@ -12,7 +12,14 @@
   "homepage": "https://github.com/unsoldgroup/mail-index",
   "documentation": "https://github.com/unsoldgroup/mail-index/blob/main/docs/INSTALL.md",
   "license": "MIT",
-  "keywords": ["gmail", "email", "search", "recall", "local-first", "read-only"],
+  "keywords": [
+    "gmail",
+    "email",
+    "search",
+    "recall",
+    "local-first",
+    "read-only"
+  ],
   "server": {
     "type": "node",
     "entry_point": "dist/mcp/index.js",
@@ -22,23 +29,71 @@
     }
   },
   "tools": [
-    { "name": "search", "description": "Ranked fuzzy full-text recall over the indexed mailbox." },
-    { "name": "get_message", "description": "One message: summary → distilled body → inline enrich; plus ocr_images/needs_ocr." },
-    { "name": "get_thread", "description": "A thread with rollup + summaries." },
-    { "name": "list_contacts", "description": "Correspondents with engagement context." },
-    { "name": "get_contact", "description": "One correspondent's threads, counts, sentiment." },
-    { "name": "find_person", "description": "Fuzzy person lookup by name/email." },
+    {
+      "name": "search",
+      "description": "Ranked fuzzy full-text recall over the indexed mailbox."
+    },
+    {
+      "name": "get_message",
+      "description": "One message: summary → distilled body → inline enrich; plus ocr_images/needs_ocr."
+    },
+    {
+      "name": "get_thread",
+      "description": "A thread with rollup + summaries."
+    },
+    {
+      "name": "list_contacts",
+      "description": "Correspondents with engagement context."
+    },
+    {
+      "name": "get_contact",
+      "description": "One correspondent's threads, counts, sentiment."
+    },
+    {
+      "name": "find_person",
+      "description": "Fuzzy person lookup by name/email."
+    },
     { "name": "list_threads", "description": "Recent threads, snippet-first." },
-    { "name": "graph_neighbors", "description": "Nearest neighbours in the contact graph." },
-    { "name": "graph_communities", "description": "Contact clusters (Louvain)." },
-    { "name": "interest_propose", "description": "Suggest curation tags for a message." },
-    { "name": "interest_set", "description": "Save a curation tag on a message." },
-    { "name": "interest_get", "description": "Fetch curated tags for a message." },
-    { "name": "save_summary", "description": "Save an agent-written summary on a message/thread." },
-    { "name": "domains_to_categorize", "description": "List uncategorized domains with context." },
-    { "name": "save_domain_category", "description": "Tag a domain (vendor/client/spam/…)." },
+    {
+      "name": "graph_neighbors",
+      "description": "Nearest neighbours in the contact graph."
+    },
+    {
+      "name": "graph_communities",
+      "description": "Contact clusters (Louvain)."
+    },
+    {
+      "name": "interest_propose",
+      "description": "Suggest curation tags for a message."
+    },
+    {
+      "name": "interest_set",
+      "description": "Save a curation tag on a message."
+    },
+    {
+      "name": "interest_get",
+      "description": "Fetch curated tags for a message."
+    },
+    {
+      "name": "save_summary",
+      "description": "Save an agent-written summary on a message/thread."
+    },
+    {
+      "name": "domains_to_categorize",
+      "description": "List uncategorized domains with context."
+    },
+    {
+      "name": "save_domain_category",
+      "description": "Tag a domain (vendor/client/spam/…)."
+    },
     { "name": "sync_status", "description": "Per-account index freshness." },
-    { "name": "catch_up", "description": "Incremental sync trigger + current data." },
-    { "name": "digest_sources", "description": "Summarize which accounts have new mail + trigger sync." }
+    {
+      "name": "catch_up",
+      "description": "Incremental sync trigger + current data."
+    },
+    {
+      "name": "digest_sources",
+      "description": "Summarize which accounts have new mail + trigger sync."
+    }
   ]
 }
