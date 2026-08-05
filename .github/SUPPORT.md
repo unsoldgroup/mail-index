@@ -6,9 +6,9 @@ way we hear from you is if you reach out. All of these are opt-in and public
 
 | I want to… | Go here |
 |---|---|
-| **Ask a question / share how I use it / float an idea** | [Discussions](https://github.com/alunsoldantarctica/mail-index/discussions) |
-| **Report a bug** | [New bug report](https://github.com/alunsoldantarctica/mail-index/issues/new?template=bug_report.yml) |
-| **Request a feature / give feedback** | [New feature request](https://github.com/alunsoldantarctica/mail-index/issues/new?template=feature_request.yml) |
+| **Ask a question / share how I use it / float an idea** | [Discussions](https://github.com/unsoldgroup/mail-index/discussions) |
+| **Report a bug** | [New bug report](https://github.com/unsoldgroup/mail-index/issues/new?template=bug_report.yml) |
+| **Request a feature / give feedback** | [New feature request](https://github.com/unsoldgroup/mail-index/issues/new?template=feature_request.yml) |
 | **Report a security or privacy issue** (private) | [SECURITY.md](SECURITY.md) |
 | **Reach the maintainer** | [unsold.group/al](https://unsold.group/al) |
 

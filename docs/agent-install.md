@@ -80,7 +80,7 @@ environment variables via `setx GOG_KEYRING_BACKEND file` etc.)
 
 ```sh
 # From source (current — npm package not yet published):
-git clone https://github.com/alunsoldantarctica/mail-index.git
+git clone https://github.com/unsoldgroup/mail-index.git
 cd mail-index && pnpm install && pnpm build
 # invoke as `node dist/cli/index.js <command>`; symlink onto PATH for the bare `mail-index`.
 # Once published: `npm install -g mail-index` gives the `mail-index` + `mail-index-mcp` bins.

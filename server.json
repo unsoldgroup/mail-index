@@ -4,7 +4,7 @@
   "title": "mail-index",
   "description": "Local-first, read-only MCP server for recall over your Gmail: search, contacts, threads, digests.",
   "repository": {
-    "url": "https://github.com/alunsoldantarctica/mail-index",
+    "url": "https://github.com/unsoldgroup/mail-index",
     "source": "github"
   },
   "version": "1.0.0",
