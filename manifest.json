@@ -9,8 +9,8 @@
     "name": "Al Ste-Marie",
     "url": "https://unsold.group"
   },
-  "homepage": "https://github.com/alunsoldantarctica/mail-index",
-  "documentation": "https://github.com/alunsoldantarctica/mail-index/blob/main/docs/INSTALL.md",
+  "homepage": "https://github.com/unsoldgroup/mail-index",
+  "documentation": "https://github.com/unsoldgroup/mail-index/blob/main/docs/INSTALL.md",
   "license": "MIT",
   "keywords": ["gmail", "email", "search", "recall", "local-first", "read-only"],
   "server": {

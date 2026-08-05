@@ -12,7 +12,7 @@ one of two ways (see [INSTALL.md §2](INSTALL.md#2-connect-a-mailbox-pick-an-oau
   uses a *restricted* scope and is unverified, it
   is capped at **~100 users** and shows an "unverified app" screen. Google only
   admits **named test users** in this mode, so Option A needs a one-time
-  [beta access request](https://github.com/alunsoldantarctica/mail-index/issues/new?template=beta_access.yml)
+  [beta access request](https://github.com/unsoldgroup/mail-index/issues/new?template=beta_access.yml)
   to add your address to the test-user list.
 - **Option B — your own Google Cloud client.** No mail-index cap; the
   verification burden (if any) is yours, on your own app and timeline.

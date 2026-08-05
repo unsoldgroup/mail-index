@@ -2,9 +2,9 @@
 
 [![npm version](https://img.shields.io/npm/v/mail-index?logo=npm&color=cb3837)](https://www.npmjs.com/package/mail-index)
 [![npm downloads](https://img.shields.io/npm/dm/mail-index?logo=npm&color=cb3837)](https://www.npmjs.com/package/mail-index)
-[![GitHub stars](https://img.shields.io/github/stars/alunsoldantarctica/mail-index?logo=github)](https://github.com/alunsoldantarctica/mail-index/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/alunsoldantarctica/mail-index?logo=github)](https://github.com/alunsoldantarctica/mail-index/network/members)
-[![CI](https://github.com/alunsoldantarctica/mail-index/actions/workflows/ci.yml/badge.svg)](https://github.com/alunsoldantarctica/mail-index/actions/workflows/ci.yml)
+[![GitHub stars](https://img.shields.io/github/stars/unsoldgroup/mail-index?logo=github)](https://github.com/unsoldgroup/mail-index/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/unsoldgroup/mail-index?logo=github)](https://github.com/unsoldgroup/mail-index/network/members)
+[![CI](https://github.com/unsoldgroup/mail-index/actions/workflows/ci.yml/badge.svg)](https://github.com/unsoldgroup/mail-index/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Node](https://img.shields.io/badge/node-%E2%89%A524-3c873a)
 ![deps](https://img.shields.io/badge/native%20deps-none-brightgreen)
@@ -34,7 +34,7 @@ re-auth; never send or delete). See [ADR-0007](docs/adr/0007-opt-in-mailbox-writ
 > interest engine, curation, the full 23-tool MCP surface, and the write-back
 > loops are built and tested — and `mail-index` is live on
 > **[npm](https://www.npmjs.com/package/mail-index)** with a
-> **[`.mcpb` bundle](https://github.com/alunsoldantarctica/mail-index/releases/latest)**.
+> **[`.mcpb` bundle](https://github.com/unsoldgroup/mail-index/releases/latest)**.
 > Still in progress: the bundled Option A OAuth client and signed one-click
 > installers. Architecture lives in
 > **[docs/PLAN.md](docs/PLAN.md)**; start with **[docs/INSTALL.md](docs/INSTALL.md)**.
@@ -84,7 +84,7 @@ re-auth; never send or delete). See [ADR-0007](docs/adr/0007-opt-in-mailbox-writ
 Requires **Node 24+** and a Gmail `MailSource` adapter — **`gog`** (recommended)
 or **`gws`**. Reading Gmail needs a Google OAuth client, and you get one **two
 ways**: use the **mail-index beta client** (skip Google Cloud entirely;
-[request access](https://github.com/alunsoldantarctica/mail-index/issues/new?template=beta_access.yml)
+[request access](https://github.com/unsoldgroup/mail-index/issues/new?template=beta_access.yml)
 to join the ~100-user test list) or **bring your own** Google Cloud client (no
 cap, no request — we walk you through it). See
 [docs/INSTALL.md §2](docs/INSTALL.md#2-connect-a-mailbox-pick-an-oauth-path)
@@ -115,7 +115,7 @@ it doesn't install the adapter, sign you in, or sync.
   ```jsonc
   { "mcpServers": { "mail-index": { "command": "mail-index-mcp" } } }
   ```
-- **Claude Desktop:** download the **[`.mcpb` bundle](https://github.com/alunsoldantarctica/mail-index/releases/latest/download/mail-index.mcpb)**
+- **Claude Desktop:** download the **[`.mcpb` bundle](https://github.com/unsoldgroup/mail-index/releases/latest/download/mail-index.mcpb)**
   and double-click it (unsigned during beta — you may need to allow it in System
   Settings / Windows SmartScreen). The bundle is **self-contained** (ships its own
   dependencies, run by Claude Desktop's bundled Node — no npx, network, or system
@@ -228,15 +228,15 @@ More: **[unsold.group/al](https://unsold.group/al)**
 
 ## Project growth
 
-[![Star History Chart](https://api.star-history.com/svg?repos=alunsoldantarctica/mail-index&type=Date)](https://star-history.com/#alunsoldantarctica/mail-index&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=unsoldgroup/mail-index&type=Date)](https://star-history.com/#unsoldgroup/mail-index&Date)
 
 ## Feedback & contact
 
 There's **no telemetry** — we only know what you tell us, so feedback is
 genuinely welcome:
 
-- 💬 **[Discussions](https://github.com/alunsoldantarctica/mail-index/discussions)** — questions, ideas, how you use it
-- 🐞 **[Report a bug](https://github.com/alunsoldantarctica/mail-index/issues/new?template=bug_report.yml)** · 💡 **[Request a feature](https://github.com/alunsoldantarctica/mail-index/issues/new?template=feature_request.yml)**
+- 💬 **[Discussions](https://github.com/unsoldgroup/mail-index/discussions)** — questions, ideas, how you use it
+- 🐞 **[Report a bug](https://github.com/unsoldgroup/mail-index/issues/new?template=bug_report.yml)** · 💡 **[Request a feature](https://github.com/unsoldgroup/mail-index/issues/new?template=feature_request.yml)**
 - 🔒 Security/privacy issues → **[SECURITY.md](.github/SECURITY.md)** (private)
 - 🌐 **[unsold.group/al](https://unsold.group/al)**
 

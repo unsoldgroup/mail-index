@@ -5,7 +5,7 @@ name: Publish to MCP Registry
 # the runnable artifact must already be on npm (see release.yml).
 #
 # Auth is via GitHub OIDC — the registry verifies that this workflow runs in the
-# `alunsoldantarctica` org, which owns the `io.github.alunsoldantarctica/*`
+# `unsoldgroup` org, which owns the `io.github.alunsoldantarctica/*`
 # namespace declared in server.json's `name`. No interactive login / token.
 on:
   workflow_dispatch: {}

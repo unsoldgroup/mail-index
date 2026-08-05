@@ -96,7 +96,7 @@ authenticated against your mailbox with **read-only** Gmail scope
 ### Option A — use the mail-index beta OAuth client (skip Google Cloud) — *planned*
 
 The intended fastest path. **First, request access:** open a
-[**Beta access request**](https://github.com/alunsoldantarctica/mail-index/issues/new?template=beta_access.yml)
+[**Beta access request**](https://github.com/unsoldgroup/mail-index/issues/new?template=beta_access.yml)
 with the Google address you'll sign in as — we add it to the mail-index app's
 test users (Google requires named testers while the app is in "testing" mode).
 Once you're on the list, a `mail-index setup` wizard will install the adapter,
@@ -302,7 +302,7 @@ or its tools have nothing to read.
   { "mcpServers": { "mail-index": { "command": "node", "args": ["C:\\path\\to\\mail-index\\dist\\mcp\\index.js"] } } }
   ```
 - **Claude Desktop:** download the
-  [`.mcpb` bundle](https://github.com/alunsoldantarctica/mail-index/releases/latest/download/mail-index.mcpb)
+  [`.mcpb` bundle](https://github.com/unsoldgroup/mail-index/releases/latest/download/mail-index.mcpb)
   and double-click it (unsigned during beta — allow it in System Settings /
   Windows SmartScreen if prompted). The bundle is **self-contained** — it ships
   its own `dist` + dependencies and is run by Claude Desktop's bundled Node, so

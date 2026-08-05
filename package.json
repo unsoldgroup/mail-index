@@ -7,13 +7,13 @@
   "packageManager": "pnpm@10.28.2",
   "license": "MIT",
   "author": "Unsold Group (https://unsold.group/al)",
-  "homepage": "https://github.com/alunsoldantarctica/mail-index#readme",
+  "homepage": "https://github.com/unsoldgroup/mail-index#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/alunsoldantarctica/mail-index.git"
+    "url": "git+https://github.com/unsoldgroup/mail-index.git"
   },
   "bugs": {
-    "url": "https://github.com/alunsoldantarctica/mail-index/issues"
+    "url": "https://github.com/unsoldgroup/mail-index/issues"
   },
   "keywords": [
     "mcp",

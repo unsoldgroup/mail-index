@@ -1,10 +1,10 @@
 blank_issues_enabled: true
 contact_links:
   - name: 💬 Questions, ideas & "how do I…" (Discussions)
-    url: https://github.com/alunsoldantarctica/mail-index/discussions
+    url: https://github.com/unsoldgroup/mail-index/discussions
     about: Ask a question, share how you use mail-index, or float an idea.
   - name: 🔒 Report a security or privacy issue (private)
-    url: https://github.com/alunsoldantarctica/mail-index/security/policy
+    url: https://github.com/unsoldgroup/mail-index/security/policy
     about: Please report vulnerabilities privately — see SECURITY.md — not as a public issue.
   - name: 🌐 unsold.group
     url: https://unsold.group/al

@@ -74,4 +74,4 @@ depends on very recent mail, check `sync_status` and mention staleness.
   command string for the user to run (sync, graph build, bulk enrich) rather than
   doing O(N) work inline — surface that command, don't try to loop it yourself.
 
-Full tool reference: https://github.com/alunsoldantarctica/mail-index/blob/main/docs/MCP.md
+Full tool reference: https://github.com/unsoldgroup/mail-index/blob/main/docs/MCP.md

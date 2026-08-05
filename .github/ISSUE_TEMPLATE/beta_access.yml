@@ -16,7 +16,7 @@ body:
         ⚠️ **This issue is public** — the address you enter will be visible. If
         you'd rather not post an address publicly, use **Option B** (your own
         Google Cloud client) instead — it needs no request and has no cap. See
-        [docs/INSTALL.md §2](https://github.com/alunsoldantarctica/mail-index/blob/main/docs/INSTALL.md#2-connect-a-mailbox-pick-an-oauth-path).
+        [docs/INSTALL.md §2](https://github.com/unsoldgroup/mail-index/blob/main/docs/INSTALL.md#2-connect-a-mailbox-pick-an-oauth-path).
   - type: input
     id: google_email
     attributes:
