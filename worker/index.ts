@@ -97,6 +97,20 @@ async function operatorEmail(request: Request, env: Env): Promise<string | undef
 
 function allowed(email: string, env: Env): boolean { return env.OPERATOR_EMAILS.split(',').map((v) => v.trim().toLowerCase()).includes(email.toLowerCase()); }
 
+/** Resolve an OIDC access token to an ALLOWLISTED operator address, else undefined. */
+async function operatorIdentity(fetchImpl: typeof fetch, accessToken: string, env: Env): Promise<string | undefined> {
+  const user = await fetchImpl('https://openidconnect.googleapis.com/v1/userinfo', { headers: { authorization: `Bearer ${accessToken}` } });
+  const identity = await user.json() as { email?: string; email_verified?: boolean };
+  if (!user.ok || !identity.email || identity.email_verified === false || !allowed(identity.email, env)) return undefined;
+  return identity.email;
+}
+
+/** The 8-hour operator session cookie minted after a verified allowlisted sign-in. */
+async function sessionCookie(email: string, env: Env): Promise<string> {
+  const session = await signPayload({ email, expiresAt: Date.now() + 8 * 60 * 60_000 }, env.TOKEN_ENC_KEY);
+  return `${SESSION_COOKIE}=${session}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=28800`;
+}
+
 export async function handlePublicRequest(request: Request, env: Partial<Env>, ctx: WorkerContext, dependencies: WorkerDependencies = {}): Promise<Response> {
   assertBindings(env); const url = new URL(request.url); const fetchImpl = dependencies.fetchImpl ?? fetch;
   if (request.method === 'GET' && url.pathname === '/.well-known/agent-card.json') return Response.json(agentCard(url.origin));
@@ -116,26 +130,42 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
     if (!stateValue || !code) return Response.json({ error: 'missing_identity_callback_parameters' }, { status: 400 });
     const state = await verifyPayload<{ auth: AuthRequest; redirectUri: string }>(stateValue, env.TOKEN_ENC_KEY);
     const token = await exchangeToken(fetchImpl, { code, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, redirect_uri: state.redirectUri, grant_type: 'authorization_code' });
-    const user = await fetchImpl('https://openidconnect.googleapis.com/v1/userinfo', { headers: { authorization: `Bearer ${String(token['access_token'] ?? '')}` } });
-    const identity = await user.json() as { email?: string; email_verified?: boolean };
-    if (!user.ok || !identity.email || identity.email_verified === false || !allowed(identity.email, env)) return new Response('<h1>Access denied</h1>', { status: 403, headers: { 'content-type': 'text/html' } });
-    const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: state.auth, userId: identity.email.toLowerCase(), metadata: { email: identity.email }, scope: state.auth.scope, props: { email: identity.email } });
-    const session = await signPayload({ email: identity.email, expiresAt: Date.now() + 8 * 60 * 60_000 }, env.TOKEN_ENC_KEY);
-    return new Response(null, { status: 302, headers: { location: redirectTo, 'set-cookie': `${SESSION_COOKIE}=${session}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=28800` } });
+    const email = await operatorIdentity(fetchImpl, String(token['access_token'] ?? ''), env);
+    if (!email) return new Response('<h1>Access denied</h1>', { status: 403, headers: { 'content-type': 'text/html' } });
+    const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: state.auth, userId: email.toLowerCase(), metadata: { email }, scope: state.auth.scope, props: { email } });
+    return new Response(null, { status: 302, headers: { location: redirectTo, 'set-cookie': await sessionCookie(email, env) } });
   }
   if (url.pathname === '/setup/google/callback') {
     const stateValue = url.searchParams.get('state'); const code = url.searchParams.get('code');
     if (!stateValue || !code) return Response.json({ error: 'missing_oauth_callback_parameters' }, { status: 400 });
     const state = await verifyState(stateValue, env.TOKEN_ENC_KEY);
     const token = await exchangeToken(fetchImpl, { code, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, redirect_uri: state.redirectUri, grant_type: 'authorization_code' });
-    const accessToken = String(token['access_token'] ?? ''); const refreshToken = String(token['refresh_token'] ?? '');
+    const accessToken = String(token['access_token'] ?? '');
+    // Identity-only sign-in (/setup/login): mint the operator session and stop.
+    // No mailbox scope was requested, so there is no grant to save here.
+    if (state.login) {
+      if (!accessToken) throw new Error('Google callback returned no access token');
+      const email = await operatorIdentity(fetchImpl, accessToken, env);
+      if (!email) return new Response('<h1>Access denied</h1>', { status: 403, headers: { 'content-type': 'text/html' } });
+      return new Response(null, { status: 302, headers: { location: '/setup', 'set-cookie': await sessionCookie(email, env) } });
+    }
+    const refreshToken = String(token['refresh_token'] ?? '');
     if (!accessToken || !refreshToken) throw new Error('Google callback returned incomplete tokens');
     const address = await verifyGoogleIdentity(fetchImpl, accessToken); const { driver } = await storage(env);
     await saveGrant(driver, { account: state.account, address, scopes: state.writes ? [GMAIL_READONLY, GMAIL_MODIFY] : [GMAIL_READONLY], refreshToken, key: env.TOKEN_ENC_KEY });
     return new Response(`<h1>Connected ${escapeHtml(state.account)}</h1><p>${escapeHtml(address)}</p>`, { headers: { 'content-type': 'text/html; charset=utf-8' } });
   }
+  // Identity-only sign-in, reachable WITHOUT a session — this is how a browser
+  // that never ran the MCP /authorize flow gets an operator cookie for /setup.
+  if (url.pathname === '/setup/login') {
+    const redirectUri = `${url.origin}/setup/google/callback`;
+    const state = await signState({ account: '', writes: false, login: true, redirectUri, expiresAt: Date.now() + 10 * 60_000 }, env.TOKEN_ENC_KEY);
+    const consent = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    consent.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', scope: 'openid email', state, prompt: 'select_account' }).toString();
+    return Response.redirect(consent, 302);
+  }
   if (url.pathname.startsWith('/setup')) {
-    const email = await operatorEmail(request, env); if (!email || !allowed(email, env)) return Response.json({ error: 'unauthorized' }, { status: 401 });
+    const email = await operatorEmail(request, env); if (!email || !allowed(email, env)) return new Response(`<h1>mail-index</h1><p><a href="/setup/login">Sign in as an operator</a> to continue.</p>`, { status: 401, headers: { 'content-type': 'text/html; charset=utf-8' } });
     if (url.pathname === '/setup/google/start') {
       const account = url.searchParams.get('account')?.trim(); if (!account) return Response.json({ error: 'account_required' }, { status: 400 });
       const writes = url.searchParams.get('writes') === '1'; const redirectUri = `${url.origin}/setup/google/callback`;
