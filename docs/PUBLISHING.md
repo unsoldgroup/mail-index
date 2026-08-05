@@ -4,25 +4,25 @@ The official [MCP Registry](https://registry.modelcontextprotocol.io) hosts only
 _metadata_; the runnable artifact must live on **npm** first. So publishing is
 two steps: (1) publish the npm package, (2) publish `server.json` to the registry.
 
-**Both steps are automated in CI** and fire from a single pushed `vX.Y.Z` tag —
-jump to [Releasing new versions](#releasing-new-versions) for the normal path.
-Steps 1 and 2 below document the manual equivalents: they are the fallback when
-CI is unavailable, and the reference for what CI is actually doing. Only a
-maintainer can push the tag, and only a maintainer holds `NPM_TOKEN` — the
-release trigger stays human.
+**Both steps run in CI**: step 1 from a pushed `vX.Y.Z` tag, step 2 from a manual
+workflow dispatch right after (it cannot chain off the tag — see the warning in
+[Releasing new versions](#releasing-new-versions), the normal path). Steps 1 and
+2 below document the manual equivalents: the fallback when CI is unavailable, and
+the reference for what CI is doing. Only a maintainer can push the tag, and only
+a maintainer holds `NPM_TOKEN` — the release trigger stays human.
 
 ## Prerequisites
 
-- An **npm account** (`mail-index` and `@alunsoldantarctica/mail-index` were both
-  free as of prep — unscoped `mail-index` is configured).
-- A **GitHub account** in the `alunsoldantarctica` namespace (it owns the
-  `io.github.alunsoldantarctica/*` registry namespace via OIDC).
+- An **npm account** with publish rights on unscoped `mail-index`.
+- Membership in the **`unsoldgroup`** GitHub org, which owns the
+  `io.github.unsoldgroup/*` registry namespace via OIDC. CI publishes as the org,
+  so no personal credential is involved.
 - Node 24+ and `pnpm`.
 
 ## What's already set up
 
 - `package.json`: `"private": false`, `"publishConfig": { "access": "public" }`,
-  `"mcpName": "io.github.alunsoldantarctica/mail-index"` (the registry ownership
+  `"mcpName": "io.github.unsoldgroup/mail-index"` (the registry ownership
   check), `"files": ["dist"]`, both bins, and `prepublishOnly: tsc` (builds
   `dist/` before publish).
 - `server.json`: the registry manifest. Note the `runtimeArguments` — they make a
@@ -57,14 +57,21 @@ Then, from the repo root:
 ```sh
 # (optional) regenerate a schema-current template and re-apply our runtimeArguments:
 # mcp-publisher init
-mcp-publisher login github      # opens a browser; authorizes the alunsoldantarctica namespace
+mcp-publisher login github      # browser device flow; must authorize the unsoldgroup org
 mcp-publisher publish server.json
 ```
+
+> [!NOTE]
+> Your GitHub identity must own the namespace in `server.json`'s `name`, or the
+> publish fails **403** telling you which namespace you _do_ own. Signing in as a
+> user grants `io.github.<user>/*`; only org membership grants
+> `io.github.unsoldgroup/*` — and **org membership must be public** for the
+> registry to see it.
 
 Verify:
 
 ```sh
-curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.alunsoldantarctica/mail-index"
+curl "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.unsoldgroup/mail-index"
 ```
 
 ## Dual-bin note (read before publishing)
@@ -148,23 +155,46 @@ before the upload (sign → `notarytool submit --wait` → `stapler staple` on m
 
 ## Releasing new versions
 
-The whole release is **one pushed tag**. Nothing else is interactive.
+npm and the GitHub Release are **one pushed tag**. The registry entry needs one
+extra click.
 
 ```sh
 # 1. Bump the version in THREE files (see the trap below), update CHANGELOG.md,
 #    commit on a branch, open a PR, merge to main.
 # 2. From an up-to-date main:
-git tag v1.5.0 && git push origin v1.5.0
+git tag vX.Y.Z && git push origin vX.Y.Z
+# 3. Then publish the registry metadata — this does NOT happen on its own:
+gh workflow run registry-publish.yml --ref main
 ```
 
 That tag fires [`release.yml`](../.github/workflows/release.yml), which builds,
 tests, `npm publish --provenance`, packs `mail-index.mcpb`, and creates the
-GitHub Release with the bundle attached. Publishing that Release fires
-[`registry-publish.yml`](../.github/workflows/registry-publish.yml), which
-authenticates to the MCP Registry with **GitHub OIDC** (no interactive
-`mcp-publisher login`) and publishes `server.json`. The manual `mcp-publisher`
-flow in Step 2 above is now only a fallback for republishing metadata without a
-release — `workflow_dispatch` does the same thing from the Actions tab.
+GitHub Release with the bundle attached.
+
+> [!WARNING]
+> **The `release: [published]` trigger on
+> [`registry-publish.yml`](../.github/workflows/registry-publish.yml) does not
+> fire.** GitHub deliberately refuses to start a workflow from an event created
+> by another workflow using the default `GITHUB_TOKEN` — otherwise workflows
+> could trigger each other in a loop. So the Release that `release.yml` publishes
+> never wakes the registry job. Run it by hand
+> (`gh workflow run registry-publish.yml --ref main`) or, to make the chain
+> automatic, have `release.yml` create the Release with a PAT instead.
+
+> [!NOTE]
+> **The registry name changed in 1.5.1**, from
+> `io.github.alunsoldantarctica/mail-index` to
+> **`io.github.unsoldgroup/mail-index`**. The old namespace derived from a GitHub
+> username that no longer exists (the account was renamed, the org rename
+> followed), so _nobody_ could authenticate to it — not CI, not a human, not
+> even the original owner. The registry grants a namespace only to a live
+> identity, so the old entry is frozen at 1.0.0 permanently and the server was
+> re-listed under the org, which CI's OIDC identity owns.
+>
+> This is a **new server identity** in the registry. npm (`mail-index`) is
+> unchanged and remains the real install path, so no user action is needed;
+> `mcpName` in `package.json` had to move with it, which is why the rename cost a
+> patch release.
 
 > [!IMPORTANT]
 > **Four version fields, three files.** `package.json` (1), `manifest.json` (the
@@ -185,6 +215,6 @@ maintainer's responsibility.
 ```sh
 npm view mail-index version                     # → the new version
 npm audit signatures                            # provenance attestation present
-gh release view v1.5.0                          # .mcpb attached
-curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.alunsoldantarctica/mail-index"
+gh release view vX.Y.Z                          # .mcpb attached
+curl "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.unsoldgroup/mail-index"
 ```

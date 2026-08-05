@@ -2,7 +2,7 @@
   "manifest_version": "0.2",
   "name": "mail-index",
   "display_name": "mail-index",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Local, agent-queryable Gmail intelligence — a read-only MCP server over a progressive local index of your mailbox.",
   "long_description": "mail-index keeps a local, read-only index of your Gmail (metadata-wide, bodies-narrow) and exposes it to your agent over MCP — recall and summarization across your whole mailbox without Gmail's search bar. This bundle only registers the server; you must first install the gog (or gws) adapter, authenticate a mailbox once (read-only), and run an initial sync — follow docs/agent-install.md. The server requires an existing config and will exit with a clear error if none is present. Local-first: the index never leaves your machine; read-only by default — it never sends or deletes mail, and only archives/relabels when you explicitly opt into the gmail.modify scope.",
   "author": {
