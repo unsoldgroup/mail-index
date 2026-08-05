@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 // @ts-expect-error — plain .mjs shim outside the TS build graph.
 import { compareVersions, isNewer } from '../bin/semver.mjs';
 
-test('compareVersions orders the release triple', () => {
+test('compareVersions orders the release triple', async () => {
   assert.equal(compareVersions('1.2.3', '1.2.3'), 0);
   assert.equal(compareVersions('1.2.4', '1.2.3'), 1);
   assert.equal(compareVersions('1.3.0', '1.2.9'), 1);
@@ -19,7 +19,7 @@ test('compareVersions orders the release triple', () => {
   assert.equal(compareVersions('v1.2.3', '1.2.3'), 0); // leading v tolerated
 });
 
-test('a release outranks its own prerelease; bad input sorts low', () => {
+test('a release outranks its own prerelease; bad input sorts low', async () => {
   assert.equal(compareVersions('1.2.3', '1.2.3-beta.1'), 1);
   assert.equal(compareVersions('1.2.3-beta.1', '1.2.3'), -1);
   assert.equal(compareVersions('1.2.3-beta.2', '1.2.3-beta.1'), 1);
@@ -28,7 +28,7 @@ test('a release outranks its own prerelease; bad input sorts low', () => {
   assert.equal(compareVersions('', '1.0.0'), -1);
 });
 
-test('isNewer is a strict upgrade predicate', () => {
+test('isNewer is a strict upgrade predicate', async () => {
   assert.equal(isNewer('1.0.1', '1.0.0'), true);
   assert.equal(isNewer('1.0.0', '1.0.0'), false);
   assert.equal(isNewer('1.0.0', '1.0.1'), false);

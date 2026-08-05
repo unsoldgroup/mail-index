@@ -21,6 +21,8 @@ INSTANCE.local.md
 # Node
 node_modules/
 dist/
+dist-worker/
+dist-worker-bundle/
 build/
 *.tsbuildinfo
 .npm/
@@ -42,3 +44,6 @@ docs/SCOPE.md
 
 # Per-worktree dev index (DB isolation, db.ts)
 .mail-index-dev.sqlite*
+
+# Operator deployment record — real resource ids, never in the public repo
+docs/DEPLOYMENT-STATUS.md

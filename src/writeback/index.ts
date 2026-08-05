@@ -59,24 +59,24 @@ export interface SaveSummaryOptions {
  * does NOT demote here (a bad summary gets retry-against-source time; the
  * demotion runs in {@link compact}). INDEX-ONLY.
  */
-export function saveSummary(
+export async function saveSummary(
   repo: Repo,
   account: string,
   level: SummaryLevel,
   ref: string,
   text: string,
   options: SaveSummaryOptions = {},
-): SaveSummaryResult {
+): Promise<SaveSummaryResult> {
   const summarizedAt =
     level === 'thread'
-      ? repo.saveThreadSummary({
+      ? await repo.saveThreadSummary({
           account,
           threadId: ref,
           text,
           ...(options.isModel != null ? { isModel: options.isModel } : {}),
           ...(options.at != null ? { at: options.at } : {}),
         })
-      : repo.saveMessageSummary({
+      : await repo.saveMessageSummary({
           account,
           gmailMessageId: ref,
           text,
@@ -122,7 +122,11 @@ export interface CompactResult {
  * remains the archive, so demotion is never data loss (Working set). Sync
  * auto-invokes this after the grace window.
  */
-export function compact(repo: Repo, account: string, options: CompactOptions = {}): CompactResult {
+export async function compact(
+  repo: Repo,
+  account: string,
+  options: CompactOptions = {},
+): Promise<CompactResult> {
   const asOf = options.asOf ?? new Date();
   const graceMs = options.now ? 0 : options.graceMs ?? DEFAULT_GRACE_MS;
   const cutoff = new Date(asOf.getTime() - graceMs).toISOString();
@@ -133,11 +137,11 @@ export function compact(repo: Repo, account: string, options: CompactOptions = {
   // simply re-demotes the remainder on the next run.
   const candidates =
     options.limit != null
-      ? repo.compactEligible(account, cutoff, options.limit)
-      : repo.compactEligible(account, cutoff);
+      ? await repo.compactEligible(account, cutoff, options.limit)
+      : await repo.compactEligible(account, cutoff);
   let demoted = 0;
   for (const c of candidates) {
-    if (repo.demoteMessage(account, c.gmail_message_id)) demoted += 1;
+    if (await repo.demoteMessage(account, c.gmail_message_id)) demoted += 1;
   }
   return { account, demoted, cutoff };
 }
@@ -199,22 +203,24 @@ function toCandidate(row: CategorizeCandidateRow, samples: CategorizeSample[]): 
  * to uncategorized domains. INDEX-ONLY, token-conscious (compact shapes,
  * default limits). Empty array when nothing qualifies.
  */
-export function domainsToCategorize(
+export async function domainsToCategorize(
   repo: Repo,
   account: string,
   options: DomainsToCategorizeOptions = {},
-): CategorizeCandidate[] {
-  const rows = repo.domainsToCategorize(account, {
+): Promise<CategorizeCandidate[]> {
+  const rows = await repo.domainsToCategorize(account, {
     ...(options.includeCategorized != null ? { includeCategorized: options.includeCategorized } : {}),
     limit: options.limit ?? 20,
   });
-  return rows.map((row) => {
-    const samples = repo.categorizeSamples(account, row.domain, {
-      senderLimit: options.senderLimit ?? 5,
-      subjectLimit: options.subjectLimit ?? 3,
-    });
-    return toCandidate(row, samples);
-  });
+  return Promise.all(
+    rows.map(async (row) => {
+      const samples = await repo.categorizeSamples(account, row.domain, {
+        senderLimit: options.senderLimit ?? 5,
+        subjectLimit: options.subjectLimit ?? 3,
+      });
+      return toCandidate(row, samples);
+    }),
+  );
 }
 
 /** Result of a {@link saveDomainCategory} write-back. */
@@ -232,17 +238,17 @@ export interface SaveDomainCategoryResult {
  * `categorized_at`. Upserts the domain row (so a domain with no aggregate yet
  * can still be categorized). INDEX-ONLY. Throws on empty inputs.
  */
-export function saveDomainCategory(
+export async function saveDomainCategory(
   repo: Repo,
   account: string,
   domain: string,
   category: string,
   note?: string | null,
-): SaveDomainCategoryResult {
+): Promise<SaveDomainCategoryResult> {
   const d = domain.trim();
   const c = category.trim();
   if (d === '') throw new Error('saveDomainCategory requires a non-empty domain');
   if (c === '') throw new Error('saveDomainCategory requires a non-empty category');
-  repo.setDomainCategory({ account, domain: d, category: c, note: note ?? null });
+  await repo.setDomainCategory({ account, domain: d, category: c, note: note ?? null });
   return { account, domain: d, category: c };
 }

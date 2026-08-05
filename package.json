@@ -2,7 +2,7 @@
   "name": "mail-index",
   "version": "1.4.0",
   "mcpName": "io.github.alunsoldantarctica/mail-index",
-  "description": "A local, agent-queryable mail intelligence layer \u2014 progressive mailbox index + MCP server for AI agents.",
+  "description": "A local, agent-queryable mail intelligence layer — progressive mailbox index + MCP server for AI agents.",
   "type": "module",
   "packageManager": "pnpm@10.28.2",
   "license": "MIT",
@@ -47,25 +47,31 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "tsc",
-    "pretest": "tsc",
+    "pretest": "npm run build && npm run worker:build",
     "test": "node --disable-warning=ExperimentalWarning --test",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p worker/tsconfig.json --noEmit",
+    "worker:build": "tsc -p worker/tsconfig.json && esbuild worker/oauth.ts --bundle --format=esm --platform=node --target=es2023 --external:cloudflare:* --outfile=dist-worker-bundle/index.js",
     "lint": "eslint .",
     "format": "prettier --write .",
     "bundle": "tsc && node scripts/bundle.mjs"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260719.1",
     "@eslint/js": "^9.0.0",
     "@types/node": "^24.0.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
+    "esbuild": "^0.28.1",
     "eslint": "^9.0.0",
     "graphology-types": "^0.24.8",
+    "miniflare": "^4.20260301.1",
     "prettier": "^3.0.0",
     "typescript": "^5.6.0",
-    "typescript-eslint": "^8.0.0"
+    "typescript-eslint": "^8.0.0",
+    "wrangler": "^4.112.0"
   },
   "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.8.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "graphology": "^0.26.0",
     "graphology-communities-louvain": "^2.0.2",

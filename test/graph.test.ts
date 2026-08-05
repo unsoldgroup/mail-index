@@ -34,13 +34,13 @@ import { runSyncOne } from '../dist/cli/sync.js';
 const ACCOUNT = 'test-acct';
 const ME = 'al@example.com';
 
-function freshRepo() {
-  return new Repo(openDb({ path: ':memory:' }));
+async function freshRepo() {
+  return new Repo(await openDb({ path: ':memory:' }));
 }
 
 /** Seed one message row directly through the repo (phase-1 shape). */
-function seed(repo, m) {
-  repo.upsertMessage({
+async function seed(repo, m) {
+  await repo.upsertMessage({
     account: ACCOUNT,
     gmailMessageId: m.id,
     threadId: m.threadId ?? null,
@@ -75,7 +75,7 @@ function seed(repo, m) {
  *    and lift everyone's centrality; D9 drops it, so it must NOT affect the
  *    graph.
  */
-function seedTwoCircles(repo) {
+async function seedTwoCircles(repo) {
   const HUB = 'hub@work.example.com';
   const W1 = 'w1@work.example.com';
   const W2 = 'w2@work.example.com';
@@ -85,7 +85,7 @@ function seedTwoCircles(repo) {
   const F3 = 'f3@family.example.com';
 
   // Cluster 1: hub on every thread, each with a distinct leaf.
-  seed(repo, {
+  await seed(repo, {
     id: 'w-a',
     threadId: 'thread-w-a',
     internalDate: 1000,
@@ -94,7 +94,7 @@ function seedTwoCircles(repo) {
     subject: 'work a',
     direction: 'sent',
   });
-  seed(repo, {
+  await seed(repo, {
     id: 'w-b',
     threadId: 'thread-w-b',
     internalDate: 2000,
@@ -103,7 +103,7 @@ function seedTwoCircles(repo) {
     subject: 'work b',
     direction: 'sent',
   });
-  seed(repo, {
+  await seed(repo, {
     id: 'w-c',
     threadId: 'thread-w-c',
     internalDate: 3000,
@@ -114,7 +114,7 @@ function seedTwoCircles(repo) {
   });
 
   // Cluster 2: one thread to a family clique (disjoint from cluster 1).
-  seed(repo, {
+  await seed(repo, {
     id: 'f-a',
     threadId: 'thread-f-a',
     internalDate: 4000,
@@ -126,7 +126,7 @@ function seedTwoCircles(repo) {
 
   // Bulk list thread spanning BOTH clusters — must be excluded (D9). Modelled as
   // a sent message to everyone tagged is_list so the thread is a list thread.
-  seed(repo, {
+  await seed(repo, {
     id: 'bulk',
     threadId: 'thread-bulk',
     internalDate: 5000,
@@ -141,24 +141,24 @@ function seedTwoCircles(repo) {
   return { HUB, W1, W2, W3, F1, F2, F3 };
 }
 
-test('graphThreads excludes is_list threads (D9)', () => {
-  const repo = freshRepo();
-  seedTwoCircles(repo);
-  aggregateAccount(repo, ACCOUNT, [ME]);
+test('graphThreads excludes is_list threads (D9)', async () => {
+  const repo = await freshRepo();
+  await seedTwoCircles(repo);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
 
-  const threads = repo.graphThreads(ACCOUNT);
+  const threads = await repo.graphThreads(ACCOUNT);
   const ids = threads.map((t) => t.threadId).sort();
   // The four non-list threads survive; the bulk thread is dropped.
   assert.deepEqual(ids, ['thread-f-a', 'thread-w-a', 'thread-w-b', 'thread-w-c']);
   assert.ok(!ids.includes('thread-bulk'), 'the is_list thread must be excluded');
 });
 
-test('hub contact ranks highest in centrality', () => {
-  const repo = freshRepo();
-  const { HUB, W1, W2, W3 } = seedTwoCircles(repo);
-  aggregateAccount(repo, ACCOUNT, [ME]);
+test('hub contact ranks highest in centrality', async () => {
+  const repo = await freshRepo();
+  const { HUB, W1, W2, W3 } = await seedTwoCircles(repo);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
 
-  const result = buildGraph(repo, ACCOUNT);
+  const result = await buildGraph(repo, ACCOUNT);
   const byAddr = new Map(result.metrics.map((m) => [m.address, m]));
 
   const hub = byAddr.get(HUB);
@@ -178,12 +178,12 @@ test('hub contact ranks highest in centrality', () => {
   assert.equal(top.address, HUB, 'the hub should be the most central contact');
 });
 
-test('two disjoint clusters resolve to two communities (D9 exclusion holds)', () => {
-  const repo = freshRepo();
-  const { HUB, W1, W2, W3, F1, F2, F3 } = seedTwoCircles(repo);
-  aggregateAccount(repo, ACCOUNT, [ME]);
+test('two disjoint clusters resolve to two communities (D9 exclusion holds)', async () => {
+  const repo = await freshRepo();
+  const { HUB, W1, W2, W3, F1, F2, F3 } = await seedTwoCircles(repo);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
 
-  const result = buildGraph(repo, ACCOUNT);
+  const result = await buildGraph(repo, ACCOUNT);
   const community = new Map(result.metrics.map((m) => [m.address, m.communityId]));
 
   // Every work node shares one community; every family node shares another.
@@ -204,32 +204,32 @@ test('two disjoint clusters resolve to two communities (D9 exclusion holds)', ()
   assert.equal(result.communities, 2, 'exactly two communities expected');
 });
 
-test('centrality + community_id are persisted back onto contacts', () => {
-  const repo = freshRepo();
-  const { HUB } = seedTwoCircles(repo);
-  aggregateAccount(repo, ACCOUNT, [ME]);
+test('centrality + community_id are persisted back onto contacts', async () => {
+  const repo = await freshRepo();
+  const { HUB } = await seedTwoCircles(repo);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
 
   // Before the build, contacts carry no derived graph metrics.
-  const before = repo.getGraphMetrics(ACCOUNT, HUB);
+  const before = await repo.getGraphMetrics(ACCOUNT, HUB);
   assert.ok(before, 'hub contact row should exist after aggregation');
   assert.equal(before.centrality, null);
   assert.equal(before.community_id, null);
 
-  buildGraph(repo, ACCOUNT);
+  await buildGraph(repo, ACCOUNT);
 
-  const after = repo.getGraphMetrics(ACCOUNT, HUB);
+  const after = await repo.getGraphMetrics(ACCOUNT, HUB);
   assert.ok(after, 'hub contact row should still exist');
   assert.ok(typeof after.centrality === 'number' && after.centrality > 0, 'centrality persisted');
   assert.ok(typeof after.community_id === 'number', 'community_id persisted');
 });
 
-test('build is idempotent — re-running reproduces the same metrics', () => {
-  const repo = freshRepo();
-  seedTwoCircles(repo);
-  aggregateAccount(repo, ACCOUNT, [ME]);
+test('build is idempotent — re-running reproduces the same metrics', async () => {
+  const repo = await freshRepo();
+  await seedTwoCircles(repo);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
 
-  const first = buildGraph(repo, ACCOUNT);
-  const second = buildGraph(repo, ACCOUNT);
+  const first = await buildGraph(repo, ACCOUNT);
+  const second = await buildGraph(repo, ACCOUNT);
 
   const norm = (r) =>
     [...r.metrics]
@@ -240,11 +240,11 @@ test('build is idempotent — re-running reproduces the same metrics', () => {
   assert.equal(first.communities, second.communities);
 });
 
-test('build is a no-op on an empty index and search still works without graphology', () => {
-  const repo = freshRepo();
+test('build is a no-op on an empty index and search still works without graphology', async () => {
+  const repo = await freshRepo();
 
   // No messages → no threads → empty graph, nothing persisted.
-  const result = buildGraph(repo, ACCOUNT);
+  const result = await buildGraph(repo, ACCOUNT);
   assert.deepEqual(result, {
     account: ACCOUNT,
     nodes: 0,
@@ -255,7 +255,7 @@ test('build is a no-op on an empty index and search still works without grapholo
 
   // Seed a single searchable message WITHOUT ever building a graph; core search
   // (which never imports graphology — D8) must work fully.
-  seed(repo, {
+  await seed(repo, {
     id: 'solo',
     threadId: 'thread-solo',
     internalDate: 9000,
@@ -265,7 +265,7 @@ test('build is a no-op on an empty index and search still works without grapholo
     snippet: 'your invoice is attached',
     direction: 'received',
   });
-  const hits = repo.searchMessages('invoice', { account: ACCOUNT });
+  const hits = await repo.searchMessages('invoice', { account: ACCOUNT });
   assert.equal(hits.length, 1);
   assert.equal(hits[0].gmail_message_id, 'solo');
 });
@@ -306,48 +306,48 @@ const AUTO_CONFIG = {
 };
 
 test('an initial sync auto-runs the graph build (D10)', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   const build = () => new FakeMailSource(autoFixtures());
 
   // No prior sync → this is the initial sync → graph build should run.
   await runSyncOne(AUTO_CONFIG, 'solo', {}, repo, build);
 
   // The two co-recipients now carry persisted graph metrics.
-  const pat = repo.getGraphMetrics('solo', 'pat@team.example.com');
+  const pat = await repo.getGraphMetrics('solo', 'pat@team.example.com');
   assert.ok(pat, 'contact row exists');
   assert.ok(typeof pat.centrality === 'number' && pat.centrality > 0, 'centrality persisted by auto build');
   assert.ok(typeof pat.community_id === 'number', 'community_id persisted by auto build');
 });
 
 test('an incremental (bounded) sync over an already-synced account skips the graph build (D10)', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   const build = () => new FakeMailSource(autoFixtures());
 
   // First sync (initial) builds the graph.
   await runSyncOne(AUTO_CONFIG, 'solo', {}, repo, build);
   // Clear the derived metrics to detect whether the next run rebuilds them.
-  repo.db.exec(`UPDATE contacts SET centrality = NULL, community_id = NULL WHERE account = 'solo'`);
+  repo.driver.exec(`UPDATE contacts SET centrality = NULL, community_id = NULL WHERE account = 'solo'`);
 
   // A subsequent BOUNDED sweep (a `--since` token, not `--all`) over an already
   // synced account is incremental → must NOT auto-build the graph.
   await runSyncOne(AUTO_CONFIG, 'solo', { since: '30d' }, repo, build);
 
-  const pat = repo.getGraphMetrics('solo', 'pat@team.example.com');
+  const pat = await repo.getGraphMetrics('solo', 'pat@team.example.com');
   assert.ok(pat, 'contact row still exists');
   assert.equal(pat.centrality, null, 'incremental sync must not rebuild the graph');
   assert.equal(pat.community_id, null, 'incremental sync must not rebuild the graph');
 });
 
 test('a whole-mailbox (--all) sync auto-runs the graph build even when not initial (D10)', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   const build = () => new FakeMailSource(autoFixtures());
 
   await runSyncOne(AUTO_CONFIG, 'solo', {}, repo, build); // initial
-  repo.db.exec(`UPDATE contacts SET centrality = NULL, community_id = NULL WHERE account = 'solo'`);
+  repo.driver.exec(`UPDATE contacts SET centrality = NULL, community_id = NULL WHERE account = 'solo'`);
 
   // An explicit whole-mailbox sweep is a FULL sync → rebuild the graph.
   await runSyncOne(AUTO_CONFIG, 'solo', { all: true }, repo, build);
 
-  const pat = repo.getGraphMetrics('solo', 'pat@team.example.com');
+  const pat = await repo.getGraphMetrics('solo', 'pat@team.example.com');
   assert.ok(pat && typeof pat.centrality === 'number' && pat.centrality > 0, 'full sync rebuilds the graph');
 });

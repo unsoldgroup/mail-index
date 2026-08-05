@@ -23,13 +23,13 @@ import { aggregateAccount, computeAggregates } from '../dist/intelligence/aggreg
 const ACCOUNT = 'test-acct';
 const ME = 'al@example.com';
 
-function freshRepo() {
-  return new Repo(openDb({ path: ':memory:' }));
+async function freshRepo() {
+  return new Repo(await openDb({ path: ':memory:' }));
 }
 
 /** Seed one message row directly through the repo (phase-1 shape). */
-function seed(repo, m) {
-  repo.upsertMessage({
+async function seed(repo, m) {
+  await repo.upsertMessage({
     account: ACCOUNT,
     gmailMessageId: m.id,
     threadId: m.threadId ?? null,
@@ -54,9 +54,9 @@ function seed(repo, m) {
  * user replies. A second thread the user initiates to Casey (vendor.example.com).
  * One newsletter (no Sent involvement). Times are oldest → newest within thread.
  */
-function seedConversation(repo) {
+async function seedConversation(repo) {
   // Thread A — Jordan writes first (t=1000), user replies (t=2000).
-  seed(repo, {
+  await seed(repo, {
     id: 'a-recv',
     threadId: 'thread-a',
     internalDate: 1000,
@@ -66,7 +66,7 @@ function seedConversation(repo) {
     direction: 'received',
     important: true,
   });
-  seed(repo, {
+  await seed(repo, {
     id: 'a-sent',
     threadId: 'thread-a',
     internalDate: 2000,
@@ -77,7 +77,7 @@ function seedConversation(repo) {
   });
 
   // Thread B — user initiates to Casey (t=1500), no prior received message.
-  seed(repo, {
+  await seed(repo, {
     id: 'b-sent',
     threadId: 'thread-b',
     internalDate: 1500,
@@ -88,7 +88,7 @@ function seedConversation(repo) {
   });
 
   // A newsletter — received, list, never replied to. Sender on its own domain.
-  seed(repo, {
+  await seed(repo, {
     id: 'n-1',
     threadId: 'thread-n',
     internalDate: 900,
@@ -102,12 +102,12 @@ function seedConversation(repo) {
   });
 }
 
-test('aggregation builds contacts from received + sent mail', () => {
-  const repo = freshRepo();
-  seedConversation(repo);
-  aggregateAccount(repo, ACCOUNT, [ME]);
+test('aggregation builds contacts from received + sent mail', async () => {
+  const repo = await freshRepo();
+  await seedConversation(repo);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
 
-  const jordan = repo.getContact(ACCOUNT, 'jordan@partner.example.com');
+  const jordan = await repo.getContact(ACCOUNT, 'jordan@partner.example.com');
   assert.ok(jordan, 'received sender becomes a contact');
   assert.equal(jordan.msgs_received, 1);
   assert.equal(jordan.msgs_sent, 1, 'user sent one message to Jordan');
@@ -115,30 +115,30 @@ test('aggregation builds contacts from received + sent mail', () => {
   assert.equal(jordan.domain, 'partner.example.com');
   assert.equal(jordan.important_count, 1, 'IMPORTANT snapshot rolled up');
 
-  const casey = repo.getContact(ACCOUNT, 'casey@vendor.example.com');
+  const casey = await repo.getContact(ACCOUNT, 'casey@vendor.example.com');
   assert.ok(casey, 'sent-only recipient becomes a contact');
   assert.equal(casey.msgs_received, 0);
   assert.equal(casey.msgs_sent, 1);
 
-  const news = repo.getContact(ACCOUNT, 'news@bulletin.example.org');
+  const news = await repo.getContact(ACCOUNT, 'news@bulletin.example.org');
   assert.ok(news);
   assert.equal(news.msgs_received, 1);
   assert.equal(news.read_count, 0, 'unread newsletter is not a read');
 });
 
-test('the user is never aggregated as their own contact', () => {
-  const repo = freshRepo();
-  seedConversation(repo);
-  aggregateAccount(repo, ACCOUNT, [ME]);
-  assert.equal(repo.getContact(ACCOUNT, ME), undefined, 'own address excluded');
+test('the user is never aggregated as their own contact', async () => {
+  const repo = await freshRepo();
+  await seedConversation(repo);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
+  assert.equal(await repo.getContact(ACCOUNT, ME), undefined, 'own address excluded');
 });
 
-test('Correspondent detection: msgs_sent > 0 (CONTEXT.md)', () => {
-  const repo = freshRepo();
-  seedConversation(repo);
-  aggregateAccount(repo, ACCOUNT, [ME]);
+test('Correspondent detection: msgs_sent > 0 (CONTEXT.md)', async () => {
+  const repo = await freshRepo();
+  await seedConversation(repo);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
 
-  const correspondents = repo.listCorrespondents(ACCOUNT);
+  const correspondents = await repo.listCorrespondents(ACCOUNT);
   const addrs = correspondents.map((c) => c.address).sort();
   assert.deepEqual(
     addrs,
@@ -153,27 +153,27 @@ test('Correspondent detection: msgs_sent > 0 (CONTEXT.md)', () => {
   for (const c of correspondents) assert.ok(c.msgs_sent > 0);
 });
 
-test('replied vs initiated derive from sent mail relative to the thread', () => {
-  const repo = freshRepo();
-  seedConversation(repo);
-  aggregateAccount(repo, ACCOUNT, [ME]);
+test('replied vs initiated derive from sent mail relative to the thread', async () => {
+  const repo = await freshRepo();
+  await seedConversation(repo);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
 
   // Jordan wrote first, then the user replied → a reply, not an initiation.
-  const jordan = repo.getContact(ACCOUNT, 'jordan@partner.example.com');
+  const jordan = await repo.getContact(ACCOUNT, 'jordan@partner.example.com');
   assert.equal(jordan.replied_count, 1, 'user replied to Jordan');
   assert.equal(jordan.initiated_count, 0);
 
   // The user started thread B to Casey → initiated, not a reply.
-  const casey = repo.getContact(ACCOUNT, 'casey@vendor.example.com');
+  const casey = await repo.getContact(ACCOUNT, 'casey@vendor.example.com');
   assert.equal(casey.initiated_count, 1, 'user initiated with Casey');
   assert.equal(casey.replied_count, 0);
 });
 
-test('domains roll contacts up: msgs + distinct_contacts', () => {
-  const repo = freshRepo();
-  seedConversation(repo);
+test('domains roll contacts up: msgs + distinct_contacts', async () => {
+  const repo = await freshRepo();
+  await seedConversation(repo);
   // Add a second contact on partner.example.com so distinct_contacts > 1.
-  seed(repo, {
+  await seed(repo, {
     id: 'a-recv-2',
     threadId: 'thread-c',
     internalDate: 1200,
@@ -182,26 +182,26 @@ test('domains roll contacts up: msgs + distinct_contacts', () => {
     subject: 'Logistics',
     direction: 'received',
   });
-  aggregateAccount(repo, ACCOUNT, [ME]);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
 
-  const partner = repo.getDomain(ACCOUNT, 'partner.example.com');
+  const partner = await repo.getDomain(ACCOUNT, 'partner.example.com');
   assert.ok(partner);
   assert.equal(partner.distinct_contacts, 2, 'Jordan + Robin');
   // Jordan: 1 received + 1 sent; Robin: 1 received → 3 total.
   assert.equal(partner.msgs, 3);
 
-  const vendor = repo.getDomain(ACCOUNT, 'vendor.example.com');
+  const vendor = await repo.getDomain(ACCOUNT, 'vendor.example.com');
   assert.ok(vendor);
   assert.equal(vendor.distinct_contacts, 1);
   assert.equal(vendor.msgs, 1);
 });
 
-test('threads: user_participated reflects whether the user sent into the thread', () => {
-  const repo = freshRepo();
-  seedConversation(repo);
-  aggregateAccount(repo, ACCOUNT, [ME]);
+test('threads: user_participated reflects whether the user sent into the thread', async () => {
+  const repo = await freshRepo();
+  await seedConversation(repo);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
 
-  const threadA = repo.getThread(ACCOUNT, 'thread-a');
+  const threadA = await repo.getThread(ACCOUNT, 'thread-a');
   assert.ok(threadA);
   assert.equal(threadA.msg_count, 2);
   assert.equal(threadA.user_participated, 1, 'user replied into thread A');
@@ -209,64 +209,64 @@ test('threads: user_participated reflects whether the user sent into the thread'
   const participantsA = JSON.parse(threadA.participants_json);
   assert.ok(participantsA.includes('jordan@partner.example.com'));
 
-  const threadB = repo.getThread(ACCOUNT, 'thread-b');
+  const threadB = await repo.getThread(ACCOUNT, 'thread-b');
   assert.equal(threadB.user_participated, 1, 'user initiated thread B');
 
   // The newsletter thread has no user-sent message.
-  const threadN = repo.getThread(ACCOUNT, 'thread-n');
+  const threadN = await repo.getThread(ACCOUNT, 'thread-n');
   assert.ok(threadN);
   assert.equal(threadN.user_participated, 0, 'no user mail in the list thread');
   assert.equal(threadN.unread_count, 1, 'unread snapshot rolled into the thread');
 });
 
-test('aggregation is idempotent + re-runnable (no duplicates, stable counts)', () => {
-  const repo = freshRepo();
-  seedConversation(repo);
-  aggregateAccount(repo, ACCOUNT, [ME]);
-  const first = repo.getContact(ACCOUNT, 'jordan@partner.example.com');
+test('aggregation is idempotent + re-runnable (no duplicates, stable counts)', async () => {
+  const repo = await freshRepo();
+  await seedConversation(repo);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
+  const first = await repo.getContact(ACCOUNT, 'jordan@partner.example.com');
 
-  aggregateAccount(repo, ACCOUNT, [ME]);
-  const second = repo.getContact(ACCOUNT, 'jordan@partner.example.com');
+  await aggregateAccount(repo, ACCOUNT, [ME]);
+  const second = await repo.getContact(ACCOUNT, 'jordan@partner.example.com');
 
   assert.deepEqual(second, first, 're-running aggregation converges');
-  const count = repo.db
+  const count = (await repo.driver
     .prepare('SELECT count(*) c FROM contacts WHERE account = ?')
-    .get(ACCOUNT);
+    .get(ACCOUNT)) as { c: number };
   assert.equal(count.c, 3, 'Jordan, Casey, newsletter — no duplicates');
 });
 
-test('aggregation preserves user-owned curation across a rebuild', () => {
-  const repo = freshRepo();
-  seedConversation(repo);
-  aggregateAccount(repo, ACCOUNT, [ME]);
+test('aggregation preserves user-owned curation across a rebuild', async () => {
+  const repo = await freshRepo();
+  await seedConversation(repo);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
 
   // The user curates Jordan as important and tags the partner domain.
-  repo.upsertContact({ account: ACCOUNT, address: 'jordan@partner.example.com', curation: 'important' });
-  repo.setDomainCategory({ account: ACCOUNT, domain: 'partner.example.com', category: 'travel operator' });
+  await repo.upsertContact({ account: ACCOUNT, address: 'jordan@partner.example.com', curation: 'important' });
+  await repo.setDomainCategory({ account: ACCOUNT, domain: 'partner.example.com', category: 'travel operator' });
 
   // A later sync re-aggregates — curation must survive.
-  aggregateAccount(repo, ACCOUNT, [ME]);
-  assert.equal(repo.getContact(ACCOUNT, 'jordan@partner.example.com').curation, 'important');
-  assert.equal(repo.getDomain(ACCOUNT, 'partner.example.com').category, 'travel operator');
+  await aggregateAccount(repo, ACCOUNT, [ME]);
+  assert.equal((await repo.getContact(ACCOUNT, 'jordan@partner.example.com'))?.curation, 'important');
+  assert.equal((await repo.getDomain(ACCOUNT, 'partner.example.com'))?.category, 'travel operator');
 });
 
-test('aggregation drops contacts whose mail no longer aggregates', () => {
-  const repo = freshRepo();
-  seedConversation(repo);
-  aggregateAccount(repo, ACCOUNT, [ME]);
-  assert.ok(repo.getContact(ACCOUNT, 'casey@vendor.example.com'));
+test('aggregation drops contacts whose mail no longer aggregates', async () => {
+  const repo = await freshRepo();
+  await seedConversation(repo);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
+  assert.ok(await repo.getContact(ACCOUNT, 'casey@vendor.example.com'));
 
   // Delete Casey's only message, then re-aggregate.
-  repo.db.prepare(`DELETE FROM messages WHERE account = ? AND gmail_message_id = 'b-sent'`).run(ACCOUNT);
-  aggregateAccount(repo, ACCOUNT, [ME]);
+  await repo.driver.prepare(`DELETE FROM messages WHERE account = ? AND gmail_message_id = 'b-sent'`).run(ACCOUNT);
+  await aggregateAccount(repo, ACCOUNT, [ME]);
   assert.equal(
-    repo.getContact(ACCOUNT, 'casey@vendor.example.com'),
+    await repo.getContact(ACCOUNT, 'casey@vendor.example.com'),
     undefined,
     'a contact with no remaining mail is removed',
   );
 });
 
-test('computeAggregates is pure and order-tolerant on equal timestamps', () => {
+test('computeAggregates is pure and order-tolerant on equal timestamps', async () => {
   // Two sent messages to the same fresh recipient in one thread, same time —
   // exactly one should count as initiated (the thread is started once).
   const rows = [
@@ -293,45 +293,45 @@ test('computeAggregates is pure and order-tolerant on equal timestamps', () => {
 // ---- part (a): Sent-mail coverage via the full sync ----------------------
 
 test('full sync indexes Sent mail (direction=sent) and aggregates it', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   const source = new FakeMailSource(DEFAULT_FIXTURES);
   await syncMetadata({ account: ACCOUNT, source, repo });
 
   // The Sent fixture landed with direction=sent (part a).
-  const sent = repo.getMessage(ACCOUNT, 'fixt-sent-1');
+  const sent = await repo.getMessage(ACCOUNT, 'fixt-sent-1');
   assert.ok(sent);
   assert.equal(sent.direction, 'sent');
 
   // Sync ran the aggregation pass: Jordan is a Correspondent (the user sent to
   // him), and the fixture thread is user_participated.
-  const jordan = repo.getContact(ACCOUNT, 'jordan@partner.example.com');
+  const jordan = await repo.getContact(ACCOUNT, 'jordan@partner.example.com');
   assert.ok(jordan, 'aggregation ran as part of sync');
   assert.equal(jordan.msgs_sent, 1, 'Sent fixture credited as a sent message');
-  assert.ok(repo.listCorrespondents(ACCOUNT).some((c) => c.address === 'jordan@partner.example.com'));
+  assert.ok((await repo.listCorrespondents(ACCOUNT)).some((c) => c.address === 'jordan@partner.example.com'));
 
-  const thread = repo.getThread(ACCOUNT, 'thread-direct-1');
+  const thread = await repo.getThread(ACCOUNT, 'thread-direct-1');
   assert.ok(thread);
   assert.equal(thread.user_participated, 1, 'the user sent into this thread');
 });
 
 test('sync --include-sent=false still aggregates received-only mail', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   const source = new FakeMailSource(DEFAULT_FIXTURES);
   await syncMetadata({ account: ACCOUNT, source, repo, scope: { includeSent: false } });
 
   // No Sent message indexed → Jordan has no sent credit, is not a Correspondent.
-  assert.equal(repo.getMessage(ACCOUNT, 'fixt-sent-1'), undefined);
-  const jordan = repo.getContact(ACCOUNT, 'jordan@partner.example.com');
+  assert.equal(await repo.getMessage(ACCOUNT, 'fixt-sent-1'), undefined);
+  const jordan = await repo.getContact(ACCOUNT, 'jordan@partner.example.com');
   assert.ok(jordan, 'still a contact from the received message');
   assert.equal(jordan.msgs_sent, 0);
-  assert.equal(repo.listCorrespondents(ACCOUNT).length, 0, 'no Correspondents without Sent mail');
+  assert.equal((await repo.listCorrespondents(ACCOUNT)).length, 0, 'no Correspondents without Sent mail');
 });
 
 test('sync with aggregate:false leaves derived tables empty', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   const source = new FakeMailSource(DEFAULT_FIXTURES);
   await syncMetadata({ account: ACCOUNT, source, repo, aggregate: false });
-  assert.ok(repo.countMessages(ACCOUNT) > 0, 'messages still indexed');
-  const count = repo.db.prepare('SELECT count(*) c FROM contacts WHERE account = ?').get(ACCOUNT);
+  assert.ok(await repo.countMessages(ACCOUNT) > 0, 'messages still indexed');
+  const count = (await repo.driver.prepare('SELECT count(*) c FROM contacts WHERE account = ?').get(ACCOUNT)) as { c: number };
   assert.equal(count.c, 0, 'aggregation skipped on request');
 });

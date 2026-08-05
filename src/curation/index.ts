@@ -160,17 +160,17 @@ function toProposedDomain(row: CurationDomainRow): ProposedDomain {
  * SEED the agent presents — pure, INDEX-ONLY, no provider contact, no
  * enrichment. Empty arrays when the account has no aggregated rows yet.
  */
-export function propose(
+export async function propose(
   repo: Repo,
   account: string,
   options: ProposeOptions = {},
-): CurationProposal {
-  const contacts = repo
-    .curationContacts(account, options.contactLimit ?? 20)
-    .map(toProposedContact);
-  const domains = repo
-    .curationDomains(account, options.domainLimit ?? 20)
-    .map(toProposedDomain);
+): Promise<CurationProposal> {
+  const contacts = (await repo.curationContacts(account, options.contactLimit ?? 20)).map(
+    toProposedContact,
+  );
+  const domains = (await repo.curationDomains(account, options.domainLimit ?? 20)).map(
+    toProposedDomain,
+  );
   return { account, contacts, domains };
 }
 
@@ -238,28 +238,28 @@ export interface SetResult {
  * INDEX-ONLY: no provider contact, no enrichment (D13). The curated profile is
  * the enrichment policy (PLAN §7) consumed downstream, not here.
  */
-export function set(
+export async function set(
   repo: Repo,
   account: string,
   selections: CurationSelections,
   options: SetOptions = {},
-): SetResult {
-  return repo.transaction(() => {
+): Promise<SetResult> {
+  return await repo.transaction(async () => {
     let contactsSet = 0;
     for (const sel of selections.contacts ?? []) {
-      if (repo.setContactCuration(account, sel.address, sel.curation)) contactsSet += 1;
+      if (await repo.setContactCuration(account, sel.address, sel.curation)) contactsSet += 1;
     }
 
     let domainsSet = 0;
     for (const sel of selections.domains ?? []) {
-      repo.setDomainCuration(account, sel.domain, sel.curation);
+      await repo.setDomainCuration(account, sel.domain, sel.curation);
       domainsSet += 1;
     }
 
     let keywordsSet = false;
-    let updatedAt = repo.getInterestProfile(account).updated_at;
+    let updatedAt = (await repo.getInterestProfile(account)).updated_at;
     if (selections.keywords != null) {
-      updatedAt = repo.setInterestKeywords(account, selections.keywords, options.at);
+      updatedAt = await repo.setInterestKeywords(account, selections.keywords, options.at);
       keywordsSet = true;
     }
 
@@ -285,18 +285,20 @@ export interface CurationProfile {
  * contacts/domains and the freeform keywords. Round-trips {@link set} — the loop
  * is editable and inspectable. INDEX-ONLY.
  */
-export function get(repo: Repo, account: string): CurationProfile {
-  const profile = repo.getInterestProfile(account);
+export async function get(repo: Repo, account: string): Promise<CurationProfile> {
+  const profile = await repo.getInterestProfile(account);
   // Map the snake_case null-prototype SQLite rows to plain objects so callers
   // (and structural equality) see ordinary records.
   return {
     account,
-    contacts: repo
-      .curatedContacts(account)
-      .map((r) => ({ address: r.address, curation: r.curation })),
-    domains: repo
-      .curatedDomains(account)
-      .map((r) => ({ domain: r.domain, curation: r.curation })),
+    contacts: (await repo.curatedContacts(account)).map((r) => ({
+      address: r.address,
+      curation: r.curation,
+    })),
+    domains: (await repo.curatedDomains(account)).map((r) => ({
+      domain: r.domain,
+      curation: r.curation,
+    })),
     keywords: profile.keywords,
     updatedAt: profile.updated_at,
   };

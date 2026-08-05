@@ -10,4 +10,7 @@ description = "Documentation placeholders (illustrative env-var values, not real
 regexes = [
   '''sk-\.\.\.''',          # historical `ANTHROPIC_API_KEY=sk-...` example in bench/README.md
   '''YOUR_KEY''',
+  # False-positive placeholder on an abandoned historical remote branch
+  # (worker/vitest.config.ts, commit fb948b5); never a deployed credential.
+  '''0123456789abcdef0123456789abcdef''',
 ]

@@ -60,17 +60,21 @@ const DAY_MS = 86_400_000;
  * only (cadence is about who reaches IN to the mailbox). When `category` is set,
  * a sender is included only if its host's `domains.category` equals it.
  */
-export function computeCadence(repo: Repo, account: string, opts: CadenceOptions = {}): CadenceRow[] {
+export async function computeCadence(
+  repo: Repo,
+  account: string,
+  opts: CadenceOptions = {},
+): Promise<CadenceRow[]> {
   // host → entity category + durable registrable domain (NULL pre-aggregation).
   const catByHost = new Map<string, string | null>();
   const regByHost = new Map<string, string | null>();
-  for (const m of repo.domainsMeta(account)) {
+  for (const m of await repo.domainsMeta(account)) {
     catByHost.set(m.domain, m.category);
     regByHost.set(m.domain, m.registrable_domain);
   }
 
   const acc = new Map<string, Acc>();
-  for (const row of repo.messagesForAggregation(account)) {
+  for (const row of await repo.messagesForAggregation(account)) {
     if (row.direction !== 'received' || !row.from_addr) continue;
     const bare = extractAddress(row.from_addr);
     if (!bare) continue;

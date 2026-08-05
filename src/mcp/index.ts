@@ -102,7 +102,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const db = openDb();
+  const db = await openDb();
   const repo = new Repo(db);
 
   const ctx: ToolContext = {

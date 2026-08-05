@@ -315,13 +315,13 @@ export function computeAggregates(
  * authenticated mailbox addresses so the user is never counted as their own
  * contact — pass the identity probe's address(es).
  */
-export function aggregateAccount(
+export async function aggregateAccount(
   repo: Repo,
   account: string,
   ownAddresses: readonly string[] = [],
-): Aggregates {
-  const rows = repo.messagesForAggregation(account);
+): Promise<Aggregates> {
+  const rows = await repo.messagesForAggregation(account);
   const aggregates = computeAggregates(rows, ownAddresses);
-  repo.replaceAggregates(account, aggregates);
+  await repo.replaceAggregates(account, aggregates);
   return aggregates;
 }

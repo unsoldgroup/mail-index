@@ -71,7 +71,7 @@ export async function runShow(
   ref: MessageRef,
   buildSourceFn: (account: AccountConfig) => MailSource = buildSource,
 ): Promise<ShowResult> {
-  let row = repo.getMessage(ref.account, ref.id);
+  let row = await repo.getMessage(ref.account, ref.id);
   if (!row) {
     // Surface a config error early when the account label itself is unknown, so
     // the message is "unknown account" rather than a bare "not in the index".
@@ -86,7 +86,7 @@ export async function runShow(
     const account = resolveAccount(config, ref.account);
     const source = buildSourceFn(account);
     enriched = await enrichOne({ account: ref.account, id: ref.id, source, repo });
-    const refreshed = repo.getMessage(ref.account, ref.id);
+    const refreshed = await repo.getMessage(ref.account, ref.id);
     if (refreshed) row = refreshed;
   }
 

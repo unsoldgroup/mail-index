@@ -1,5 +1,14 @@
 /** Index layer barrel (SCOPE 0.2). */
 export { openDb, defaultDbPath, IndexError, type OpenOptions } from './db.js';
+export type {
+  StorageDriver,
+  PreparedStatement,
+  BatchStatement,
+  SqlParam,
+  RunResult,
+} from './driver.js';
+export { SqliteDriver } from './drivers/sqlite.js';
+export { D1Driver, type D1DatabaseBinding } from './drivers/d1.js';
 export { runMigrations, getUserVersion, MIGRATIONS, type Migration } from './migrations.js';
 export { Repo } from './repo.js';
 export type {

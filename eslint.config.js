@@ -5,7 +5,7 @@ export default tseslint.config(
   {
     // dist/build output, deps, workflow scratch, and vendored minified bundles
     // (e.g. the deck's anime.js) — none are our source to lint.
-    ignores: ['dist/**', 'node_modules/**', '.workflows/**', '**/*.min.js'],
+    ignores: ['dist/**', '**/dist-worker/**', '**/dist-worker-bundle/**', 'node_modules/**', '.workflows/**', '**/*.min.js'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

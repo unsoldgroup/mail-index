@@ -18,8 +18,8 @@ import { computeCadence } from '../dist/intelligence/cadence.js';
 const ACCOUNT = 'fora';
 const DAY = 86_400_000;
 
-function seed(repo, m) {
-  repo.upsertMessage({
+async function seed(repo, m) {
+  await repo.upsertMessage({
     account: ACCOUNT,
     gmailMessageId: m.id,
     threadId: m.id,
@@ -38,22 +38,22 @@ function seed(repo, m) {
  * Two Silversea hosts (brand fragmented) + one Quark + one user-sent message.
  * t0 anchors the window; Silversea spans 30 days.
  */
-function seedBrands(repo, t0) {
-  seed(repo, { id: 's1', from: 'Rep A <a@email.silversea.com>', to: 'me@fora.travel', internalDate: t0 });
-  seed(repo, { id: 's2', from: 'Rep B <b@silversea.com>', to: 'me@fora.travel', internalDate: t0 + 10 * DAY });
-  seed(repo, { id: 's3', from: 'Rep A <a@email.silversea.com>', to: 'me@fora.travel', internalDate: t0 + 30 * DAY });
-  seed(repo, { id: 'q1', from: 'Crystal <c@email.quarkexpeditions.com>', to: 'me@fora.travel', internalDate: t0 + 5 * DAY });
+async function seedBrands(repo, t0) {
+  await seed(repo, { id: 's1', from: 'Rep A <a@email.silversea.com>', to: 'me@fora.travel', internalDate: t0 });
+  await seed(repo, { id: 's2', from: 'Rep B <b@silversea.com>', to: 'me@fora.travel', internalDate: t0 + 10 * DAY });
+  await seed(repo, { id: 's3', from: 'Rep A <a@email.silversea.com>', to: 'me@fora.travel', internalDate: t0 + 30 * DAY });
+  await seed(repo, { id: 'q1', from: 'Crystal <c@email.quarkexpeditions.com>', to: 'me@fora.travel', internalDate: t0 + 5 * DAY });
   // Sent mail must NOT count toward inbound cadence.
-  seed(repo, { id: 'sent1', from: 'me@fora.travel', to: 'a@silversea.com', internalDate: t0 + 1 * DAY, direction: 'sent' });
+  await seed(repo, { id: 'sent1', from: 'me@fora.travel', to: 'a@silversea.com', internalDate: t0 + 1 * DAY, direction: 'sent' });
 }
 
-test('cadence groups by registrable brand, counts distinct senders, excludes Sent', () => {
-  const repo = new Repo(openDb({ path: ':memory:' }));
+test('cadence groups by registrable brand, counts distinct senders, excludes Sent', async () => {
+  const repo = new Repo(await openDb({ path: ':memory:' }));
   const t0 = Date.UTC(2026, 0, 1);
-  seedBrands(repo, t0);
-  aggregateAccount(repo, ACCOUNT, ['me@fora.travel']);
+  await seedBrands(repo, t0);
+  await aggregateAccount(repo, ACCOUNT, ['me@fora.travel']);
 
-  const rows = computeCadence(repo, ACCOUNT);
+  const rows = await computeCadence(repo, ACCOUNT);
   const byDomain = new Map(rows.map((r) => [r.domain, r]));
 
   // Two Silversea hosts collapse to one brand row with 3 msgs, 2 senders.
@@ -72,17 +72,17 @@ test('cadence groups by registrable brand, counts distinct senders, excludes Sen
   assert.equal(rows[0].domain, 'silversea.com');
 });
 
-test('cadence --category filters to domains tagged via save_domain_category', () => {
-  const repo = new Repo(openDb({ path: ':memory:' }));
+test('cadence --category filters to domains tagged via save_domain_category', async () => {
+  const repo = new Repo(await openDb({ path: ':memory:' }));
   const t0 = Date.UTC(2026, 0, 1);
-  seedBrands(repo, t0);
-  aggregateAccount(repo, ACCOUNT, ['me@fora.travel']);
+  await seedBrands(repo, t0);
+  await aggregateAccount(repo, ACCOUNT, ['me@fora.travel']);
 
   // Tag both Silversea hosts (aggregation keys domains by raw host).
-  repo.setDomainCategory({ account: ACCOUNT, domain: 'email.silversea.com', category: 'expedition-operator' });
-  repo.setDomainCategory({ account: ACCOUNT, domain: 'silversea.com', category: 'expedition-operator' });
+  await repo.setDomainCategory({ account: ACCOUNT, domain: 'email.silversea.com', category: 'expedition-operator' });
+  await repo.setDomainCategory({ account: ACCOUNT, domain: 'silversea.com', category: 'expedition-operator' });
 
-  const ops = computeCadence(repo, ACCOUNT, { category: 'expedition-operator' });
+  const ops = await computeCadence(repo, ACCOUNT, { category: 'expedition-operator' });
   assert.equal(ops.length, 1, 'only the tagged brand');
   assert.equal(ops[0].domain, 'silversea.com');
   assert.equal(ops[0].msgs, 3);
@@ -91,16 +91,16 @@ test('cadence --category filters to domains tagged via save_domain_category', ()
   assert.ok(!ops.some((r) => r.domain === 'quarkexpeditions.com'));
 });
 
-test('cadence honours the sinceMs bound and the limit', () => {
-  const repo = new Repo(openDb({ path: ':memory:' }));
+test('cadence honours the sinceMs bound and the limit', async () => {
+  const repo = new Repo(await openDb({ path: ':memory:' }));
   const t0 = Date.UTC(2026, 0, 1);
-  seedBrands(repo, t0);
-  aggregateAccount(repo, ACCOUNT, ['me@fora.travel']);
+  await seedBrands(repo, t0);
+  await aggregateAccount(repo, ACCOUNT, ['me@fora.travel']);
 
   // Window starting after the first two Silversea msgs: only s3 (day 30) counts.
-  const recent = computeCadence(repo, ACCOUNT, { sinceMs: t0 + 20 * DAY });
+  const recent = await computeCadence(repo, ACCOUNT, { sinceMs: t0 + 20 * DAY });
   const sv = recent.find((r) => r.domain === 'silversea.com');
   assert.equal(sv.msgs, 1);
 
-  assert.equal(computeCadence(repo, ACCOUNT, { limit: 1 }).length, 1);
+  assert.equal((await computeCadence(repo, ACCOUNT, { limit: 1 })).length, 1);
 });

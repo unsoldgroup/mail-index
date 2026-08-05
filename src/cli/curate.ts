@@ -151,7 +151,7 @@ export async function runCurate(
   prompter: Prompter,
   options: CurateOptions = {},
 ): Promise<CurateResult> {
-  const proposal = propose(repo, account, {
+  const proposal = await propose(repo, account, {
     ...(options.contactLimit != null ? { contactLimit: options.contactLimit } : {}),
     ...(options.domainLimit != null ? { domainLimit: options.domainLimit } : {}),
   });
@@ -203,7 +203,7 @@ export async function runCurate(
     }
   }
 
-  const applied = set(
+  const applied = await set(
     repo,
     account,
     {

@@ -44,7 +44,7 @@ export class ConfigError extends Error {
  * #2) shells out to the gog CLI, which carries its own bundled OAuth client and
  * selects the mailbox by account email — the public, one-click-auth path.
  */
-export const ADAPTERS = ['gws', 'gog'] as const;
+export const ADAPTERS = ['gws', 'gog', 'gmail-rest'] as const;
 export type AdapterId = (typeof ADAPTERS)[number];
 
 /**
@@ -159,7 +159,7 @@ export function validateConfig(parsed: unknown, source = '<config>'): OperatorCo
         );
       }
       account.account = email;
-    } else {
+    } else if (adapter === 'gws') {
       const configDir = raw['configDir'];
       if (typeof configDir !== 'string' || configDir.trim() === '') {
         throw new ConfigError(

@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
 const distDir = join(here, '..', 'dist');
 
-test('cli bin prints usage and exits 0', () => {
+test('cli bin prints usage and exits 0', async () => {
   const out = execFileSync('node', [join(distDir, 'cli', 'index.js')], {
     encoding: 'utf8',
   });
@@ -51,7 +51,7 @@ test('mcp bin self-bootstraps into SETUP MODE with no config (advisory tools, cl
   // Wait for the tools/list response (id:2) to appear on stdout, then stop.
   const result = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`timeout; stdout=${stdout} stderr=${stderr}`)), 10_000);
-    child.stdout.on('data', () => {
+    child.stdout.on('data', async () => {
       for (const line of stdout.split('\n')) {
         if (!line.trim()) continue;
         let msg;

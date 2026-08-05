@@ -22,7 +22,11 @@ export interface CadenceFlags {
 }
 
 /** Run the cadence read, translating CLI flags into compute options. */
-export function runCadence(repo: Repo, flags: CadenceFlags, now: Date = new Date()): CadenceRow[] {
+export async function runCadence(
+  repo: Repo,
+  flags: CadenceFlags,
+  now: Date = new Date(),
+): Promise<CadenceRow[]> {
   const opts: Parameters<typeof computeCadence>[2] = {};
   if (flags.category != null) opts.category = flags.category;
   if (flags.since != null) opts.sinceMs = parseSince(flags.since, now);

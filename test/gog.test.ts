@@ -29,11 +29,11 @@ const makeAdapter = () =>
 // The full contract suite, run against the real adapter over recorded fixtures.
 runMailSourceContract(test, makeAdapter, GOG_CONTRACT_FIXTURES);
 
-test('GogAdapter exposes the gog provider id', () => {
+test('GogAdapter exposes the gog provider id', async () => {
   assert.equal(makeAdapter().provider, 'gog');
 });
 
-test('GogAdapter rejects an empty account', () => {
+test('GogAdapter rejects an empty account', async () => {
   assert.throws(() => new GogAdapter({ account: '', runner: makeGogFixtureRunner() }));
 });
 

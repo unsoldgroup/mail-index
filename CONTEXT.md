@@ -1,8 +1,10 @@
 # mail-index
 
-A local, agent-queryable mail intelligence layer: progressive index over one or
-more mailboxes, exposed to AI agents through a local MCP server. Built for
-*recall* (answering vague questions), not lookup.
+An agent-queryable mail intelligence layer: progressive index over one or
+more mailboxes, exposed to AI agents through an MCP server. Built for
+*recall* (answering vague questions), not lookup. Runs local-first; a
+self-hosted remote Deployment on the operator's own Cloudflare account is an
+explicit opt-in (ADR-0008).
 
 ## Language
 
@@ -44,6 +46,29 @@ enrichment is never inline — the tool returns a Command handback (ADR-0001).
 An MCP tool response containing the exact `mail-index` CLI command the agent
 should run to obtain content the server won't fetch inline. The CLI is the
 execution engine; the MCP is the brain that knows which command to run.
+Local Deployment only — the remote counterpart is a **Job** (ADR-0009).
+
+**Deployment**:
+Where an index runs: **local** (CLI + stdio MCP on the user's machine, the
+default) or **remote** (single-tenant Worker on the operator's own Cloudflare
+account: D1 storage, streamable-HTTP MCP, cron sync). Same core, same schema,
+different drivers. A remote Deployment is operator-owned infrastructure —
+there is no mail-index-operated hosting (ADR-0008).
+
+**Job**:
+The remote Deployment's replacement for a Command handback: O(N) work
+(backfill, bulk Enrichment) is enqueued (Cloudflare Queues), the tool returns
+a job id, and progress is readable via `sync_status`. Inline stays O(1)
+(ADR-0001) in both Deployments.
+
+**Trigger rule**:
+An operator-defined predicate over *index* intelligence — category, `is_list`,
+Correspondent status, Interest profile membership, label, sender/domain,
+subject/FTS terms — evaluated against newly synced Messages. On match, the
+remote Deployment POSTs a signed webhook to registered consumer URLs. The
+differentiator vs provider filters: rules can reference what the index knows
+(e.g. "curated-important Correspondent wrote").
+_Avoid_: filter (that's the provider's word), alert
 
 **Read-only by default**:
 By default the tool never mutates the mailbox, and never sends or deletes mail at

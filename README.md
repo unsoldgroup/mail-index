@@ -15,7 +15,10 @@ local index lets your AI agent run **true summarization and recall over your
 entire mailbox** — instead of being trapped behind Gmail's search bar.
 
 It works through a **local MCP server**, so any agent (Claude, Codex, any MCP
-client) can query it. Local-first — the index never leaves your machine.
+client) can query it. Local-first — the default index never leaves your machine.
+Operators who need an always-on connector can instead deploy the optional,
+single-tenant [remote Worker Deployment](docs/INSTALL-worker.md) in their own
+Cloudflare account; mail-index operates no hosting service.
 Read-only by default — it never sends or mutates your mail unless you
 explicitly opt into archive + label edits (a least-privilege `gmail.modify`
 re-auth; never send or delete). See [ADR-0007](docs/adr/0007-opt-in-mailbox-writes.md).

@@ -17,8 +17,8 @@ import { reconcileInbox } from '../dist/ingest/reconcile-inbox.js';
 
 const ACCOUNT = 'test-acct';
 
-function freshRepo() {
-  return new Repo(openDb({ path: ':memory:' }));
+async function freshRepo() {
+  return new Repo(await openDb({ path: ':memory:' }));
 }
 
 /** Minimal MailSource: a fixed live-inbox id set + metadata for new ids. */
@@ -36,8 +36,8 @@ function inboxSource(liveIds, metaById = {}) {
   };
 }
 
-function seed(repo, id, labels, opts = {}) {
-  repo.upsertMessage({
+async function seed(repo, id, labels, opts = {}) {
+  await repo.upsertMessage({
     account: ACCOUNT,
     gmailMessageId: id,
     subject: opts.subject ?? `subject ${id}`,
@@ -50,9 +50,9 @@ function seed(repo, id, labels, opts = {}) {
 }
 
 test('reconcile drops INBOX from rows no longer in the live inbox', async () => {
-  const repo = freshRepo();
-  seed(repo, 'kept', ['INBOX', 'UNREAD']);
-  seed(repo, 'archived', ['INBOX']);
+  const repo = await freshRepo();
+  await seed(repo, 'kept', ['INBOX', 'UNREAD']);
+  await seed(repo, 'archived', ['INBOX']);
 
   const res = await reconcileInbox({
     account: ACCOUNT,
@@ -61,18 +61,18 @@ test('reconcile drops INBOX from rows no longer in the live inbox', async () => 
   });
 
   assert.equal(res.archived, 1);
-  const archived = repo.getMessage(ACCOUNT, 'archived');
+  const archived = await repo.getMessage(ACCOUNT, 'archived');
   assert.ok(archived);
   assert.equal(JSON.parse(archived.labels_json).includes('INBOX'), false);
   assert.equal(archived.category, null, 'category drops off primary when INBOX leaves');
 
   // The still-inbox row is untouched (membership + its other labels intact).
-  const kept = repo.getMessage(ACCOUNT, 'kept');
+  const kept = await repo.getMessage(ACCOUNT, 'kept');
   assert.deepEqual(JSON.parse(kept.labels_json).sort(), ['INBOX', 'UNREAD']);
 });
 
 test('reconcile indexes a live inbox id not yet stored', async () => {
-  const repo = freshRepo();
+  const repo = await freshRepo();
   const meta = {
     id: 'fresh',
     threadId: null,
@@ -95,7 +95,7 @@ test('reconcile indexes a live inbox id not yet stored', async () => {
   });
 
   assert.equal(res.added, 1);
-  const row = repo.getMessage(ACCOUNT, 'fresh');
+  const row = await repo.getMessage(ACCOUNT, 'fresh');
   assert.ok(row);
   assert.equal(row.subject, 'fresh inbox mail');
   assert.equal(JSON.parse(row.labels_json).includes('INBOX'), true);
@@ -103,8 +103,8 @@ test('reconcile indexes a live inbox id not yet stored', async () => {
 });
 
 test('reconcile restores INBOX on a re-inboxed indexed row', async () => {
-  const repo = freshRepo();
-  seed(repo, 'reinbox', ['UNREAD']); // indexed, currently NOT in inbox
+  const repo = await freshRepo();
+  await seed(repo, 'reinbox', ['UNREAD']); // indexed, currently NOT in inbox
 
   const res = await reconcileInbox({
     account: ACCOUNT,
@@ -113,25 +113,25 @@ test('reconcile restores INBOX on a re-inboxed indexed row', async () => {
   });
 
   assert.equal(res.restored, 1);
-  const row = repo.getMessage(ACCOUNT, 'reinbox');
+  const row = await repo.getMessage(ACCOUNT, 'reinbox');
   assert.deepEqual(JSON.parse(row.labels_json).sort(), ['INBOX', 'UNREAD']);
   assert.equal(row.category, 'primary');
 });
 
-test('messagesByLabel filters by stored label membership, newest-first', () => {
-  const repo = freshRepo();
-  seed(repo, 'in-old', ['INBOX'], { internalDate: 1000 });
-  seed(repo, 'in-new', ['INBOX'], { internalDate: 3000 });
-  seed(repo, 'promo', ['CATEGORY_PROMOTIONS'], { internalDate: 4000 });
-  seed(repo, 'starred', ['INBOX', 'STARRED'], { internalDate: 2000 });
+test('messagesByLabel filters by stored label membership, newest-first', async () => {
+  const repo = await freshRepo();
+  await seed(repo, 'in-old', ['INBOX'], { internalDate: 1000 });
+  await seed(repo, 'in-new', ['INBOX'], { internalDate: 3000 });
+  await seed(repo, 'promo', ['CATEGORY_PROMOTIONS'], { internalDate: 4000 });
+  await seed(repo, 'starred', ['INBOX', 'STARRED'], { internalDate: 2000 });
 
-  const inbox = repo.messagesByLabel('INBOX', { account: ACCOUNT });
+  const inbox = await repo.messagesByLabel('INBOX', { account: ACCOUNT });
   assert.deepEqual(
     inbox.map((r) => r.gmail_message_id),
     ['in-new', 'starred', 'in-old'],
     'only INBOX rows, newest internal_date first',
   );
 
-  const starred = repo.messagesByLabel('STARRED', { account: ACCOUNT });
+  const starred = await repo.messagesByLabel('STARRED', { account: ACCOUNT });
   assert.deepEqual(starred.map((r) => r.gmail_message_id), ['starred']);
 });

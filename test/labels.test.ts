@@ -21,45 +21,45 @@ const CATALOGUE = [
   { id: 'Label_99', name: 'Coverage Review', type: 'user' },
 ];
 
-function repoWith(labels) {
-  const repo = new Repo(openDb({ path: ':memory:' }));
-  if (labels) repo.setLabels('acct', labels);
+async function repoWith(labels) {
+  const repo = new Repo(await openDb({ path: ':memory:' }));
+  if (labels) await repo.setLabels('acct', labels);
   return repo;
 }
 
-test('Repo.setLabels + labelMap/labelNameToId round-trip', () => {
-  const repo = repoWith(CATALOGUE);
-  assert.equal(repo.labelMap('acct').get('Label_99'), 'Coverage Review');
-  assert.equal(repo.labelNameToId('acct').get('coverage review'), 'Label_99'); // case-insensitive
-  assert.equal(repo.labelNameToId('acct').get('inbox'), 'INBOX');
+test('Repo.setLabels + labelMap/labelNameToId round-trip', async () => {
+  const repo = await repoWith(CATALOGUE);
+  assert.equal((await repo.labelMap('acct')).get('Label_99'), 'Coverage Review');
+  assert.equal((await repo.labelNameToId('acct')).get('coverage review'), 'Label_99'); // case-insensitive
+  assert.equal((await repo.labelNameToId('acct')).get('inbox'), 'INBOX');
 });
 
-test('Repo.labelNames renders ids → names, passing unknown ids through', () => {
-  const repo = repoWith(CATALOGUE);
-  assert.deepEqual(repo.labelNames('acct', ['INBOX', 'Label_99', 'Label_UNKNOWN']), [
+test('Repo.labelNames renders ids → names, passing unknown ids through', async () => {
+  const repo = await repoWith(CATALOGUE);
+  assert.deepEqual(await repo.labelNames('acct', ['INBOX', 'Label_99', 'Label_UNKNOWN']), [
     'INBOX',
     'Coverage Review',
     'Label_UNKNOWN',
   ]);
 });
 
-test('Repo.setLabels is a full replace (a provider-deleted label disappears)', () => {
-  const repo = repoWith(CATALOGUE);
-  repo.setLabels('acct', [{ id: 'INBOX', name: 'INBOX', type: 'system' }]);
-  assert.equal(repo.labelMap('acct').has('Label_99'), false);
+test('Repo.setLabels is a full replace (a provider-deleted label disappears)', async () => {
+  const repo = await repoWith(CATALOGUE);
+  await repo.setLabels('acct', [{ id: 'INBOX', name: 'INBOX', type: 'system' }]);
+  assert.equal((await repo.labelMap('acct')).has('Label_99'), false);
 });
 
-test('Repo.labelMap is empty for an account with no cached catalogue (raw-id fallback)', () => {
-  const repo = repoWith(null);
-  assert.equal(repo.labelMap('acct').size, 0);
-  assert.deepEqual(repo.labelNames('acct', ['Label_99']), ['Label_99']); // passthrough
+test('Repo.labelMap is empty for an account with no cached catalogue (raw-id fallback)', async () => {
+  const repo = await repoWith(null);
+  assert.equal((await repo.labelMap('acct')).size, 0);
+  assert.deepEqual(await repo.labelNames('acct', ['Label_99']), ['Label_99']); // passthrough
 });
 
 test('syncLabels stores the adapter catalogue; returns 0 for a read-only-ish adapter', async () => {
-  const repo = repoWith(null);
+  const repo = await repoWith(null);
   const n = await syncLabels({ account: 'acct', source: new FakeMailSource(), repo });
   assert.ok(n >= 2);
-  assert.equal(repo.labelMap('acct').get('Label_1'), 'Coverage Review');
+  assert.equal((await repo.labelMap('acct')).get('Label_1'), 'Coverage Review');
 
   // An adapter without listLabels() is a no-op (0), never throws.
   const bare = { provider: 'bare' };
@@ -67,9 +67,9 @@ test('syncLabels stores the adapter catalogue; returns 0 for a read-only-ish ada
 });
 
 test('mutate resolves a friendly NAME → id for the provider, and renders names back', async () => {
-  const repo = repoWith(CATALOGUE);
+  const repo = await repoWith(CATALOGUE);
   // Seed the target message so the local index update has a row.
-  repo.upsertMessage({ account: 'acct', gmailMessageId: 'm1', subject: 'x', labels: ['INBOX'] });
+  await repo.upsertMessage({ account: 'acct', gmailMessageId: 'm1', subject: 'x', labels: ['INBOX'] });
 
   const calls = [];
   const source = {
@@ -94,8 +94,8 @@ test('mutate resolves a friendly NAME → id for the provider, and renders names
 });
 
 test('mutate passes system labels + unknown strings through unchanged', async () => {
-  const repo = repoWith(CATALOGUE);
-  repo.upsertMessage({ account: 'acct', gmailMessageId: 'm1', subject: 'x', labels: ['INBOX'] });
+  const repo = await repoWith(CATALOGUE);
+  await repo.upsertMessage({ account: 'acct', gmailMessageId: 'm1', subject: 'x', labels: ['INBOX'] });
   const calls = [];
   const source = { provider: 'fake', modify: (_id, c) => (calls.push(c), Promise.resolve()) };
   await applyLabelChange({ account: 'acct', id: 'm1', source, repo, change: archiveChange() });
