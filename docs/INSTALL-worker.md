@@ -49,21 +49,31 @@ npx wrangler deploy --config worker/wrangler.jsonc
 Keep `observability.enabled: true` and `head_sampling_rate: 1`. The configuration
 also pins a measured 30-second CPU limit and a queue consumer.
 
-## 4. Connect Accounts
-
-Open `https://<worker-host>/setup`, authenticate as an allowlisted operator, and
-start `/setup/google/start?account=<label>`. The default consent stores a
-read-only grant. To opt into archive/label edits, revisit
-`/setup/google/start?account=<label>&writes=1`; this is the remote equivalent of
-local `--enable-writes`. Every Account is independent.
-
-## 5. Connect an agent
+## 4. Connect an agent
 
 In claude.ai, add a custom remote connector whose URL is
 `https://<worker-host>/mcp`. Complete dynamic client registration and the Google
 operator sign-in. The Worker’s MCP OAuth provider challenges anonymous requests;
 the allowlist is authorization. A2A clients discover
 `/.well-known/agent-card.json` and use the same bearer-token flow for `/a2a`.
+
+## 5. Connect Accounts
+
+Open `https://<worker-host>/setup` in any browser. If that browser has no
+operator session it is challenged with a link to `/setup/login`, an
+identity-only Google sign-in (`openid email`, no mailbox scope) that mints an
+8-hour operator cookie. It reuses the `/setup/google/callback` redirect URI, so
+no third callback needs registering. The session is per-browser: a second
+machine signs in again at `/setup/login`.
+
+Then start `/setup/google/start?account=<label>`. The default consent stores a read-only
+grant. To opt into archive/label edits, revisit
+`/setup/google/start?account=<label>&writes=1`; this is the remote equivalent of
+local `--enable-writes`. Every Account is independent.
+
+Each grant's refresh token is bound to the Worker's own Google client — the
+local CLI's Desktop-client tokens cannot be transplanted here (see
+`accessTokenProvider`, which refreshes with `GOOGLE_CLIENT_ID`/`SECRET`).
 
 ## 6. Optional seed
 

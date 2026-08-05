@@ -35,7 +35,13 @@ async function hmacKey(encoded: string) {
   return crypto.subtle.importKey('raw', keyBytes(encoded), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
 }
 
-export interface OAuthState { account: string; writes: boolean; redirectUri: string; expiresAt: number }
+/**
+ * `login: true` marks an identity-only round trip: the operator is proving who
+ * they are to reach `/setup`, not connecting a mailbox. It reuses the
+ * `/setup/google/callback` redirect URI so operators register only the two
+ * callbacks INSTALL-worker.md already lists, and carries no account/writes.
+ */
+export interface OAuthState { account: string; writes: boolean; redirectUri: string; expiresAt: number; login?: boolean }
 
 export async function signState(state: OAuthState, encodedKey: string): Promise<string> {
   return signPayload(state, encodedKey);

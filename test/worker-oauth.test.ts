@@ -66,3 +66,50 @@ test('re-consent invalidates the cached Google access token immediately', async 
     assert.equal(await provider(), 'access-2'); assert.equal(exchanges, 2);
   } finally { await mf.dispose(); }
 });
+
+test('/setup/login mints an operator session without the MCP authorize flow', async () => {
+  const mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok") } }', d1Databases: ['DB'], kvNamespaces: ['OAUTH_KV'] });
+  try {
+    const env = {
+      DB: await mf.getD1Database('DB'), OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async () => undefined },
+      TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m',
+    };
+    const identity = (email: string) => (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('oauth2.googleapis.com/token')) return Response.json({ access_token: 'access', expires_in: 3600 });
+      if (url.includes('openidconnect.googleapis.com/v1/userinfo')) return Response.json({ email, email_verified: true });
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+    const call = (path: string, fetchImpl: typeof fetch, cookie?: string) =>
+      handlePublicRequest(new Request(`https://worker.example${path}`, cookie ? { headers: { cookie } } : {}), env, {} as never, { fetchImpl });
+
+    // A cookie-less browser is challenged, but pointed at the sign-in route.
+    const cold = await call('/setup', identity('operator@example.com'));
+    assert.equal(cold.status, 401);
+    assert.match(await cold.text(), /\/setup\/login/);
+
+    // Sign-in redirects to Google for identity only — no mailbox scope requested.
+    const start = await call('/setup/login', identity('operator@example.com'));
+    assert.equal(start.status, 302);
+    const consent = new URL(start.headers.get('location')!);
+    assert.equal(consent.searchParams.get('scope'), 'openid email');
+    const state = consent.searchParams.get('state')!;
+
+    // An off-allowlist identity is refused and gets no cookie.
+    const denied = await call(`/setup/google/callback?code=x&state=${encodeURIComponent(state)}`, identity('stranger@example.com'));
+    assert.equal(denied.status, 403);
+    assert.equal(denied.headers.get('set-cookie'), null);
+
+    // The allowlisted operator gets a session that opens /setup, and no grant was written.
+    const ok = await call(`/setup/google/callback?code=x&state=${encodeURIComponent(state)}`, identity('operator@example.com'));
+    assert.equal(ok.status, 302);
+    assert.equal(ok.headers.get('location'), '/setup');
+    const cookie = ok.headers.get('set-cookie')!;
+    assert.match(cookie, /HttpOnly/);
+    assert.match(cookie, /Secure/);
+    const warm = await call('/setup', identity('operator@example.com'), cookie.split(';')[0]);
+    assert.equal(warm.status, 200);
+    const grants = await (await mf.getD1Database('DB')).prepare('SELECT count(*) AS n FROM google_tokens').all();
+    assert.equal(grants.results[0].n, 0);
+  } finally { await mf.dispose(); }
+});
