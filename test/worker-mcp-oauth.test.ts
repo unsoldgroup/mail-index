@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Miniflare } from 'miniflare';
-import { handlePublicRequest } from '../dist-worker/worker/index.js';
+import { handleAuthorizedRequest, handlePublicRequest } from '../dist-worker/worker/index.js';
 
 const key = Buffer.alloc(32, 6).toString('base64');
 
@@ -47,5 +47,34 @@ test('Google identity allowlist grants operator and denies anyone else', async (
       assert.equal(completed, email === 'operator@example.com');
       if (email === 'operator@example.com') assert.match(callback.headers.get('set-cookie') ?? '', /HttpOnly.*SameSite=Lax/);
     }
+  } finally { await mf.dispose(); }
+});
+
+test('MCP is stateless: tools/list succeeds without any shared in-memory session', async () => {
+  const { mf, env } = await fixture();
+  try {
+    const rpc = (body: object, headers: Record<string, string> = {}) =>
+      handleAuthorizedRequest(new Request('https://worker.example/mcp', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers },
+        body: JSON.stringify(body),
+      }), env);
+
+    const init = await rpc({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'claude', version: '1' } } });
+    assert.equal(init.status, 200);
+    // Stateless mode must not hand out a session id for the client to echo back.
+    assert.equal(init.headers.get('mcp-session-id'), null);
+
+    // The regression: this is the call that used to 400 when it landed in an
+    // isolate that never saw `initialize`. Nothing is shared between the two.
+    const list = await rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+    assert.equal(list.status, 200);
+    const body = await list.json() as { result?: { tools?: { name: string }[] }; error?: unknown };
+    assert.equal(body.error, undefined);
+    assert.ok((body.result?.tools?.length ?? 0) > 0, 'tools/list returned an empty surface');
+
+    // A stale session id from a previous isolate must not break the call either.
+    const stale = await rpc({ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }, { 'mcp-session-id': 'session-from-a-dead-isolate' });
+    assert.equal(stale.status, 200);
   } finally { await mf.dispose(); }
 });
