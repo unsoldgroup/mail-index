@@ -11,6 +11,34 @@ and the MCP Registry metadata entry. See [docs/PUBLISHING.md](docs/PUBLISHING.md
 
 ---
 
+## [1.5.1] — 2026-08-05
+
+### Changed
+
+- **MCP Registry name** is now **`io.github.unsoldgroup/mail-index`** (was
+  `io.github.alunsoldantarctica/mail-index`), and `mcpName` in `package.json`
+  moves with it — that field is how the registry verifies npm ownership, so the
+  rename needed a published version to take effect.
+
+  The old namespace derived from a GitHub username that **no longer exists**: the
+  account was renamed, the organization rename followed, and the registry only
+  grants a namespace to a live identity. Nobody could authenticate to it —
+  not CI, not a human, not the original owner — so the old entry is frozen at
+  1.0.0 permanently and the server is re-listed under the org, whose OIDC
+  identity CI already holds.
+
+  **No user action.** The npm package is still `mail-index`, installs and MCP
+  configs are unchanged, and the tool surface is identical. Only the registry
+  listing's identifier changed.
+
+### Fixed
+
+- Documented in [docs/PUBLISHING.md](docs/PUBLISHING.md) and the workflow itself:
+  `registry-publish.yml`'s `release: [published]` trigger **never fires** for a
+  Release created by `release.yml`, because GitHub refuses to start a workflow
+  from an event another workflow raised with the default `GITHUB_TOKEN`. The
+  registry step must be dispatched by hand after a release tag.
+
 ## [1.5.0] — 2026-08-05
 
 **The remote Deployment release.** mail-index can now run as a single-tenant
@@ -211,6 +239,7 @@ interest engine, curation, the full MCP tool surface, and the write-back loops �
 on [npm](https://www.npmjs.com/package/mail-index), as a `.mcpb` bundle, and in
 the [MCP Registry](https://registry.modelcontextprotocol.io).
 
+[1.5.1]: https://github.com/unsoldgroup/mail-index/releases/tag/v1.5.1
 [1.5.0]: https://github.com/unsoldgroup/mail-index/releases/tag/v1.5.0
 [1.4.0]: https://github.com/unsoldgroup/mail-index/releases/tag/v1.4.0
 [1.3.0]: https://github.com/unsoldgroup/mail-index/releases/tag/v1.3.0

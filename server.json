@@ -1,18 +1,18 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.alunsoldantarctica/mail-index",
+  "name": "io.github.unsoldgroup/mail-index",
   "title": "mail-index",
   "description": "Local-first, read-only MCP server for recall over your Gmail: search, contacts, threads, digests.",
   "repository": {
     "url": "https://github.com/unsoldgroup/mail-index",
     "source": "github"
   },
-  "version": "1.5.0",
+  "version": "1.5.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "mail-index",
-      "version": "1.5.0",
+      "version": "1.5.1",
       "runtimeHint": "npx",
       "runtimeArguments": [
         { "type": "named", "name": "-y" },
