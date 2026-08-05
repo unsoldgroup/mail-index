@@ -1,6 +1,6 @@
 {
   "name": "mail-index",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "mcpName": "io.github.alunsoldantarctica/mail-index",
   "description": "A local, agent-queryable mail intelligence layer — progressive mailbox index + MCP server for AI agents.",
   "type": "module",

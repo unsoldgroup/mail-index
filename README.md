@@ -33,28 +33,50 @@ re-auth; never send or delete). See [ADR-0007](docs/adr/0007-opt-in-mailbox-writ
   <a href="docs/demo/mcp-demo.html">Interactive version →</a></sub>
 </p>
 
-> **Status: v1.0 — published.** Progressive sync, the correspondence graph, the
+> **Status: v1.5 — published.** Progressive sync, the correspondence graph, the
 > interest engine, curation, the full 23-tool MCP surface, and the write-back
 > loops are built and tested — and `mail-index` is live on
 > **[npm](https://www.npmjs.com/package/mail-index)** with a
 > **[`.mcpb` bundle](https://github.com/unsoldgroup/mail-index/releases/latest)**.
 > Still in progress: the bundled Option A OAuth client and signed one-click
 > installers. Architecture lives in
-> **[docs/PLAN.md](docs/PLAN.md)**; start with **[docs/INSTALL.md](docs/INSTALL.md)**.
+> **[docs/PLAN.md](docs/PLAN.md)**; start with **[docs/INSTALL.md](docs/INSTALL.md)**;
+> every release is recorded in **[CHANGELOG.md](CHANGELOG.md)**.
 
 > [!TIP]
-> **New in v1.4 — opt-in mailbox writes + human-readable labels.**
-> mail-index can now **archive** a message and **edit its labels** directly on
+> **New in v1.5 — the optional remote Deployment.** mail-index can now also run
+> as a **single-tenant Cloudflare Worker in your own account**: always-on, synced
+> on a cron, and reachable by remote agents over authenticated MCP (plus a small
+> A2A surface). It serves the _same_ tool registry as the local server, backed by
+> a **D1** storage driver that passes the same FTS ranking conformance suite, and
+> it can **push** — Trigger rules match new mail as it lands and fire signed
+> webhooks. Long O(N) work becomes a queued **Job** instead of a command
+> handback. You can seed a fresh Deployment straight from your existing local
+> index with `mail-index export` → D1 import, so it starts with your history
+> already indexed. **The local CLI + stdio path is unchanged and stays the
+> default**, and mail-index still operates no hosting service — the Worker is
+> code you deploy to infrastructure you own.
+> See **[docs/INSTALL-worker.md](docs/INSTALL-worker.md)**,
+> **[docs/WORKER-SEED.md](docs/WORKER-SEED.md)**,
+> **[ADR-0008](docs/adr/0008-self-hosted-remote-deployment.md)**.
+>
+> Also new locally: every MCP response carries a **freshness block** and any
+> stale read now auto-triggers a background sync (previously only the digest
+> composites did).
+
+> [!TIP]
+> **From v1.4 — opt-in mailbox writes + human-readable labels.**
+> mail-index can **archive** a message and **edit its labels** directly on
 > Gmail — via the `archive` / `label` CLI commands and the `archive_message` /
 > `modify_labels` MCP tools, on both the gog and gws adapters. It stays
 > **read-only by default**: writes are unreachable until you opt in with a
-> *least-privilege* `gmail.modify` grant (**never** send or delete) — enable per
+> _least-privilege_ `gmail.modify` grant (**never** send or delete) — enable per
 > account with `mail-index setup --account <email> --enable-writes` or the
-> bundled `scripts/enable-writes.sh`. Labels now render as their **human names**
+> bundled `scripts/enable-writes.sh`. Labels render as their **human names**
 > everywhere (the index caches Gmail's label catalogue and resolves
-> `Label_3546…` → *"Expedition Insure"* in both directions), and you can pass a
-> friendly label name to `label --add/--remove`. The local-only / zero-egress
-> guarantee is unchanged. See **[ADR-0007](docs/adr/0007-opt-in-mailbox-writes.md)**.
+> `Label_3546…` → _"Expedition Insure"_ in both directions), and you can pass a
+> friendly label name to `label --add/--remove`.
+> See **[ADR-0007](docs/adr/0007-opt-in-mailbox-writes.md)**.
 
 ---
 
@@ -63,9 +85,9 @@ re-auth; never send or delete). See [ADR-0007](docs/adr/0007-opt-in-mailbox-writ
 1. **Progressive sync** — metadata for the whole mailbox in minutes; bodies
    fetched selectively.
 2. **Graph** — contacts, domains, threads; centrality + communities over your
-   *human* (non-bulk) mail.
+   _human_ (non-bulk) mail.
 3. **Interest** — an engagement score per contact from read/reply/star/importance
-   signals. A *seed for your curation*, not an autonomous decision.
+   signals. A _seed for your curation_, not an autonomous decision.
 4. **Curate** — you (via your agent, or a CLI wizard) confirm who/what matters;
    that profile drives which bodies get fetched.
 5. **Query** — your agent searches, traverses the graph, and reads the messages
@@ -102,8 +124,9 @@ mail-index sync  --account personal --since 6mo
 mail-index graph build --account personal
 mail-index search "that contract we discussed"
 ```
-*(Prefer source? `git clone …`, `pnpm install && pnpm build`, then run the bins
-as `node dist/cli/index.js …`.)*
+
+_(Prefer source? `git clone …`, `pnpm install && pnpm build`, then run the bins
+as `node dist/cli/index.js …`.)_
 
 ### Add to Claude
 
@@ -123,11 +146,11 @@ it doesn't install the adapter, sign you in, or sync.
   Settings / Windows SmartScreen). The bundle is **self-contained** (ships its own
   dependencies, run by Claude Desktop's bundled Node — no npx, network, or system
   Node needed) so it installs identically on Windows/macOS/Linux. A signed
-  all-in-one installer that *also* installs the adapter, signs you in, and syncs is
+  all-in-one installer that _also_ installs the adapter, signs you in, and syncs is
   still in progress; there is no `claude://` install link.
 
 **Teach your agent the common moves.** The MCP server already tells the agent
-*when* to reach for it (purchases, receipts, bookings, "who said what", "catch me
+_when_ to reach for it (purchases, receipts, bookings, "who said what", "catch me
 up"), and the repo ships a Claude **[Agent Skill](skills/mail-index/SKILL.md)**
 with the typical recipes (find purchases, catch up, find a contact's mail,
 summarize a sender). Drop it in for Claude Code/Desktop:
@@ -143,7 +166,7 @@ gotchas) → **[docs/INSTALL.md](docs/INSTALL.md)**. Driving setup with an agent
 ## What to expect — time & storage
 
 The index keeps metadata for every message and full text only where it earns it,
-so it grows with message *count*, not mailbox size — about **1.5% of your Gmail**.
+so it grows with message _count_, not mailbox size — about **1.5% of your Gmail**.
 First sync runs ~50 messages/min (one-time, incremental after); search is instant.
 Start with `--since 1mo` for value in minutes, then expand. Sizing table & growth
 path → **[docs/INSTALL.md §9](docs/INSTALL.md#9-grow-your-index-intelligently)**.
@@ -152,7 +175,7 @@ path → **[docs/INSTALL.md §9](docs/INSTALL.md#9-grow-your-index-intelligently
 
 Stock Gmail-API MCPs are query-based **lookup** tools — exact query, a network
 round-trip per call, raw payloads dumped into the model's context. mail-index
-answers *vague* questions from a local **recall** index. Across a 100-question
+answers _vague_ questions from a local **recall** index. Across a 100-question
 suite on a real mailbox it answered every question for **15× fewer tokens** — and
 the gap widens exactly where a query-based MCP has no primitive at all:
 summarizing, relationships, and commitments.
@@ -208,7 +231,17 @@ Writes are off by default. Enable archive + label edits for an account with
   integrators: args, compact result shapes, the `index_as_of` freshness +
   command-handback contracts.
 - **[docs/ADAPTERS.md](docs/ADAPTERS.md)** — the `MailSource` contract and how to
-  write + contract-test a new adapter.
+  write + contract-test a new adapter (`gws`, `gog`, `gmail-rest`).
+- **[docs/INSTALL-worker.md](docs/INSTALL-worker.md)** — deploy the optional
+  single-tenant remote Worker to your own Cloudflare account: D1 / Queue / KV
+  resources, secrets, the operator allowlist, connecting an agent, and a
+  verification checklist.
+- **[docs/WORKER-SEED.md](docs/WORKER-SEED.md)** — seed a fresh Deployment's D1
+  from an existing local index (`mail-index export` → import), instead of
+  re-syncing the whole mailbox from Gmail.
+- **[docs/PLAN-worker.md](docs/PLAN-worker.md)** — the remote-Deployment design:
+  locked decisions, milestones, and the local↔remote parity constraints.
+- **[CHANGELOG.md](CHANGELOG.md)** — what changed in every released version.
 - **[docs/PLAN.md](docs/PLAN.md)** — architecture, data model, and the key
   decisions (ADR digest).
 - **[SECURITY.md](.github/SECURITY.md)** + **[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)**
@@ -243,7 +276,7 @@ genuinely welcome:
 - 🔒 Security/privacy issues → **[SECURITY.md](.github/SECURITY.md)** (private)
 - 🌐 **[unsold.group/al](https://unsold.group/al)**
 
-Inside your agent you can also just say *"report a mail-index bug"* — the MCP
+Inside your agent you can also just say _"report a mail-index bug"_ — the MCP
 server points the agent to a GitHub link for you to submit (it never sends
 anything itself). See **[SUPPORT.md](.github/SUPPORT.md)**.
 

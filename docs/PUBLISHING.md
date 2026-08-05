@@ -1,12 +1,15 @@
 # Publishing — npm + the MCP Registry
 
 The official [MCP Registry](https://registry.modelcontextprotocol.io) hosts only
-*metadata*; the runnable artifact must live on **npm** first. So publishing is
+_metadata_; the runnable artifact must live on **npm** first. So publishing is
 two steps: (1) publish the npm package, (2) publish `server.json` to the registry.
 
-Both steps need **your** credentials (npm login + GitHub OAuth) and are run
-interactively — they can't be automated from an agent session. Everything below
-is already prepared in the repo; you run the credentialed commands.
+**Both steps are automated in CI** and fire from a single pushed `vX.Y.Z` tag —
+jump to [Releasing new versions](#releasing-new-versions) for the normal path.
+Steps 1 and 2 below document the manual equivalents: they are the fallback when
+CI is unavailable, and the reference for what CI is actually doing. Only a
+maintainer can push the tag, and only a maintainer holds `NPM_TOKEN` — the
+release trigger stays human.
 
 ## Prerequisites
 
@@ -128,7 +131,7 @@ pnpm bundle            # → ./mail-index.mcpb
 
 ### What is NOT done (deliberately out of scope)
 
-The release flow stops at an **unsigned** `.mcpb`. The following are *not* wired up
+The release flow stops at an **unsigned** `.mcpb`. The following are _not_ wired up
 because they require maintainer-held credentials / hardware and run out of band:
 
 - **Apple Developer-ID signing + notarization** of the bundle (needs an Apple
@@ -145,9 +148,43 @@ before the upload (sign → `notarytool submit --wait` → `stapler staple` on m
 
 ## Releasing new versions
 
-Bump `version` in **both** `package.json` and `server.json`, push a `vX.Y.Z` tag.
-CI then, in one run: builds + tests, publishes to npm with provenance, packs
-`mail-index.mcpb`, and uploads it to the GitHub Release. Finally run
-`mcp-publisher publish server.json` to update the registry entry. The version tag,
-npm auth (`NPM_TOKEN`), and any code-signing certs remain the maintainer's
-responsibility.
+The whole release is **one pushed tag**. Nothing else is interactive.
+
+```sh
+# 1. Bump the version in THREE files (see the trap below), update CHANGELOG.md,
+#    commit on a branch, open a PR, merge to main.
+# 2. From an up-to-date main:
+git tag v1.5.0 && git push origin v1.5.0
+```
+
+That tag fires [`release.yml`](../.github/workflows/release.yml), which builds,
+tests, `npm publish --provenance`, packs `mail-index.mcpb`, and creates the
+GitHub Release with the bundle attached. Publishing that Release fires
+[`registry-publish.yml`](../.github/workflows/registry-publish.yml), which
+authenticates to the MCP Registry with **GitHub OIDC** (no interactive
+`mcp-publisher login`) and publishes `server.json`. The manual `mcp-publisher`
+flow in Step 2 above is now only a fallback for republishing metadata without a
+release — `workflow_dispatch` does the same thing from the Actions tab.
+
+> [!IMPORTANT]
+> **Four version fields, three files.** `package.json` (1), `manifest.json` (the
+> `.mcpb` manifest, 1), and `server.json` (**2** — the top-level `version` _and_
+> `packages[0].version`, which must equal the npm version). Miss one and the
+> registry advertises a version that does not exist on npm; that is exactly how
+> the registry entry sat at `1.0.0` through v1.4.0. Verify before tagging:
+>
+> ```sh
+> grep -n '"version"' package.json manifest.json server.json
+> ```
+
+The version tag, npm auth (`NPM_TOKEN`), and any code-signing certs remain the
+maintainer's responsibility.
+
+### Post-release verification
+
+```sh
+npm view mail-index version                     # → the new version
+npm audit signatures                            # provenance attestation present
+gh release view v1.5.0                          # .mcpb attached
+curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.alunsoldantarctica/mail-index"
+```
