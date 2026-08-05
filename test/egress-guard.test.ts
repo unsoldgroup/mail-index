@@ -5,13 +5,12 @@
  * NO network calls. The only way the CORE reaches the network is by spawning the
  * provider adapter CLI (e.g. `gws`) — a single, auditable trust boundary.
  *
- * There is exactly ONE other sanctioned network seam, and it lives OUTSIDE the
- * core by design: the launch shim's self-updater (bin/selfupdate.mjs), which
- * checks the npm registry for a newer release and updates the install for the
- * NEXT launch. It is quarantined in bin/ precisely so the core stays provably
- * egress-free. This test enforces both halves: src/ has zero network and spawns
- * only in the allow-listed core seams; bin/ may reach the network only in the
- * updater and spawn only in the updater + the launcher that kicks it off.
+ * There are exactly TWO other sanctioned network seams: the launch shim's
+ * self-updater (bin/selfupdate.mjs), and the MCP server's localhost-only HTTP
+ * listener. Neither performs provider/network egress from the core. This test
+ * enforces both halves: src/ has no outbound primitives and spawns only in the
+ * allow-listed core seams; bin/ may reach the network only in the updater and
+ * spawn only in the updater + the launcher that kicks it off.
  *
  * If this test fails, the privacy claim in README/SECURITY/THREAT-MODEL no
  * longer holds — fix the code, do not relax the guard without updating those.
@@ -45,6 +44,11 @@ const SRC_PROC_ALLOW = new Set([
   'source/adapters/gog/runner.ts', // spawns the gog CLI — the provider boundary
   'mcp/server.ts', // detached re-exec of our own `mail-index sync` (ADR-0005)
   'cli/proc.ts', // onboarding: spawns gog/brew (mail-index setup) — the single auditable seam
+]);
+
+/** Core listener seam: Streamable HTTP MCP endpoint, not outbound egress. */
+const SRC_NETWORK_ALLOW = new Map<string, Set<string>>([
+  ['mcp/server.ts', new Set(['node net/http import'])],
 ]);
 
 /** The ONE bin/ file allowed to reach the network: the self-updater. */
@@ -83,6 +87,7 @@ test('no direct network primitives anywhere in src/ (core is egress-free)', () =
   const hits: string[] = [];
   for (const { rel, code } of srcFiles) {
     for (const { re, what } of NETWORK) {
+      if (SRC_NETWORK_ALLOW.get(rel)?.has(what)) continue;
       if (re.test(code)) hits.push(`${rel} → ${what}`);
     }
   }

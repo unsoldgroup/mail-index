@@ -19,8 +19,43 @@ import { ConfigError, loadConfig, type OperatorConfig } from '../config/index.js
 import { openDb } from '../index/db.js';
 import { Repo } from '../index/repo.js';
 import { buildSource } from '../cli/sync.js';
-import { serve, serveSetup, spawnDetachedSync } from './server.js';
+import { buildServer, buildSetupServer, serve, serveHttp, serveSetup, spawnDetachedSync } from './server.js';
 import type { ToolContext } from './tools.js';
+
+interface Args {
+  http: boolean;
+  host: string;
+  port: number;
+  path: string;
+}
+
+function parseArgs(argv: string[]): Args {
+  const args: Args = { http: false, host: '127.0.0.1', port: 3765, path: '/mcp' };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--http') {
+      args.http = true;
+    } else if (arg === '--host') {
+      const value = argv[++i];
+      if (!value) throw new Error('--host requires a value');
+      args.host = value;
+    } else if (arg === '--port') {
+      const value = argv[++i];
+      if (!value) throw new Error('--port requires a value');
+      args.port = Number(value);
+      if (!Number.isInteger(args.port) || args.port < 1 || args.port > 65535) {
+        throw new Error('--port must be an integer from 1 to 65535');
+      }
+    } else if (arg === '--path') {
+      const value = argv[++i];
+      if (!value) throw new Error('--path requires a value');
+      args.path = value.startsWith('/') ? value : `/${value}`;
+    } else {
+      throw new Error(`unknown argument: ${arg}`);
+    }
+  }
+  return args;
+}
 
 /**
  * Load the operator config, distinguishing "no config yet" (a first-run install
@@ -41,6 +76,7 @@ function loadConfigOrNull(): OperatorConfig | null {
 }
 
 async function main(): Promise<void> {
+  const args = parseArgs(process.argv.slice(2));
   const config = loadConfigOrNull();
 
   // SELF-BOOTSTRAP (ITEM 2): with no config the recall surface has no index to
@@ -52,6 +88,16 @@ async function main(): Promise<void> {
         '(setup_status / setup_instructions). Run `mail-index setup --account <email>`, ' +
         'then restart this server.\n',
     );
+    if (args.http) {
+      await serveHttp({
+        host: args.host,
+        port: args.port,
+        path: args.path,
+        mode: 'setup',
+        build: buildSetupServer,
+      });
+      return;
+    }
     await serveSetup();
     return;
   }
@@ -65,6 +111,18 @@ async function main(): Promise<void> {
     buildSource,
     backgroundSync: spawnDetachedSync,
   };
+
+  if (args.http) {
+    await serveHttp({
+      host: args.host,
+      port: args.port,
+      path: args.path,
+      mode: 'full',
+      build: () => buildServer(ctx),
+      onShutdown: () => db.close(),
+    });
+    return;
+  }
 
   await serve(ctx);
   // serve() resolves once connected; the transport keeps the event loop alive
