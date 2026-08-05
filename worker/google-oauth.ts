@@ -78,7 +78,29 @@ export async function exchangeToken(fetchImpl: typeof fetch, params: Record<stri
 
 const accessCache = new Map<string, { token: string; expiresAt: number }>();
 
+/** A consent that would repoint an existing Account label at a different mailbox. */
+export class AccountMismatchError extends Error {
+  constructor(readonly account: string, readonly existing: string, readonly attempted: string) {
+    super(`Account "${account}" is already connected to ${existing}. Connect ${attempted} under a different account label instead.`);
+    this.name = 'AccountMismatchError';
+  }
+}
+
+/**
+ * Persist a Google grant under an Account label.
+ *
+ * Re-consent for the SAME mailbox is the supported path — it replaces scopes
+ * (this is how `&writes=1` upgrades a read-only grant). Re-consent under the
+ * same label with a DIFFERENT mailbox is refused: the upsert keys on the label,
+ * so it would silently repoint that Account at another mailbox and every later
+ * sync would file the wrong mail under it. Operators hit this by re-running the
+ * consent link without editing `?account=`.
+ */
 export async function saveGrant(driver: D1Driver, input: { account: string; address: string; scopes: string[]; refreshToken: string; key: string }): Promise<void> {
+  const existing = await driver.prepare('SELECT address FROM google_tokens WHERE account=?').get(input.account) as { address: string } | undefined;
+  if (existing && existing.address.toLowerCase() !== input.address.toLowerCase()) {
+    throw new AccountMismatchError(input.account, existing.address, input.address);
+  }
   const encrypted = await encryptRefreshToken(input.refreshToken, input.key);
   const now = new Date().toISOString();
   await driver.prepare(`INSERT INTO google_tokens(account,address,scopes,refresh_token_ciphertext,iv,created_at,updated_at)

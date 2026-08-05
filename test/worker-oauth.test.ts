@@ -113,3 +113,44 @@ test('/setup/login mints an operator session without the MCP authorize flow', as
     assert.equal(grants.results[0].n, 0);
   } finally { await mf.dispose(); }
 });
+
+test('re-consent under a used label with a different mailbox is refused, not silently repointed', async () => {
+  const mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok") } }', d1Databases: ['DB'], kvNamespaces: ['OAUTH_KV'] });
+  const db = await mf.getD1Database('DB');
+  try {
+    const env = {
+      DB: db, OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async () => undefined },
+      TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '3h',
+    };
+    const mailbox = (address: string) => (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('oauth2.googleapis.com/token')) return Response.json({ access_token: 'access', refresh_token: 'refresh', expires_in: 3600 });
+      if (url.endsWith('/profile')) return Response.json({ emailAddress: address });
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+    const session = await signPayload({ email: 'operator@example.com', expiresAt: Date.now() + 60_000 }, key);
+    const connect = async (label: string, address: string) => {
+      const req = (path: string) => new Request(`https://worker.example${path}`, { headers: { cookie: `mail_index_operator=${session}` } });
+      const start = await handlePublicRequest(req(`/setup/google/start?account=${label}`), env, {} as never, { fetchImpl: mailbox(address) });
+      const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+      return handlePublicRequest(req(`/setup/google/callback?code=c&state=${encodeURIComponent(state)}`), env, {} as never, { fetchImpl: mailbox(address) });
+    };
+
+    assert.equal((await connect('work', 'work@example.com')).status, 200);
+
+    // The trap Al hit: same label, different mailbox. Must refuse.
+    const clash = await connect('work', 'personal@example.com');
+    assert.equal(clash.status, 409);
+    assert.match(await clash.text(), /already connected to work@example\.com/);
+
+    // The label still points at the original mailbox, and nothing was duplicated.
+    const rows = await db.prepare('SELECT account, address FROM google_tokens').all();
+    assert.equal(rows.results.length, 1);
+    assert.equal(rows.results[0].address, 'work@example.com');
+
+    // A distinct label for the second mailbox is the supported path.
+    assert.equal((await connect('personal', 'personal@example.com')).status, 200);
+    const both = await db.prepare('SELECT account FROM google_tokens ORDER BY account').all();
+    assert.deepEqual(both.results.map((r) => r.account), ['personal', 'work']);
+  } finally { await mf.dispose(); }
+});
