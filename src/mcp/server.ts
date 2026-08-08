@@ -30,6 +30,7 @@ import {
   listLabeled,
   refreshInbox,
   getMessage,
+  getMessageAttachment,
   getThread,
   listContacts,
   getContact,
@@ -91,10 +92,9 @@ function obj(
 }
 
 /**
- * The full PLAN §12 surface — 23 tools: 21 read-only (recall primitives,
- * curation/categorization write-back, composites incl. list_labeled/
- * refresh_inbox) plus the two OPT-IN mailbox writers archive_message /
- * modify_labels (ADR-0007). Every entry advertises a compact input schema and
+ * The full agent surface: read-only recall/download primitives, local
+ * write-backs, remote administration, and the two OPT-IN mailbox writers
+ * archive_message / modify_labels (ADR-0007). Every entry advertises a compact input schema and
  * dispatches to the pure engine. Descriptions tell the agent the recall-first,
  * token-conscious contract (compact shapes, handbacks for bulk work,
  * `index_as_of` on every response).
@@ -143,6 +143,17 @@ export const TOOLS: ToolDef[] = [
         ref: String(a['ref']),
         ...(a['level'] != null ? { level: a['level'] as 'summary' | 'body' | 'meta' } : {}),
       }),
+  },
+  {
+    name: 'get_message_attachment',
+    description:
+      'List or download attachments for one indexed message. Pass ref only to list filenames, MIME types, sizes, and provider ids. Pass attachment as an exact filename or id to receive the raw file as an embedded MCP resource plus base64 metadata. Read-only; bytes are fetched once and never persisted.',
+    inputSchema: obj({ ref: str, attachment: str }, ['ref']),
+    annotations: { readOnlyHint: true },
+    run: (ctx, a) => getMessageAttachment(ctx, {
+      ref: String(a['ref']),
+      ...optStr(a, 'attachment'),
+    }),
   },
   {
     name: 'get_thread',
@@ -490,6 +501,41 @@ export async function dispatch(
   return tool.run(ctx, args);
 }
 
+/** Convert a pure tool result into MCP content, embedding downloaded bytes as a blob resource. */
+export function toolResultContent(result: unknown): ({ type: 'text'; text: string } | {
+  type: 'resource';
+  resource: { uri: string; mimeType: string; blob: string };
+})[] {
+  if (!result || typeof result !== 'object') {
+    return [{ type: 'text', text: JSON.stringify(result) }];
+  }
+  const record = result as Record<string, unknown>;
+  const attachment = record['attachment'];
+  if (!attachment || typeof attachment !== 'object') {
+    return [{ type: 'text', text: JSON.stringify(result) }];
+  }
+  const file = attachment as Record<string, unknown>;
+  if (file['encoding'] !== 'base64' || typeof file['data'] !== 'string') {
+    return [{ type: 'text', text: JSON.stringify(result) }];
+  }
+  const metadataAttachment = { ...file };
+  delete metadataAttachment['data'];
+  const metadata = { ...record, attachment: metadataAttachment };
+  const ref = encodeURIComponent(String(record['ref'] ?? 'message'));
+  const filename = encodeURIComponent(String(file['filename'] ?? 'attachment'));
+  return [
+    { type: 'text', text: JSON.stringify(metadata) },
+    {
+      type: 'resource',
+      resource: {
+        uri: `mail-index://attachment/${ref}/${filename}`,
+        mimeType: String(file['mimeType'] ?? 'application/octet-stream'),
+        blob: file['data'],
+      },
+    },
+  ];
+}
+
 async function remoteizeHandbacks(ctx: ToolContext, value: unknown, fallbackAccount?: string): Promise<unknown> {
   if (!ctx.enqueueJob) return value;
   if (typeof value === 'string' && value.startsWith('mail-index ')) {
@@ -551,7 +597,9 @@ export function buildServer(ctx: ToolContext): Server {
         'Start with `search` (fuzzy, ranked, snippet-first), `find_person`, or ' +
         '`catch_up`; the snippet rows already carry sender/subject/date, so only call ' +
         '`get_message` for the few rows you actually need the full body of — do not ' +
-        'fetch every result. Local-first and read-only: it never sends or changes ' +
+        'fetch every result. Use `get_message_attachment` to list or download a ' +
+        'receipt, invoice, statement, or other file from one selected message. ' +
+        'Local-first and read-only: it never sends or changes ' +
         'mail. If a response carries `freshness.auth: "needs_reauth"`, the mailbox ' +
         'credential has been rejected and the index is FROZEN — tell the user and ' +
         'give them `freshness.refresh_command`; do not present stale results as ' +
@@ -570,7 +618,7 @@ export function buildServer(ctx: ToolContext): Server {
     try {
       const callArgs = (args ?? {}) as Record<string, unknown>;
       const result = await remoteizeHandbacks(ctx, await dispatch(ctx, name, callArgs), typeof callArgs['account'] === 'string' ? callArgs['account'] : undefined);
-      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      return { content: toolResultContent(result) };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { content: [{ type: 'text', text: message }], isError: true };

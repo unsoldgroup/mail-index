@@ -74,8 +74,11 @@ questions. Prefer:
 - `get_contact` / `list_contacts` / `list_threads` / `graph_neighbors` /
   `graph_communities` — relationship and structure.
 - `get_message(ref, level)` — read one message; pass `level: "body"` to pull the
-  full (distilled) text. This is the **only** call that may fetch from the
-  provider, and only one bounded fetch (ADR-0001).
+  full (distilled) text. It performs at most one bounded provider fetch
+  (ADR-0001).
+- `get_message_attachment(ref, attachment?)` — omit `attachment` to list files;
+  pass an exact filename or provider id to receive the raw file as an embedded
+  MCP blob. Bytes are fetched once and never persisted.
 - Curation + write-back: `interest_propose/set/get`, `save_summary(ref, text)`,
   `domains_to_categorize` / `save_domain_category`.
 

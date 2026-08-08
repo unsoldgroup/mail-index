@@ -20,7 +20,13 @@ function safeFilename(filename: string): string {
   return value || 'attachment.bin';
 }
 
+function decodeBase64(data: string): ArrayBuffer {
+  const bytes = Buffer.from(data, 'base64');
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
 function inlineBytes(attachment: AttachmentMetadata): ArrayBuffer | null {
+  // Inline part data comes straight off the Gmail payload, still base64url.
   if (!attachment.inlineDataBase64) return null;
   const bytes = Buffer.from(attachment.inlineDataBase64, 'base64url');
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
@@ -62,7 +68,12 @@ export async function storeMessageAttachments(input: {
         });
         continue;
       }
-      const bytes = attachment.inline ? inlineBytes(attachment) : input.source.getAttachment ? await input.source.getAttachment(messageId, attachment.attachmentId) : null;
+      // `getAttachment` returns standard base64 (it also feeds the MCP tool,
+      // which must hand bytes to an agent through JSON); R2 wants binary back.
+      const fetched = attachment.inline || !input.source.getAttachment
+        ? null
+        : await input.source.getAttachment(messageId, attachment.attachmentId);
+      const bytes = attachment.inline ? inlineBytes(attachment) : fetched ? decodeBase64(fetched.data) : null;
       if (!bytes) {
         skipped += 1;
         continue;

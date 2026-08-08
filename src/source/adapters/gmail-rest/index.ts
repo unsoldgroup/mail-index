@@ -11,8 +11,11 @@ import { InsufficientScopeError } from '../../index.js';
 import {
   type GmailMessage,
   buildGmailQuery,
-  extractBodies,
   extractAttachments,
+  extractBodies,
+  extractInlineAttachment,
+  normalizeAttachmentBase64,
+  toMessageAttachment,
   parseLabelList,
   toMetadata,
 } from '../gmail-shared.js';
@@ -106,13 +109,38 @@ export class GmailRestAdapter implements MailSource {
     }
   }
 
-  async getAttachment(messageId: string, attachmentId: string): Promise<ArrayBuffer> {
-    const response = await this.#run({
-      path: `messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
-    }) as { data?: string };
-    if (!response.data) throw new Error(`Gmail attachment ${attachmentId} returned no data`);
-    const bytes = Buffer.from(response.data, 'base64url');
-    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  async listAttachments(id: string) {
+    try {
+      const message = (await this.#run({
+        path: `messages/${encodeURIComponent(id)}`,
+        query: { format: 'full' },
+      })) as GmailMessage;
+      return extractAttachments(message.payload).map(toMessageAttachment);
+    } catch (error) {
+      if (error instanceof GmailRestError && error.status === 404) return [];
+      throw error;
+    }
+  }
+
+  async getAttachment(id: string, attachmentId: string) {
+    if (attachmentId.startsWith('inline:')) {
+      const message = (await this.#run({
+        path: `messages/${encodeURIComponent(id)}`,
+        query: { format: 'full' },
+      })) as GmailMessage;
+      return extractInlineAttachment(message.payload, attachmentId);
+    }
+    try {
+      const result = (await this.#run({
+        path: `messages/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`,
+      })) as { data?: string; size?: number };
+      if (!result.data) return null;
+      const data = normalizeAttachmentBase64(result.data);
+      return { data, size: result.size ?? Buffer.from(data, 'base64').byteLength };
+    } catch (error) {
+      if (error instanceof GmailRestError && error.status === 404) return null;
+      throw error;
+    }
   }
 
   async listLabels(): Promise<ProviderLabel[]> {

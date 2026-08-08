@@ -5,7 +5,7 @@ import { GmailRestAdapter } from '../dist/source/adapters/gmail-rest/index.js';
 import { InsufficientScopeError } from '../dist/source/index.js';
 import { runMailSourceContract } from '../dist/source/contract.js';
 import { DEFAULT_FIXTURES } from '../dist/source/fixtures/index.js';
-import { extractAttachments } from '../dist/source/adapters/gmail-shared.js';
+import { extractAttachments, extractInlineAttachment } from '../dist/source/adapters/gmail-shared.js';
 
 function gmailMessage(message: (typeof DEFAULT_FIXTURES.messages)[number]) {
   const encode = (text: string) => Buffer.from(text).toString('base64url');
@@ -56,6 +56,9 @@ function fixtureFetch(options: { readonly?: boolean; calls?: string[] } = {}): t
     if (url.pathname.endsWith('/labels')) {
       return Response.json({ labels: [{ id: 'INBOX', name: 'INBOX', type: 'system' }] });
     }
+    if (url.pathname.endsWith('/attachments/att-pdf')) {
+      return Response.json({ size: 8, data: Buffer.from('%PDFtest').toString('base64url') });
+    }
     const id = decodeURIComponent(url.pathname.split('/').at(-1) ?? '');
     if (init?.method === 'POST') {
       return options.readonly
@@ -91,6 +94,49 @@ test('Gmail REST lists labels and sends bearer auth through its injected fetch s
   assert.ok(calls.some((call) => call.includes('/labels')));
 });
 
+test('Gmail REST lists attachment metadata and downloads base64 bytes', async () => {
+  const calls: string[] = [];
+  const fetchImpl = fixtureFetch({ calls });
+  const original = DEFAULT_FIXTURES.messages[0];
+  const adapter = source((async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith(`/messages/${original.id}`)) {
+      const message = gmailMessage(original);
+      message.payload = {
+        mimeType: 'multipart/mixed',
+        headers: message.payload.headers,
+        parts: [{ filename: 'receipt.pdf', mimeType: 'application/pdf', body: { attachmentId: 'att-pdf', size: 8 } }],
+      };
+      return Response.json(message);
+    }
+    return fetchImpl(input, init);
+  }) as typeof fetch);
+  assert.deepEqual(await adapter.listAttachments(original.id), [
+    { id: 'att-pdf', filename: 'receipt.pdf', mimeType: 'application/pdf', size: 8 },
+  ]);
+  assert.deepEqual(await adapter.getAttachment(original.id, 'att-pdf'), {
+    data: Buffer.from('%PDFtest').toString('base64'),
+    size: 8,
+  });
+  assert.ok(calls.some((call) => call.includes('/attachments/att-pdf')));
+});
+
+test('Gmail REST lists and downloads a named inline MIME attachment', async () => {
+  const original = DEFAULT_FIXTURES.messages[0];
+  const adapter = source((async () => Response.json({
+    ...gmailMessage(original),
+    payload: { mimeType: 'multipart/mixed', parts: [
+      { filename: 'small.txt', mimeType: 'text/plain', body: { size: 5, data: Buffer.from('hello').toString('base64url') } },
+    ] },
+  })) as typeof fetch);
+  assert.deepEqual(await adapter.listAttachments(original.id), [
+    { id: 'inline:0', filename: 'small.txt', mimeType: 'text/plain', size: 5 },
+  ]);
+  assert.deepEqual(await adapter.getAttachment(original.id, 'inline:0'), {
+    data: Buffer.from('hello').toString('base64'), size: 5,
+  });
+});
+
 test('Gmail REST readonly grant surfaces InsufficientScopeError on modify', async () => {
   await assert.rejects(
     source(fixtureFetch({ readonly: true })).modify('fixt-direct-1', {
@@ -112,6 +158,22 @@ test('extractAttachments preserves provider ids and inline metadata', () => {
   ] });
   assert.deepEqual(attachments, [
     { attachmentId: 'att-1', filename: 'quote.pdf', mimeType: 'application/pdf', sizeBytes: 42, inline: false },
-    { attachmentId: 'inline:2', filename: 'logo.png', mimeType: 'image/png', sizeBytes: 2, inline: true, inlineDataBase64: 'aGk=' },
+    // Inline ids encode the part's PATH through the MIME tree (second child of
+    // the root = "1"), not its provider partId — that is what
+    // extractInlineAttachment walks back to find the bytes again.
+    { attachmentId: 'inline:1', filename: 'logo.png', mimeType: 'image/png', sizeBytes: 2, inline: true, inlineDataBase64: 'aGk=' },
   ]);
+});
+
+test('an inline attachment id round-trips back to its bytes', () => {
+  // The listing and the fetch must agree, or an id the agent was offered
+  // resolves to nothing. This is the invariant that one shared extractor buys.
+  const payload = { mimeType: 'multipart/mixed', parts: [
+    { partId: '1', filename: 'quote.pdf', mimeType: 'application/pdf', body: { attachmentId: 'att-1', size: 42 } },
+    { partId: '2', filename: 'logo.png', mimeType: 'image/png', body: { data: 'aGk=', size: 2 } },
+  ] };
+  const inline = extractAttachments(payload).find((a) => a.inline)!;
+  const resolved = extractInlineAttachment(payload, inline.attachmentId);
+  assert.equal(resolved?.data, 'aGk=');
+  assert.equal(resolved?.size, 2);
 });

@@ -44,6 +44,43 @@ test('GwsAdapter decodes a base64url plain-text body via getFull', async () => {
   assert.equal(full.mimeType, 'text/plain');
 });
 
+test('GwsAdapter lists attachment metadata and downloads base64 bytes', async () => {
+  const calls = [];
+  const adapter = new GwsAdapter({
+    configDir: '/tmp/x',
+    runner: async (args) => {
+      calls.push(args);
+      if (args[3] === 'get' && args[2] === 'messages') {
+        return {
+          id: 'msg-1',
+          payload: {
+            mimeType: 'multipart/mixed',
+            parts: [{ filename: 'scope.pdf', mimeType: 'application/pdf', body: { attachmentId: 'att-1', size: 8 } }],
+          },
+        };
+      }
+      return { size: 8, data: Buffer.from('%PDFtest').toString('base64url') };
+    },
+  });
+  assert.deepEqual(await adapter.listAttachments('msg-1'), [
+    { id: 'att-1', filename: 'scope.pdf', mimeType: 'application/pdf', size: 8 },
+  ]);
+  assert.deepEqual(await adapter.getAttachment('msg-1', 'att-1'), {
+    data: Buffer.from('%PDFtest').toString('base64'),
+    size: 8,
+  });
+  assert.deepEqual(calls[1].slice(0, 5), ['gmail', 'users', 'messages', 'attachments', 'get']);
+});
+
+test('GwsAdapter preserves provider failures during attachment access', async () => {
+  const adapter = new GwsAdapter({
+    configDir: '/tmp/x',
+    runner: async () => { throw new Error('expired OAuth grant'); },
+  });
+  await assert.rejects(() => adapter.listAttachments('msg-1'), /expired OAuth grant/);
+  await assert.rejects(() => adapter.getAttachment('msg-1', 'att-1'), /expired OAuth grant/);
+});
+
 test('GwsAdapter extracts a nested text/html part from a multipart payload', async () => {
   const full = await makeAdapter().getFull('fixt-list-1');
   assert.ok(full);

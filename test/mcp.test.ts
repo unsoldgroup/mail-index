@@ -35,6 +35,7 @@ import {
   listLabeled,
   refreshInbox,
   getMessage,
+  getMessageAttachment,
   getThread,
   listContacts,
   getContact,
@@ -61,8 +62,8 @@ import {
   settingsSet,
 } from '../dist/mcp/tools.js';
 import { windowCutoff } from '../dist/index/settings.js';
-import { TOOLS, toolList, dispatch } from '../dist/mcp/server.js';
-import { InsufficientScopeError } from '../dist/source/index.js';
+import { TOOLS, toolList, dispatch, toolResultContent } from '../dist/mcp/server.js';
+import { InsufficientScopeError, MAX_ATTACHMENT_BYTES } from '../dist/source/index.js';
 import {
   setupToolList,
   dispatchSetup,
@@ -769,7 +770,7 @@ test('retention evicts only what aged out, and never what the user is attached t
 
 test('surface: exactly the PLAN §12 tools are advertised, all with schemas, all dispatch', async () => {
   const expected = [
-    'search', 'list_labeled', 'refresh_inbox', 'get_message', 'get_thread', 'list_contacts',
+    'search', 'list_labeled', 'refresh_inbox', 'get_message', 'get_message_attachment', 'get_thread', 'list_contacts',
     'get_contact', 'find_person', 'list_threads', 'graph_neighbors', 'graph_communities',
     'interest_propose', 'interest_set', 'interest_get', 'save_summary',
     'onboarding', 'settings_get', 'settings_set', 'backfill_bodies',
@@ -801,6 +802,72 @@ test('surface: exactly the PLAN §12 tools are advertised, all with schemas, all
   await assert.rejects(async () => await dispatch(ctxFor(repo), 'no_such_tool', {}));
 });
 
+test('get_message_attachment lists metadata then downloads one bounded attachment', async () => {
+  const repo = await freshRepo();
+  await seed(repo, { id: 'receipt', subject: 'Receipt', bodyState: 'meta' });
+  await recordSync(repo, NOW.toISOString());
+  const calls = [];
+  const source = {
+    provider: 'fake',
+    check: async () => ({ ok: true, address: ME }),
+    async *listIds() {},
+    async getMetadata() { return []; },
+    async getFull() { return null; },
+    async listAttachments(id) {
+      calls.push(['list', id]);
+      return [{ id: 'att-pdf', filename: 'receipt.pdf', mimeType: 'application/pdf', size: 8 }];
+    },
+    async getAttachment(messageId, attachmentId) {
+      calls.push(['get', messageId, attachmentId]);
+      return { data: Buffer.from('%PDFtest').toString('base64'), size: 8 };
+    },
+  };
+  const ctx = ctxFor(repo, { buildSource: () => source });
+
+  const listed = await getMessageAttachment(ctx, { ref: `${ACCOUNT}:receipt` });
+  assert.deepEqual(listed.attachments, [
+    { id: 'att-pdf', filename: 'receipt.pdf', mimeType: 'application/pdf', size: 8 },
+  ]);
+  assert.equal(listed.attachment, null);
+
+  const downloaded = await getMessageAttachment(ctx, {
+    ref: `${ACCOUNT}:receipt`,
+    attachment: 'receipt.pdf',
+  });
+  assert.equal(downloaded.attachment?.filename, 'receipt.pdf');
+  assert.equal(downloaded.attachment?.mimeType, 'application/pdf');
+  assert.equal(downloaded.attachment?.encoding, 'base64');
+  assert.equal(Buffer.from(downloaded.attachment?.data ?? '', 'base64').toString(), '%PDFtest');
+  const content = toolResultContent(downloaded);
+  assert.equal(content[0].type, 'text');
+  assert.ok(!content[0].text.includes(downloaded.attachment?.data ?? 'missing'));
+  assert.equal(content[1].type, 'resource');
+  assert.equal(content[1].resource.mimeType, 'application/pdf');
+  assert.equal(Buffer.from(content[1].resource.blob, 'base64').toString(), '%PDFtest');
+  assert.deepEqual(calls, [
+    ['list', 'receipt'],
+    ['list', 'receipt'],
+    ['get', 'receipt', 'att-pdf'],
+  ]);
+});
+
+test('get_message_attachment rejects oversized files before fetching bytes', async () => {
+  const repo = await freshRepo();
+  await seed(repo, { id: 'large', subject: 'Large file', bodyState: 'meta' });
+  let fetched = false;
+  const ctx = ctxFor(repo, { buildSource: () => ({
+    provider: 'fake', check: async () => ({ ok: true, address: ME }),
+    async *listIds() {}, async getMetadata() { return []; }, async getFull() { return null; },
+    async listAttachments() { return [{ id: 'large-1', filename: 'large.zip', mimeType: 'application/zip', size: MAX_ATTACHMENT_BYTES + 1 }]; },
+    async getAttachment() { fetched = true; return null; },
+  }) });
+  await assert.rejects(
+    () => getMessageAttachment(ctx, { ref: `${ACCOUNT}:large`, attachment: 'large.zip' }),
+    /maximum inline download/,
+  );
+  assert.equal(fetched, false);
+});
+
 test('dispatch through buildServer-shaped CallTool returns an isError result on a bad ref', async () => {
   const repo = await freshRepo();
   await seedMailbox(repo);
@@ -829,8 +896,8 @@ test('setup mode: with config present the full tool surface is what serve() woul
   // 21 original read tools + the 2 opt-in writers (archive_message,
   // modify_labels) + 2 relay/status quick-action tools + five remote Trigger
   // rule tools + the four working-set tools (onboarding, settings_get,
-  // settings_set, backfill_bodies).
-  assert.equal(TOOLS.length, 34, 'full surface includes the working-set tools');
+  // settings_set, backfill_bodies) + get_message_attachment.
+  assert.equal(TOOLS.length, 35, 'full surface includes the working-set and attachment tools');
 });
 
 test('setup_status reports observation and does not crash with no config', async () => {

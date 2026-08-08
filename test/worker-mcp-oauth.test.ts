@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Miniflare } from 'miniflare';
 import { handleAuthorizedRequest, handlePublicRequest } from '../dist-worker/worker/index.js';
+import { D1Driver } from '../dist/index/drivers/d1.js';
+import { Repo } from '../dist/index/repo.js';
+import { runMigrations } from '../dist/index/migrations.js';
+import { GMAIL_READONLY, saveGrant } from '../dist-worker/worker/google-oauth.js';
 
 const key = Buffer.alloc(32, 6).toString('base64');
 
@@ -81,5 +85,36 @@ test('MCP is stateless: tools/list succeeds without any shared in-memory session
     // A stale session id from a previous isolate must not break the call either.
     const stale = await rpc({ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }, { 'mcp-session-id': 'session-from-a-dead-isolate' });
     assert.equal(stale.status, 200);
+  } finally { await mf.dispose(); }
+});
+
+test('Worker HTTP MCP advertises and returns attachment bytes as an embedded resource', async () => {
+  const { mf, env } = await fixture();
+  const driver = new D1Driver(env.DB); await runMigrations(driver); const repo = new Repo(driver);
+  await saveGrant(driver, { account: 'personal', address: 'user@example.com', scopes: [GMAIL_READONLY], refreshToken: 'refresh', key });
+  await repo.upsertMessage({ account: 'personal', gmailMessageId: 'm1', labels: ['INBOX'], bodyState: 'meta' });
+  const fakeFetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('oauth2.googleapis.com/token')) return Response.json({ access_token: 'access', expires_in: 3600 });
+    if (url.includes('/attachments/a1')) return Response.json({ size: 8, data: Buffer.from('%PDFtest').toString('base64url') });
+    return Response.json({ id: 'm1', payload: { mimeType: 'multipart/mixed', parts: [
+      { filename: 'scope.pdf', mimeType: 'application/pdf', body: { attachmentId: 'a1', size: 8 } },
+    ] } });
+  }) as typeof fetch;
+  const rpc = (body: object) => handleAuthorizedRequest(new Request('https://worker.example/mcp', {
+    method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify(body),
+  }), env, { fetchImpl: fakeFetch });
+  try {
+    const list = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+    const listed = await list.json() as { result: { tools: { name: string }[] } };
+    assert.ok(listed.result.tools.some((tool) => tool.name === 'get_message_attachment'));
+    const call = await rpc({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: {
+      name: 'get_message_attachment', arguments: { ref: 'personal:m1', attachment: 'scope.pdf' },
+    } });
+    const body = await call.json() as { result: { content: ({ type: string; resource?: { mimeType: string; blob: string } })[] } };
+    const resource = body.result.content.find((item) => item.type === 'resource')?.resource;
+    assert.equal(resource?.mimeType, 'application/pdf');
+    assert.equal(Buffer.from(resource?.blob ?? '', 'base64').toString(), '%PDFtest');
   } finally { await mf.dispose(); }
 });

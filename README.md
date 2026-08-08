@@ -34,7 +34,7 @@ re-auth; never send or delete). See [ADR-0007](docs/adr/0007-opt-in-mailbox-writ
 </p>
 
 > **Status: v1.5 — published.** Progressive sync, the correspondence graph, the
-> interest engine, curation, the full 23-tool MCP surface, and the write-back
+> interest engine, curation, the full MCP surface, and the write-back
 > loops are built and tested — and `mail-index` is live on
 > **[npm](https://www.npmjs.com/package/mail-index)** with a
 > **[`.mcpb` bundle](https://github.com/unsoldgroup/mail-index/releases/latest)**.
