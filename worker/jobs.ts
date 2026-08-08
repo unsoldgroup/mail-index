@@ -7,6 +7,7 @@ import { enrich } from '../src/ingest/enrich.js';
 import { buildGraph } from '../src/graph/index.js';
 import { GmailRestAdapter } from '../src/source/adapters/gmail-rest/index.js';
 import { accessTokenProvider } from './google-oauth.js';
+import { markQueueEnqueueFailed } from './job-state.js';
 import type { Env } from './index.js';
 import { deliverWebhook, evaluateRules, type DeliveryParams } from './triggers.js';
 import { CrmChangeFeed, publishMessageChanges } from './crm-feed.js';
@@ -30,16 +31,24 @@ function configuredLookbackSince(env: Pick<Env, 'SYNC_LOOKBACK_MONTHS'>): string
   return lookbackSince(months);
 }
 
+const JOB_STALE_AFTER_MS = 6 * 60 * 60_000;
+
 export async function enqueueJob(env: Env, kind: JobKind, account: string, params: Record<string, unknown> = {}): Promise<string> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
+  const now = new Date(); const nowIso = now.toISOString();
+  const staleBefore = new Date(now.getTime() - JOB_STALE_AFTER_MS).toISOString();
+  await driver.prepare(`UPDATE jobs SET status='failed',terminal=1,error=?,finished_at=?
+    WHERE kind=? AND account=? AND status IN ('queued','running')
+      AND COALESCE(started_at,created_at) < ?`)
+    .run('stale Job lock expired after 6 hours', nowIso, kind, account, staleBefore);
   const existing = await driver.prepare(`SELECT id FROM jobs WHERE kind=? AND account=? AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1`).get(kind, account) as { id: string } | undefined;
   if (existing) return existing.id;
   const id = crypto.randomUUID();
   await driver.prepare(`INSERT INTO jobs(id,kind,account,params_json,status,progress_json,created_at) VALUES(?,?,?,?,?,?,?)`)
-    .run(id, kind, account, JSON.stringify(params), 'queued', '{}', new Date().toISOString());
+    .run(id, kind, account, JSON.stringify(params), 'queued', '{}', nowIso);
   try { await env.SYNC_QUEUE.send({ jobId: id, kind, account, params }); }
   catch (error) {
-    await driver.prepare(`UPDATE jobs SET status='failed',error=?,finished_at=? WHERE id=?`).run('queue enqueue failed', new Date().toISOString(), id);
+    await markQueueEnqueueFailed(driver, id);
     throw error;
   }
   return id;
@@ -63,58 +72,64 @@ export async function enqueueScheduledSyncs(env: Env): Promise<string[]> {
 export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fetch = fetch): Promise<void> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
   const repo = new Repo(driver);
-  const row = await driver.prepare('SELECT status FROM jobs WHERE id=?').get(message.jobId) as { status: string } | undefined;
+  const row = await driver.prepare('SELECT status,kind,account,params_json,terminal FROM jobs WHERE id=?').get(message.jobId) as { status: string; kind: JobKind; account: string; params_json: string; terminal: number } | undefined;
   if (!row) throw new Error(`Unknown Job ${message.jobId}`);
-  if (row.status === 'done') return;
+  if (row.status === 'done' || row.terminal === 1) return;
+  const job: JobMessage = { jobId: message.jobId, kind: row.kind, account: row.account, params: JSON.parse(row.params_json) as Record<string, unknown> };
   const update = async (status: string, progress: object, error?: string) => {
     const now = new Date().toISOString();
     await driver.prepare(`UPDATE jobs SET status=?,progress_json=?,error=?,started_at=COALESCE(started_at,?),finished_at=? WHERE id=?`)
       .run(status, JSON.stringify(progress), error ?? null, now, status === 'done' || status === 'failed' ? now : null, message.jobId);
   };
-  const source = new GmailRestAdapter({ fetchImpl, tokenProvider: accessTokenProvider(driver, message.account, env, fetchImpl) });
+  const source = new GmailRestAdapter({ fetchImpl, tokenProvider: accessTokenProvider(driver, job.account, env, fetchImpl) });
   const progress: Record<string, unknown> = {};
-  console.log(JSON.stringify({ event: 'job_start', job_id: message.jobId, kind: message.kind }));
+  console.log(JSON.stringify({ event: 'job_start', job_id: job.jobId, kind: job.kind }));
   await update('running', progress);
   try {
-    if (message.kind === 'webhook_delivery') {
-      await deliverWebhook(driver, message.params as unknown as DeliveryParams, fetchImpl);
-      progress['delivery'] = { delivered: true, delivery_id: message.params['deliveryId'] };
-    } else if (message.kind === 'sync' || message.kind === 'backfill') {
-      const sync = await syncMetadata({ account: message.account, source, repo, scope: typeof message.params['since'] === 'string' ? { since: message.params['since'] } : undefined });
+    if (job.kind === 'webhook_delivery') {
+      await deliverWebhook(driver, job.params as unknown as DeliveryParams, fetchImpl);
+      progress['delivery'] = { delivered: true, delivery_id: job.params['deliveryId'] };
+    } else if (job.kind === 'sync' || job.kind === 'backfill') {
+      const sync = await syncMetadata({
+        account: job.account,
+        source,
+        repo,
+        scope: typeof job.params['since'] === 'string' ? { since: job.params['since'] } : undefined,
+      });
       progress['sync'] = { fetched: sync.fetched, indexed: sync.indexed }; await update('running', progress);
-      progress['triggers'] = { deliveries: await evaluateRules(env, driver, repo, message.account, sync.messageIds) }; await update('running', progress);
-      const enriched = await enrich({ account: message.account, source, repo, selector: { rule: 'direct' } });
+      progress['triggers'] = { deliveries: await evaluateRules(env, driver, repo, job.account, sync.messageIds) }; await update('running', progress);
+      const enriched = await enrich({ account: job.account, source, repo, selector: { rule: 'direct' } });
       progress['enrich'] = { fetched: enriched.fetched, enriched: enriched.enriched }; await update('running', progress);
       let terminalCursor = await publishMessageChanges(
         new CrmChangeFeed(driver),
         repo,
-        message.account,
+        job.account,
         sync.messageIds,
-        message.jobId,
+        job.jobId,
       );
-      const attachments = await storeMessageAttachments({ source, feed: new CrmChangeFeed(driver), bucket: env.ATTACHMENTS, account: message.account, messageIds: sync.messageIds, jobId: message.jobId });
+      const attachments = await storeMessageAttachments({ source, feed: new CrmChangeFeed(driver), bucket: env.ATTACHMENTS, account: job.account, messageIds: sync.messageIds, jobId: job.jobId });
       terminalCursor = attachments.lastCursor ?? terminalCursor;
       progress['crm'] = { published: sync.messageIds.length, attachments, terminal_cursor: terminalCursor ?? null };
       await update('running', progress);
       await notifyCrmCompletion({
         url: env.CRM_WEBHOOK_URL,
         secret: env.CRM_WEBHOOK_SECRET,
-        payload: { account: message.account, terminalCursor: terminalCursor ?? null, jobId: message.jobId },
+        payload: { account: job.account, terminalCursor: terminalCursor ?? null, jobId: job.jobId },
         fetchImpl,
       });
-      const graphRun = await repo.startSyncRun({ account: message.account, phase: 'graph', selector: null });
-      const graph = await buildGraph(repo, message.account);
+      const graphRun = await repo.startSyncRun({ account: job.account, phase: 'graph', selector: null });
+      const graph = await buildGraph(repo, job.account);
       await repo.finishSyncRun(graphRun, { fetched: 0, indexed: graph.nodes });
       progress['graph'] = graph; await update('running', progress);
     } else {
-      const enriched = await enrich({ account: message.account, source, repo, selector: { profile: true, ...(message.params['limit'] ? { limit: Number(message.params['limit']) } : {}) } });
+      const enriched = await enrich({ account: job.account, source, repo, selector: { profile: true, ...(job.params['limit'] ? { limit: Number(job.params['limit']) } : {}) } });
       progress['enrich'] = { fetched: enriched.fetched, enriched: enriched.enriched };
     }
     await update('done', progress);
-    console.log(JSON.stringify({ event: 'job_finish', job_id: message.jobId, kind: message.kind, counts: logCounts(progress) }));
+    console.log(JSON.stringify({ event: 'job_finish', job_id: job.jobId, kind: job.kind, counts: logCounts(progress) }));
   } catch (error) {
     await update('failed', progress, error instanceof Error ? error.message : String(error));
-    console.log(JSON.stringify({ event: 'job_fail', job_id: message.jobId, kind: message.kind, error_name: error instanceof Error ? error.name : 'Error' }));
+    console.log(JSON.stringify({ event: 'job_fail', job_id: job.jobId, kind: job.kind, error_name: error instanceof Error ? error.name : 'Error' }));
     throw error;
   }
 }
@@ -135,7 +150,7 @@ function logCounts(progress: Record<string, unknown>): Record<string, number> {
 export async function jobStatus(env: Env, account?: string) {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
   const where = account ? 'WHERE account=?' : '';
-  const recent = await driver.prepare(`SELECT id,kind,account,status,progress_json,error,created_at,started_at,finished_at FROM jobs ${where} ORDER BY created_at DESC LIMIT 20`).all(...(account ? [account] : [])) as Record<string, unknown>[];
+  const recent = await driver.prepare(`SELECT id,kind,account,status,terminal,progress_json,error,created_at,started_at,finished_at FROM jobs ${where} ORDER BY created_at DESC LIMIT 20`).all(...(account ? [account] : [])) as Record<string, unknown>[];
   const depth = await driver.prepare(`SELECT count(*) AS n FROM jobs WHERE status IN ('queued','running')${account ? ' AND account=?' : ''}`).get(...(account ? [account] : [])) as { n: number };
   const normalized: Record<string, unknown>[] = recent.map((row) => ({ ...row, progress: JSON.parse(String(row['progress_json'])), progress_json: undefined }));
   const lastCron = await driver.prepare(`SELECT created_at FROM jobs WHERE kind='sync'${account ? ' AND account=?' : ''} ORDER BY created_at DESC LIMIT 1`).get(...(account ? [account] : [])) as { created_at: string } | undefined;

@@ -5,9 +5,9 @@ import { D1Driver } from '../dist/index/drivers/d1.js';
 import { Repo } from '../dist/index/repo.js';
 import { runMigrations } from '../dist/index/migrations.js';
 import { saveGrant } from '../dist-worker/worker/google-oauth.js';
-import { enqueueScheduledSyncs, jobStatus, runJob } from '../dist-worker/worker/jobs.js';
+import { enqueueJob, enqueueScheduledSyncs, jobStatus, runJob } from '../dist-worker/worker/jobs.js';
 import worker from '../dist-worker/worker/index.js';
-import { triggerAdmin } from '../dist-worker/worker/triggers.js';
+import { evaluateRules, triggerAdmin } from '../dist-worker/worker/triggers.js';
 
 const key = Buffer.alloc(32, 4).toString('base64');
 
@@ -58,7 +58,7 @@ test('a Queue send failure is marked failed and never strands Job deduplication'
   } finally { await mf.dispose(); }
 });
 
-test('Job consumer runs sync→Enrichment→graph, is duplicate-safe, and reports progress', async () => {
+test('scheduled sync Job runs the full sync, enrichment, and graph pipeline', async () => {
   const { mf, env, driver, sent } = await fixture();
   try {
     await enqueueScheduledSyncs(env);
@@ -70,7 +70,67 @@ test('Job consumer runs sync→Enrichment→graph, is duplicate-safe, and report
     assert.equal(first.n, 1); assert.equal(second.n, 1);
     const status = await jobStatus(env, 'acct-a');
     assert.equal(status.queue_depth, 0); assert.equal(status.recent[0]?.status, 'done');
-    assert.ok((status.recent[0]?.progress as Record<string, unknown>)['graph']);
+    const progress = status.recent[0]?.progress as Record<string, unknown>;
+    assert.ok(progress['enrich']);
+    assert.ok(progress['graph']);
+    const runs = await driver.prepare('SELECT phase FROM sync_runs ORDER BY id').all() as { phase: string }[];
+    assert.deepEqual(runs.map((r) => r.phase), ['sync', 'enrich', 'graph']);
+  } finally { await mf.dispose(); }
+});
+
+test('a stale Job is failed and replaced without crossing Account or kind boundaries', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    const old = new Date(Date.now() - 7 * 3_600_000).toISOString();
+    const insert = `INSERT INTO jobs(id,kind,account,params_json,status,progress_json,created_at,started_at)
+      VALUES(?,?,?,?,?,?,?,?)`;
+    await driver.prepare(insert).run('stale-a-running', 'sync', 'acct-a', '{}', 'running', '{}', old, old);
+    await driver.prepare(insert).run('stale-a-queued', 'sync', 'acct-a', '{}', 'queued', '{}', old, null);
+    await driver.prepare(insert).run('stale-b', 'sync', 'acct-b', '{}', 'running', '{}', old, old);
+    await driver.prepare(insert).run('stale-other-kind', 'backfill', 'acct-a', '{}', 'running', '{}', old, old);
+
+    const replacement = await enqueueJob(env, 'sync', 'acct-a');
+    assert.notEqual(replacement, 'stale-a-running');
+    assert.equal(sent.length, 1);
+    const rows = await driver.prepare('SELECT id,status,error,terminal FROM jobs ORDER BY id').all() as { id: string; status: string; error: string | null; terminal: number }[];
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    assert.equal(byId.get('stale-a-running')?.status, 'failed');
+    assert.match(byId.get('stale-a-running')?.error ?? '', /stale Job lock expired/);
+    assert.equal(byId.get('stale-a-running')?.terminal, 1);
+    assert.equal(byId.get('stale-a-queued')?.status, 'failed', 'orphaned queued Job is expired too');
+    assert.equal(byId.get('stale-b')?.status, 'running', 'other Account is untouched');
+    assert.equal(byId.get('stale-other-kind')?.status, 'running', 'other Job kind is untouched');
+    assert.equal(byId.get(replacement)?.status, 'queued');
+
+    await runJob(env, { jobId: 'stale-a-running', kind: 'sync', account: 'acct-a', params: {} }, gmailFetch);
+    assert.equal((await driver.prepare('SELECT count(*) n FROM messages').get() as { n: number }).n, 0, 'expired queue message stays terminal');
+  } finally { await mf.dispose(); }
+});
+
+test('a mismatched queue envelope executes the persisted Account, kind, and params', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    await enqueueJob(env, 'sync', 'acct-a', { since: '2026-08-01T00:00:00.000Z' });
+    const queued = sent[0] as { jobId: string; kind: 'sync'; account: string; params: Record<string, unknown> };
+    await runJob(env, { ...queued, kind: 'backfill', account: 'acct-b', params: { since: '1999-01-01T00:00:00.000Z' } }, gmailFetch);
+    const row = await driver.prepare('SELECT status,error FROM jobs WHERE id=?').get(queued.jobId) as { status: string; error: string | null };
+    assert.equal(row.status, 'done');
+    assert.equal(row.error, null);
+    const run = await driver.prepare(`SELECT account,selector FROM sync_runs WHERE phase='sync'`).get() as { account: string; selector: string };
+    assert.equal(run.account, 'acct-a');
+    assert.equal(run.selector, 'since=2026-08-01T00:00:00.000Z');
+  } finally { await mf.dispose(); }
+});
+
+test('explicit backfill Job retains the full enrichment and graph pipeline', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    await enqueueJob(env, 'backfill', 'acct-a');
+    await runJob(env, sent[0] as never, gmailFetch);
+    const status = await jobStatus(env, 'acct-a');
+    const progress = status.recent[0]?.progress as Record<string, unknown>;
+    assert.ok(progress['enrich']);
+    assert.ok(progress['graph']);
     const runs = await driver.prepare('SELECT phase FROM sync_runs ORDER BY id').all() as { phase: string }[];
     assert.deepEqual(runs.map((r) => r.phase), ['sync', 'enrich', 'graph']);
     const changes = await driver.prepare(
@@ -120,6 +180,23 @@ test('structured Job logs expose ids and counts but no Message content', async (
     const text = lines.join('\n'); assert.match(text, /job_start/); assert.match(text, /job_finish/); assert.match(text, /indexed/);
     assert.doesNotMatch(text, /Hello|person@example\.com|Hello body|snippet|subject|address/i);
   } finally { console.log = original; await mf.dispose(); }
+});
+
+test('a webhook Queue send failure records a terminal Job', async () => {
+  const { mf, env, driver } = await fixture();
+  try {
+    const repo = new Repo(driver);
+    await repo.upsertMessage({ account: 'acct-a', gmailMessageId: 'm1', category: 'primary', subject: 'Trigger me' });
+    const admin = triggerAdmin(driver);
+    const consumer = await admin.registerConsumer({ url: 'https://consumer.example/hook', secret: 'shared-secret' }) as { id: string };
+    await admin.saveRule({ name: 'Primary mail', predicate: { conditions: [{ type: 'category', value: 'primary' }] }, consumer_ids: [consumer.id] });
+    env.SYNC_QUEUE.send = async () => { throw new Error('queue unavailable'); };
+    await assert.rejects(() => evaluateRules(env, driver, repo, 'acct-a', ['m1']), /queue unavailable/);
+    const row = await driver.prepare(`SELECT status,terminal,error FROM jobs WHERE kind='webhook_delivery'`).get() as { status: string; terminal: number; error: string };
+    assert.equal(row.status, 'failed');
+    assert.equal(row.terminal, 1);
+    assert.equal(row.error, 'queue enqueue failed');
+  } finally { await mf.dispose(); }
 });
 
 test('sync Job evaluates Trigger rules and signed webhook retries until 2xx', async () => {

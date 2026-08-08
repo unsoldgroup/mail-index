@@ -9,6 +9,27 @@ import { runMigrations } from '../dist/index/migrations.js';
 
 const key = Buffer.alloc(32, 7).toString('base64');
 
+test('personal, fora, and unsold-group labels retain independent verified mailbox identities', async () => {
+  const mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok") } }', d1Databases: ['DB'] });
+  try {
+    const driver = new D1Driver(await mf.getD1Database('DB')); await runMigrations(driver);
+    const bindings = [
+      ['personal', 'personal@example.test'],
+      ['fora', 'fora@example.test'],
+      ['unsold-group', 'unsold@example.test'],
+    ] as const;
+    for (const [account, address] of bindings) {
+      await saveGrant(driver, { account, address, scopes: ['readonly'], refreshToken: `token-${account}`, key });
+    }
+    const rows = await driver.prepare('SELECT account,address FROM google_tokens ORDER BY account').all();
+    assert.deepEqual(rows, [
+      { account: 'fora', address: 'fora@example.test' },
+      { account: 'personal', address: 'personal@example.test' },
+      { account: 'unsold-group', address: 'unsold@example.test' },
+    ]);
+  } finally { await mf.dispose(); }
+});
+
 test('Google connect encrypts independent Accounts and write re-consent replaces scopes', async () => {
   const mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok") } }', d1Databases: ['DB'], kvNamespaces: ['OAUTH_KV'] });
   const db = await mf.getD1Database('DB');

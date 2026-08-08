@@ -204,12 +204,16 @@ test('FTS reflects body text after enrichment to full', async () => {
   assert.equal((await repo.searchMessages('deposit')).length, 1, 'body now searchable');
 });
 
-test('FTS search can be scoped by account', async () => {
+test('personal, fora, and unsold-group searches stay isolated with overlapping content', async () => {
   const repo = await freshRepo();
-  await repo.upsertMessage({ account: 'a', gmailMessageId: 'm1', subject: 'shared topic' });
-  await repo.upsertMessage({ account: 'b', gmailMessageId: 'm2', subject: 'shared topic' });
-  assert.equal((await repo.searchMessages('shared')).length, 2);
-  assert.equal((await repo.searchMessages('shared', { account: 'a' })).length, 1);
+  for (const account of ['personal', 'fora', 'unsold-group']) {
+    await repo.upsertMessage({ account, gmailMessageId: `message-${account}`, subject: 'shared expedition topic' });
+  }
+  assert.equal((await repo.searchMessages('shared')).length, 3);
+  for (const account of ['personal', 'fora', 'unsold-group']) {
+    const hits = await repo.searchMessages('shared', { account });
+    assert.deepEqual(hits.map((hit) => hit.account), [account]);
+  }
 });
 
 test('sync_runs start/finish audit row', async () => {

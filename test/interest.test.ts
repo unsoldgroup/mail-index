@@ -258,3 +258,26 @@ test('contactScoringRows computes bulk_count from received bulk mail', async () 
   const jordan = rows.find((r) => r.address === 'jordan@partner.example.com');
   assert.equal(jordan.bulk_count, 0, 'a real correspondent has no bulk received mail');
 });
+
+test('contactScoringRows treats sender addresses as literals, not LIKE patterns', async () => {
+  const repo = await freshRepo();
+  const address = `${'a'.repeat(50_001)}%_@example.com`;
+  await repo.driver.prepare(
+    `INSERT INTO contacts (account, address, msgs_received)
+     VALUES (?, ?, 1)`,
+  ).run(ACCOUNT, address);
+  await seed(repo, {
+    id: 'large-pattern-sender',
+    threadId: 'large-pattern-thread',
+    internalDate: NOW,
+    from: `Large Pattern <${address}>`,
+    to: `Al <${ME}>`,
+    subject: 'Large sender',
+    direction: 'received',
+    isList: true,
+    category: 'promotions',
+  });
+
+  const rows = await repo.contactScoringRows(ACCOUNT);
+  assert.equal(rows[0]?.bulk_count, 1);
+});

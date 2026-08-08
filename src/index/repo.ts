@@ -2110,7 +2110,7 @@ export class Repo {
                    AND (m.is_list = 1 OR m.category IN ('promotions','social'))
                    AND (
                      m.from_addr = c.address
-                     OR lower(m.from_addr) LIKE '%<' || lower(c.address) || '>%'
+                     OR instr(lower(m.from_addr), '<' || lower(c.address) || '>') > 0
                    )
               ) AS bulk_count
          FROM contacts c
