@@ -76,6 +76,8 @@ export interface SourceIdentity {
 export interface MessageMetadata {
   /** Provider message id, unique within the source's mailbox. */
   id: string;
+  /** RFC Message-ID header, stable across mailbox copies when supplied. */
+  messageId?: string | null;
   /** Provider thread/conversation id this message belongs to. */
   threadId: string | null;
   /**
@@ -129,6 +131,16 @@ export interface MessageFull extends MessageMetadata {
   bodyHtml: string | null;
   /** MIME type the body was sourced from, for the distiller's benefit. */
   mimeType: string | null;
+  attachments?: AttachmentMetadata[];
+}
+
+export interface AttachmentMetadata {
+  attachmentId: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  inline: boolean;
+  inlineDataBase64?: string;
 }
 
 /**
@@ -221,6 +233,9 @@ export interface MailSource {
 
   /** Fetch the full record (metadata + body) for one id, or null if missing. */
   getFull(id: string): Promise<MessageFull | null>;
+
+  /** Fetch attachment bytes for a full message when the provider supports it. */
+  getAttachment?(messageId: string, attachmentId: string): Promise<ArrayBuffer>;
 
   /**
    * List the mailbox's label catalogue (id → name → type). Optional: adapters

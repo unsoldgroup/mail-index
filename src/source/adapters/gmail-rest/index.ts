@@ -12,6 +12,7 @@ import {
   type GmailMessage,
   buildGmailQuery,
   extractBodies,
+  extractAttachments,
   parseLabelList,
   toMetadata,
 } from '../gmail-shared.js';
@@ -98,11 +99,20 @@ export class GmailRestAdapter implements MailSource {
         query: { format: 'full' },
       })) as GmailMessage;
       if (!message.id) return null;
-      return { ...toMetadata(message), ...extractBodies(message.payload) };
+      return { ...toMetadata(message), ...extractBodies(message.payload), attachments: extractAttachments(message.payload) };
     } catch (error) {
       if (error instanceof GmailRestError && error.status === 404) return null;
       throw error;
     }
+  }
+
+  async getAttachment(messageId: string, attachmentId: string): Promise<ArrayBuffer> {
+    const response = await this.#run({
+      path: `messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
+    }) as { data?: string };
+    if (!response.data) throw new Error(`Gmail attachment ${attachmentId} returned no data`);
+    const bytes = Buffer.from(response.data, 'base64url');
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   }
 
   async listLabels(): Promise<ProviderLabel[]> {

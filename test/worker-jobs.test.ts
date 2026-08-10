@@ -36,6 +36,10 @@ test('cron enqueues one sync Job per connected Account without Gmail', async () 
     worker.scheduled({}, env, { waitUntil(promise: Promise<unknown>) { pending = promise; }, passThroughOnException() {} });
     await pending;
     assert.equal(sent.length, 1);
+    const params = (sent[0] as { params: Record<string, unknown> }).params;
+    assert.equal(typeof params['since'], 'string');
+    const ageDays = (Date.now() - Date.parse(String(params['since']))) / 86_400_000;
+    assert.ok(ageDays > 360 && ageDays < 380, `expected a 12-month lookback, got ${ageDays} days`);
   }
   finally { await mf.dispose(); }
 });
@@ -69,6 +73,18 @@ test('Job consumer runs sync→Enrichment→graph, is duplicate-safe, and report
     assert.ok((status.recent[0]?.progress as Record<string, unknown>)['graph']);
     const runs = await driver.prepare('SELECT phase FROM sync_runs ORDER BY id').all() as { phase: string }[];
     assert.deepEqual(runs.map((r) => r.phase), ['sync', 'enrich', 'graph']);
+    const changes = await driver.prepare(
+      'SELECT account,entity_type,entity_key,operation,payload_json FROM crm_change_events ORDER BY sequence',
+    ).all() as Array<Record<string, unknown>>;
+    assert.equal(changes.length, 1);
+    assert.equal(changes[0]?.account, 'acct-a');
+    assert.equal(changes[0]?.entity_type, 'message');
+    assert.equal(changes[0]?.entity_key, 'm1');
+    assert.equal(changes[0]?.operation, 'upsert');
+    const payload = JSON.parse(String(changes[0]?.payload_json)) as Record<string, unknown>;
+    assert.equal(payload['bodyMarkdown'], 'Hello body');
+    assert.equal(payload['subject'], 'Hello');
+    assert.equal(payload['threadKey'], 't1');
   } finally { await mf.dispose(); }
 });
 

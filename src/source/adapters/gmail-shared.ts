@@ -15,7 +15,7 @@
  * {@link headerBag} sees every `List-*` header `is_list` classification needs.
  */
 
-import type { MessageMetadata, ProviderLabel } from '../index.js';
+import type { AttachmentMetadata, MessageMetadata, ProviderLabel } from '../index.js';
 
 /** A header entry in a Gmail message payload. */
 export interface GmailHeader {
@@ -26,8 +26,10 @@ export interface GmailHeader {
 /** A Gmail message payload (recursive: MIME parts nest payloads). */
 export interface GmailPayload {
   mimeType?: string;
+  filename?: string;
+  partId?: string;
   headers?: GmailHeader[];
-  body?: { data?: string; size?: number };
+  body?: { data?: string; size?: number; attachmentId?: string };
   parts?: GmailPayload[];
 }
 
@@ -104,11 +106,34 @@ export function extractBodies(payload: GmailPayload | undefined): {
   return { bodyText, bodyHtml, mimeType };
 }
 
+export function extractAttachments(payload: GmailPayload | undefined): AttachmentMetadata[] {
+  const attachments: AttachmentMetadata[] = [];
+  const visit = (part: GmailPayload | undefined): void => {
+    if (!part) return;
+    const filename = part.filename?.trim();
+    const attachmentId = part.body?.data ? `inline:${part.partId ?? attachments.length}` : undefined;
+    if (filename && (part.body?.attachmentId || attachmentId)) {
+      attachments.push({
+        attachmentId: part.body?.attachmentId ?? attachmentId!,
+        filename,
+        mimeType: part.mimeType ?? 'application/octet-stream',
+        sizeBytes: part.body?.size ?? 0,
+        inline: !part.body?.attachmentId,
+        ...(part.body?.data ? { inlineDataBase64: part.body.data } : {}),
+      });
+    }
+    for (const child of part.parts ?? []) visit(child);
+  };
+  visit(payload);
+  return attachments;
+}
+
 /** Map a Gmail message resource to the provider-neutral metadata shape. */
 export function toMetadata(msg: GmailMessage): MessageMetadata {
   const internal = msg.internalDate;
   return {
     id: msg.id ?? '',
+    messageId: header(msg.payload, 'Message-ID'),
     threadId: msg.threadId ?? null,
     internalDate: internal != null && internal !== '' ? Number(internal) : null,
     dateHeader: header(msg.payload, 'Date'),

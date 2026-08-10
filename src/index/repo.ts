@@ -51,6 +51,7 @@ export const STALE_LOCK_MS = 6 * 60 * 60 * 1000;
 export interface MessageInput {
   account: string;
   gmailMessageId: string;
+  rfcMessageId?: string | null;
   threadId?: string | null;
   internalDate?: number | null;
   dateHeader?: string | null;
@@ -85,6 +86,7 @@ export interface MessageInput {
 export interface MessageRow {
   account: string;
   gmail_message_id: string;
+  rfc_message_id: string | null;
   thread_id: string | null;
   subject: string | null;
   from_addr: string | null;
@@ -612,15 +614,16 @@ export class Repo {
     // from the already-resolved (no-downgrade) values.
     await this.#prepare(
       `INSERT INTO messages (
-         account, gmail_message_id, thread_id, internal_date, date_header,
+         account, gmail_message_id, rfc_message_id, thread_id, internal_date, date_header,
          from_addr, to_addr, cc_addr, subject, labels_json, category,
          is_list, direction, unread, starred, important, size_estimate,
          snippet, body_state, body_text, gmail_url, indexed_at, body_fetched_at,
          ocr_images_json
        ) VALUES (
-         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        )
        ON CONFLICT(account, gmail_message_id) DO UPDATE SET
+         rfc_message_id  = COALESCE(excluded.rfc_message_id, messages.rfc_message_id),
          thread_id       = excluded.thread_id,
          internal_date   = excluded.internal_date,
          date_header     = excluded.date_header,
@@ -647,6 +650,7 @@ export class Repo {
     ).run(
       input.account,
       input.gmailMessageId,
+      input.rfcMessageId ?? null,
       input.threadId ?? null,
       input.internalDate ?? null,
       input.dateHeader ?? null,
@@ -707,7 +711,7 @@ export class Repo {
   /** Fetch one message row by id (or undefined). */
   async getMessage(account: string, gmailMessageId: string): Promise<MessageRow | undefined> {
     return await this.#prepare(
-      `SELECT account, gmail_message_id, thread_id, subject, from_addr, to_addr,
+      `SELECT account, gmail_message_id, rfc_message_id, thread_id, subject, from_addr, to_addr,
               cc_addr, snippet, body_state, body_text, summary_text,
               summary_is_model, summarized_at, is_list, direction,
               unread, starred, important, category, internal_date, indexed_at,

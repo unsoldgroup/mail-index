@@ -27,6 +27,11 @@ test('OAuth provider challenges MCP, exposes health, protects setup, and support
     assert.equal(deniedA2a.status, 401); assert.ok(deniedA2a.headers.get('www-authenticate'));
     const registered = await mf.dispatchFetch('https://worker.example/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Claude test', redirect_uris: ['https://claude.ai/api/mcp/auth_callback'], token_endpoint_auth_method: 'none' }) });
     assert.equal(registered.status, 201); assert.ok(((await registered.json()) as { client_id?: string }).client_id);
+    const confidential = await mf.dispatchFetch('https://worker.example/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Twenty test', redirect_uris: ['https://ei.unsold.cloud/apps/oauth/callback'], token_endpoint_auth_method: 'client_secret_post' }) });
+    assert.equal(confidential.status, 201);
+    const confidentialBody = await confidential.json() as { client_secret?: string; client_secret_expires_at?: number };
+    assert.ok(confidentialBody.client_secret);
+    assert.equal(confidentialBody.client_secret_expires_at, 0, 'operator-managed CRM clients must not expire');
   } finally { await mf.dispose(); }
 });
 

@@ -9,9 +9,26 @@ import { GmailRestAdapter } from '../src/source/adapters/gmail-rest/index.js';
 import { accessTokenProvider } from './google-oauth.js';
 import type { Env } from './index.js';
 import { deliverWebhook, evaluateRules, type DeliveryParams } from './triggers.js';
+import { CrmChangeFeed, publishMessageChanges } from './crm-feed.js';
+import { notifyCrmCompletion } from './crm-webhook.js';
+import { storeMessageAttachments } from './attachments.js';
 
 export type JobKind = 'sync' | 'backfill' | 'enrich_bulk' | 'webhook_delivery';
 export interface JobMessage { jobId: string; kind: JobKind; account: string; params: Record<string, unknown> }
+
+const DEFAULT_LOOKBACK_MONTHS = 12;
+
+function lookbackSince(months: number, now = new Date()): string {
+  const cutoff = new Date(now);
+  cutoff.setUTCMonth(cutoff.getUTCMonth() - months);
+  return cutoff.toISOString();
+}
+
+function configuredLookbackSince(env: Pick<Env, 'SYNC_LOOKBACK_MONTHS'>): string {
+  const parsed = Number(env.SYNC_LOOKBACK_MONTHS ?? DEFAULT_LOOKBACK_MONTHS);
+  const months = Number.isInteger(parsed) && parsed > 0 && parsed <= 120 ? parsed : DEFAULT_LOOKBACK_MONTHS;
+  return lookbackSince(months);
+}
 
 export async function enqueueJob(env: Env, kind: JobKind, account: string, params: Record<string, unknown> = {}): Promise<string> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
@@ -29,7 +46,7 @@ export async function enqueueJob(env: Env, kind: JobKind, account: string, param
 }
 
 export function enqueueSyncJob(env: Env, account: string, since?: string): Promise<string> {
-  return enqueueJob(env, 'sync', account, since ? { since } : {});
+  return enqueueJob(env, 'sync', account, { since: since ?? configuredLookbackSince(env) });
 }
 
 export async function enqueueScheduledSyncs(env: Env): Promise<string[]> {
@@ -37,7 +54,9 @@ export async function enqueueScheduledSyncs(env: Env): Promise<string[]> {
   const rows = await driver.prepare('SELECT account FROM google_tokens ORDER BY account').all() as { account: string }[];
   return Promise.all(rows.map(async (row) => {
     const watermark = await driver.prepare(`SELECT finished_at FROM sync_runs WHERE account=? AND phase='sync' AND finished_at IS NOT NULL AND error IS NULL ORDER BY finished_at DESC LIMIT 1`).get(row.account) as { finished_at: string } | undefined;
-    return enqueueSyncJob(env, row.account, watermark?.finished_at);
+    const minimumSince = configuredLookbackSince(env);
+    const since = watermark?.finished_at && watermark.finished_at > minimumSince ? watermark.finished_at : minimumSince;
+    return enqueueSyncJob(env, row.account, since);
   }));
 }
 
@@ -66,6 +85,23 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       progress['triggers'] = { deliveries: await evaluateRules(env, driver, repo, message.account, sync.messageIds) }; await update('running', progress);
       const enriched = await enrich({ account: message.account, source, repo, selector: { rule: 'direct' } });
       progress['enrich'] = { fetched: enriched.fetched, enriched: enriched.enriched }; await update('running', progress);
+      let terminalCursor = await publishMessageChanges(
+        new CrmChangeFeed(driver),
+        repo,
+        message.account,
+        sync.messageIds,
+        message.jobId,
+      );
+      const attachments = await storeMessageAttachments({ source, feed: new CrmChangeFeed(driver), bucket: env.ATTACHMENTS, account: message.account, messageIds: sync.messageIds, jobId: message.jobId });
+      terminalCursor = attachments.lastCursor ?? terminalCursor;
+      progress['crm'] = { published: sync.messageIds.length, attachments, terminal_cursor: terminalCursor ?? null };
+      await update('running', progress);
+      await notifyCrmCompletion({
+        url: env.CRM_WEBHOOK_URL,
+        secret: env.CRM_WEBHOOK_SECRET,
+        payload: { account: message.account, terminalCursor: terminalCursor ?? null, jobId: message.jobId },
+        fetchImpl,
+      });
       const graphRun = await repo.startSyncRun({ account: message.account, phase: 'graph', selector: null });
       const graph = await buildGraph(repo, message.account);
       await repo.finishSyncRun(graphRun, { fetched: 0, indexed: graph.nodes });
@@ -85,7 +121,7 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
 
 function logCounts(progress: Record<string, unknown>): Record<string, number> {
   const out: Record<string, number> = {};
-  for (const phase of ['sync', 'triggers', 'enrich', 'graph', 'delivery']) {
+  for (const phase of ['sync', 'triggers', 'enrich', 'crm', 'graph', 'delivery']) {
     const values = progress[phase]; if (!values || typeof values !== 'object') continue;
     for (const key of ['fetched', 'indexed', 'deliveries', 'enriched', 'nodes', 'edges', 'communities', 'delivered']) {
       const value = (values as Record<string, unknown>)[key];

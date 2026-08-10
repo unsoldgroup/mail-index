@@ -139,6 +139,7 @@ async function promoteOne(account: string, id: string, source: MailSource, repo:
   await repo.upsertMessage({
     account,
     gmailMessageId: id,
+    rfcMessageId: full.messageId ?? existing?.rfc_message_id ?? null,
     threadId: full.threadId,
     internalDate: full.internalDate,
     dateHeader: full.dateHeader,

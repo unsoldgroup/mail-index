@@ -4,13 +4,13 @@ import internalWorker, { apiHandler, defaultHandler, type Env } from './index.js
 interface OAuthExecutionContext { waitUntil(promise: Promise<unknown>): void; passThroughOnException(): void }
 
 export const oauthProvider = new OAuthProvider<Env>({
-  apiRoute: ['/mcp', '/a2a'],
+  apiRoute: ['/mcp', '/a2a', '/crm/v1'],
   apiHandler: apiHandler as never,
   defaultHandler: defaultHandler as never,
   authorizeEndpoint: '/authorize',
   tokenEndpoint: '/token',
   clientRegistrationEndpoint: '/register',
-  scopesSupported: ['mail-index'],
+  scopesSupported: ['mail-index', 'crm.read', 'crm.index', 'crm.jobs'],
   allowPlainPKCE: false,
 });
 

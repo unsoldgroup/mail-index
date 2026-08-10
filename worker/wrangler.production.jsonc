@@ -1,0 +1,29 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "mail-index",
+  "main": "oauth.ts",
+  "compatibility_date": "2026-07-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "mail-index", "database_id": "14c712df-bc59-4f97-aeda-d304c97ddb4c" }
+  ],
+  "queues": {
+    "producers": [{ "binding": "SYNC_QUEUE", "queue": "mail-index-jobs" }],
+    "consumers": [{ "queue": "mail-index-jobs" }]
+  },
+  "kv_namespaces": [
+    { "binding": "OAUTH_KV", "id": "3a709f7cc8884412aacb9347345a90ad" }
+  ],
+  "r2_buckets": [
+    { "binding": "ATTACHMENTS", "bucket_name": "mail-index-attachments" }
+  ],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "limits": { "cpu_ms": 30000 },
+  "triggers": { "crons": ["0 * * * *"] },
+  "vars": {
+    "SYNC_INTERVAL": "1h",
+    "SYNC_LOOKBACK_MONTHS": "12",
+    "OPERATOR_EMAILS": "al@unsold.group,alexandre.stemarie@gmail.com,alex.stemarie@fora.travel",
+    "CRM_WEBHOOK_URL": "https://ei.unsold.cloud/s/mail-index/completed"
+  }
+}

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 // Tests import the compiled output (matching test/smoke.test.ts); `pnpm test`
 // builds first via the pretest hook so dist is fresh.
 import { openDb, IndexError } from '../dist/index/db.js';
-import { getUserVersion, runMigrations } from '../dist/index/migrations.js';
+import { getUserVersion, MIGRATIONS, runMigrations } from '../dist/index/migrations.js';
 import { Repo } from '../dist/index/repo.js';
 import { SCHEMA_VERSION } from '../dist/index/schema.js';
 
@@ -30,6 +30,7 @@ const TABLES = [
   'labels',
   'google_tokens',
   'jobs',
+  'crm_change_events',
 ];
 
 test('migrations run clean on a fresh db and create every PLAN §6 table', async () => {
@@ -52,6 +53,27 @@ test('running migrations twice is a no-op (idempotent)', async () => {
   const before = await getUserVersion(db);
   await runMigrations(db); // second pass
   assert.equal(await getUserVersion(db), before);
+});
+
+test('repair migration restores a CRM feed table missing from an already-versioned database', async () => {
+  const db = await openDb({ path: ':memory:' });
+  await db.exec('DROP TABLE crm_change_events');
+  await db.exec('PRAGMA user_version = 15');
+  await runMigrations(db);
+  assert.equal(await getUserVersion(db), SCHEMA_VERSION);
+  assert.ok(await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='crm_change_events'").get());
+  assert.ok(await db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_crm_change_events_dedupe_key'").get());
+});
+
+test('repair preflight also lets the deduplication migration recover a version-13 database', async () => {
+  const db = await openDb({ path: ':memory:', skipMigrations: true });
+  for (const migration of MIGRATIONS.filter(({ version }) => version <= 13)) await migration.up(db);
+  await db.exec('DROP TABLE crm_change_events');
+  await db.exec('PRAGMA user_version = 13');
+  await runMigrations(db);
+  assert.equal(await getUserVersion(db), SCHEMA_VERSION);
+  assert.ok(await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='crm_change_events'").get());
+  assert.ok(await db.prepare("SELECT name FROM pragma_table_info('crm_change_events') WHERE name='dedupe_key'").get());
 });
 
 test('sqlite StorageDriver batch applies writes atomically', async () => {

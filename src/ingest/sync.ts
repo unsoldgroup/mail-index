@@ -223,6 +223,7 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
         await repo.upsertMessage({
           account,
           gmailMessageId: meta.id,
+          rfcMessageId: meta.messageId ?? null,
           threadId: meta.threadId,
           internalDate: meta.internalDate,
           dateHeader: meta.dateHeader,

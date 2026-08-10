@@ -12,6 +12,8 @@ import { AccountMismatchError, accessTokenProvider, exchangeToken, GMAIL_MODIFY,
 import { enqueueJob, enqueueScheduledSyncs, jobStatus, runJob, type JobMessage } from './jobs.js';
 import { triggerAdmin } from './triggers.js';
 import { agentCard, handleA2a } from './a2a.js';
+import { handleCrmRequest } from './crm-api.js';
+import type { AttachmentBucket } from './attachments.js';
 
 const VERSION = '1.4.0';
 const SESSION_COOKIE = 'mail_index_operator';
@@ -31,6 +33,10 @@ export interface Env {
   GOOGLE_CLIENT_SECRET: string;
   OPERATOR_EMAILS: string;
   SYNC_INTERVAL: string;
+  SYNC_LOOKBACK_MONTHS?: string;
+  CRM_WEBHOOK_URL?: string;
+  CRM_WEBHOOK_SECRET?: string;
+  ATTACHMENTS?: AttachmentBucket;
 }
 
 function assertBindings(env: Partial<Env>): asserts env is Env {
@@ -84,6 +90,7 @@ export async function handleAuthorizedRequest(request: Request, env: Partial<Env
   const url = new URL(request.url);
   if (url.pathname === '/mcp' && ['GET', 'POST', 'DELETE'].includes(request.method)) return handleMcp(request, env);
   if (url.pathname === '/a2a' && request.method === 'POST') return handleA2a(request, await buildWorkerToolContext(env));
+  if (url.pathname.startsWith('/crm/v1/')) return handleCrmRequest(request, env);
   return Response.json({ error: 'not_found' }, { status: 404 });
 }
 

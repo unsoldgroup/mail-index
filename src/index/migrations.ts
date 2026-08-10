@@ -506,6 +506,75 @@ const m012_trigger_rules: Migration = {
   },
 };
 
+const m013_crm_change_feed: Migration = {
+  version: 13,
+  name: 'CRM deployment change feed',
+  up: async (db) => {
+    await db.exec(`
+      CREATE TABLE crm_change_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        account TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_key TEXT NOT NULL,
+        operation TEXT NOT NULL CHECK (operation IN ('upsert','tombstone')),
+        reason TEXT,
+        payload_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_crm_change_events_account_sequence
+        ON crm_change_events(account, sequence);
+    `);
+  },
+};
+
+const m014_crm_event_deduplication: Migration = {
+  version: 14,
+  name: 'CRM event idempotency keys',
+  up: async (db) => {
+    await db.exec(`
+      ALTER TABLE crm_change_events ADD COLUMN dedupe_key TEXT;
+      CREATE UNIQUE INDEX idx_crm_change_events_dedupe_key
+        ON crm_change_events(dedupe_key);
+    `);
+  },
+};
+
+const m015_rfc_message_identity: Migration = {
+  version: 15,
+  name: 'RFC Message-ID identity',
+  up: async (db) => {
+    await db.exec(`
+      ALTER TABLE messages ADD COLUMN rfc_message_id TEXT;
+      CREATE INDEX idx_messages_rfc_message_id ON messages(rfc_message_id);
+    `);
+  },
+};
+
+/** Migration 16 — repair a D1 database whose version marker advanced without the CRM feed table. */
+const m016_crm_feed_repair: Migration = {
+  version: 16,
+  name: 'repair missing CRM deployment change feed',
+  up: async (db) => {
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS crm_change_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        account TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_key TEXT NOT NULL,
+        operation TEXT NOT NULL CHECK (operation IN ('upsert','tombstone')),
+        reason TEXT,
+        payload_json TEXT,
+        created_at TEXT NOT NULL,
+        dedupe_key TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_crm_change_events_account_sequence
+        ON crm_change_events(account, sequence);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_crm_change_events_dedupe_key
+        ON crm_change_events(dedupe_key);
+    `);
+  },
+};
+
 /** All migrations, in ascending version order. Append-only. */
 export const MIGRATIONS: readonly Migration[] = [
   m001_initial,
@@ -520,6 +589,10 @@ export const MIGRATIONS: readonly Migration[] = [
   m010_google_tokens,
   m011_jobs,
   m012_trigger_rules,
+  m013_crm_change_feed,
+  m014_crm_event_deduplication,
+  m015_rfc_message_identity,
+  m016_crm_feed_repair,
 ];
 
 /**
@@ -549,6 +622,44 @@ export async function runMigrations(db: StorageDriver): Promise<void> {
     );
   }
   if (current === latest) return;
+
+  // Some early D1 deployments advanced the version marker while the CRM feed
+  // DDL was absent. Create that table before replaying the repair migration so
+  // an out-of-band schema repair cannot fail on a later index statement.
+  if (current === 13) {
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS crm_change_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        account TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_key TEXT NOT NULL,
+        operation TEXT NOT NULL CHECK (operation IN ('upsert','tombstone')),
+        reason TEXT,
+        payload_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_crm_change_events_account_sequence
+        ON crm_change_events(account, sequence);
+    `);
+  } else if (current >= 14) {
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS crm_change_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        account TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_key TEXT NOT NULL,
+        operation TEXT NOT NULL CHECK (operation IN ('upsert','tombstone')),
+        reason TEXT,
+        payload_json TEXT,
+        created_at TEXT NOT NULL,
+        dedupe_key TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_crm_change_events_account_sequence
+        ON crm_change_events(account, sequence);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_crm_change_events_dedupe_key
+        ON crm_change_events(dedupe_key);
+    `);
+  }
 
   const pending = MIGRATIONS.filter((m) => m.version > current).sort(
     (a, b) => a.version - b.version,

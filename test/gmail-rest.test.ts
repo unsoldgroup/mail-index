@@ -5,6 +5,7 @@ import { GmailRestAdapter } from '../dist/source/adapters/gmail-rest/index.js';
 import { InsufficientScopeError } from '../dist/source/index.js';
 import { runMailSourceContract } from '../dist/source/contract.js';
 import { DEFAULT_FIXTURES } from '../dist/source/fixtures/index.js';
+import { extractAttachments } from '../dist/source/adapters/gmail-shared.js';
 
 function gmailMessage(message: (typeof DEFAULT_FIXTURES.messages)[number]) {
   const encode = (text: string) => Buffer.from(text).toString('base64url');
@@ -14,6 +15,7 @@ function gmailMessage(message: (typeof DEFAULT_FIXTURES.messages)[number]) {
     ['To', message.to],
     ['Cc', message.cc],
     ['Subject', message.subject],
+    ['Message-ID', `<${message.id}@example.test>`],
     ...Object.entries(message.headers ?? {}),
   ]
     .filter((entry): entry is [string, string] => entry[1] != null)
@@ -96,4 +98,20 @@ test('Gmail REST readonly grant surfaces InsufficientScopeError on modify', asyn
     }),
     (error: unknown) => error instanceof InsufficientScopeError && error.provider === 'gmail-rest',
   );
+});
+
+test('Gmail REST preserves RFC Message-ID for cross-mailbox identity', async () => {
+  const message = await source().getFull('fixt-direct-1');
+  assert.equal(message?.messageId, '<fixt-direct-1@example.test>');
+});
+
+test('extractAttachments preserves provider ids and inline metadata', () => {
+  const attachments = extractAttachments({ mimeType: 'multipart/mixed', parts: [
+    { partId: '1', filename: 'quote.pdf', mimeType: 'application/pdf', body: { attachmentId: 'att-1', size: 42 } },
+    { partId: '2', filename: 'logo.png', mimeType: 'image/png', body: { data: 'aGk=', size: 2 } },
+  ] });
+  assert.deepEqual(attachments, [
+    { attachmentId: 'att-1', filename: 'quote.pdf', mimeType: 'application/pdf', sizeBytes: 42, inline: false },
+    { attachmentId: 'inline:2', filename: 'logo.png', mimeType: 'image/png', sizeBytes: 2, inline: true, inlineDataBase64: 'aGk=' },
+  ]);
 });
