@@ -1,7 +1,7 @@
 import { D1Driver } from '../src/index/drivers/d1.js';
 import { runMigrations } from '../src/index/migrations.js';
 import { CrmChangeFeed } from './crm-feed.js';
-import { enqueueSyncJob, jobStatus } from './jobs.js';
+import { enqueueCrmBackfillJob, enqueueSyncJob, jobStatus } from './jobs.js';
 import type { Env } from './index.js';
 
 function jsonError(error: string, status: number): Response {
@@ -62,6 +62,15 @@ export async function handleCrmRequest(request: Request, env: Env): Promise<Resp
     const source = await driver.prepare('SELECT account FROM google_tokens WHERE account=?').get(account);
     if (!source) return jsonError('source_not_found', 404);
     const jobId = await enqueueSyncJob(env, account);
+    return Response.json({ jobId, account, status: 'queued' }, { status: 202 });
+  }
+
+  const backfill = /^\/crm\/v1\/sources\/([^/]+)\/backfill$/.exec(url.pathname);
+  if (request.method === 'POST' && backfill) {
+    const account = decodeURIComponent(backfill[1]!);
+    const source = await driver.prepare('SELECT account FROM google_tokens WHERE account=?').get(account);
+    if (!source) return jsonError('source_not_found', 404);
+    const jobId = await enqueueCrmBackfillJob(env, account);
     return Response.json({ jobId, account, status: 'queued' }, { status: 202 });
   }
 

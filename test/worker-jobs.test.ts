@@ -5,7 +5,7 @@ import { D1Driver } from '../dist/index/drivers/d1.js';
 import { Repo } from '../dist/index/repo.js';
 import { runMigrations } from '../dist/index/migrations.js';
 import { saveGrant } from '../dist-worker/worker/google-oauth.js';
-import { enqueueJob, enqueueScheduledSyncs, jobStatus, runJob } from '../dist-worker/worker/jobs.js';
+import { enqueueCrmBackfillJob, enqueueJob, enqueueScheduledSyncs, jobStatus, runJob } from '../dist-worker/worker/jobs.js';
 import worker from '../dist-worker/worker/index.js';
 import { evaluateRules, triggerAdmin } from '../dist-worker/worker/triggers.js';
 import { nextBackfillSlice, BACKFILL_FLOOR } from '../dist/index/settings.js';
@@ -440,5 +440,32 @@ test('sync Job evaluates Trigger rules and signed webhook retries until 2xx', as
     const expected = await crypto.subtle.sign('HMAC', await crypto.subtle.importKey('raw', new TextEncoder().encode('shared-secret'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']), new TextEncoder().encode(body));
     assert.equal(new Headers(captured?.headers).get('x-mailindex-signature'), `sha256=${Buffer.from(expected).toString('hex')}`);
     assert.ok(new Headers(captured?.headers).get('x-mailindex-timestamp'));
+  } finally { await mf.dispose(); }
+});
+
+test('crm_backfill publishes already-indexed Messages and chains until drained', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    for (const id of ['m1', 'm2']) {
+      await driver.prepare(`INSERT INTO messages(account,gmail_message_id,thread_id,internal_date,subject,from_addr,to_addr,body_state) VALUES(?,?,?,?,?,?,?,?)`)
+        .run('acct-a', id, 't1', 1_700_000_000_000, 'Subject', 'person@example.com', 'a@example.com', 'meta');
+    }
+    const jobId = await enqueueCrmBackfillJob(env, 'acct-a');
+    sent.length = 0;
+    await runJob(env, { jobId, kind: 'crm_backfill', account: 'acct-a', params: {} }, gmailFetch);
+
+    // A normal sync only publishes what it just fetched, so history reaches the
+    // CRM through this path alone.
+    const published = await driver.prepare(`SELECT count(*) AS n FROM crm_change_events WHERE account=?`).get('acct-a') as { n: number };
+    assert.equal(published.n, 2);
+    const job = await driver.prepare('SELECT status,progress_json FROM jobs WHERE id=?').get(jobId) as { status: string; progress_json: string };
+    assert.equal(job.status, 'done');
+    const progress = JSON.parse(job.progress_json) as { crm_backfill: { published: number; next_after: string; drained: boolean } };
+    assert.deepEqual(
+      { published: progress.crm_backfill.published, next_after: progress.crm_backfill.next_after, drained: progress.crm_backfill.drained },
+      { published: 2, next_after: 'm2', drained: true },
+    );
+    // Drained, so it must not chain another batch.
+    assert.equal(sent.length, 0);
   } finally { await mf.dispose(); }
 });

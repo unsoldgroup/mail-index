@@ -15,7 +15,7 @@ import { CrmChangeFeed, publishMessageChanges } from './crm-feed.js';
 import { notifyCrmCompletion } from './crm-webhook.js';
 import { storeMessageAttachments } from './attachments.js';
 
-export type JobKind = 'sync' | 'backfill' | 'backfill_slice' | 'enrich_bulk' | 'retention' | 'graph' | 'webhook_delivery';
+export type JobKind = 'sync' | 'backfill' | 'backfill_slice' | 'crm_backfill' | 'enrich_bulk' | 'retention' | 'graph' | 'webhook_delivery';
 export interface JobMessage { jobId: string; kind: JobKind; account: string; params: Record<string, unknown> }
 
 const DEFAULT_LOOKBACK_MONTHS = 12;
@@ -115,6 +115,18 @@ export function enqueueSyncJob(env: Env, account: string, since?: string): Promi
   return enqueueJob(env, 'sync', account, { since: since ?? configuredLookbackSince(env) });
 }
 
+/**
+ * Publish already-indexed Messages to the CRM change feed. A normal sync only
+ * publishes what it just fetched, so a mailbox indexed before the feed existed
+ * never reaches the CRM without this.
+ */
+export function enqueueCrmBackfillJob(env: Env, account: string, after = ''): Promise<string> {
+  return enqueueJob(env, 'crm_backfill', account, { after });
+}
+
+/** One invocation's worth of history; the job re-enqueues itself until drained. */
+export const CRM_BACKFILL_BATCH = 200;
+
 export async function enqueueScheduledSyncs(env: Env): Promise<string[]> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
   // An Account whose grant Google has already rejected as `invalid_grant` cannot
@@ -177,6 +189,34 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
     if (job.kind === 'webhook_delivery') {
       await deliverWebhook(driver, job.params as unknown as DeliveryParams, fetchImpl);
       progress['delivery'] = { delivered: true, delivery_id: job.params['deliveryId'] };
+    } else if (job.kind === 'crm_backfill') {
+      const after = typeof job.params['after'] === 'string' ? job.params['after'] : '';
+      // Keyed on the table's own primary key, so the cursor survives a
+      // restart and never revisits a Message.
+      const rows = await driver.prepare(
+        `SELECT gmail_message_id FROM messages WHERE account=? AND gmail_message_id > ? ORDER BY gmail_message_id LIMIT ?`,
+      ).all(job.account, after, CRM_BACKFILL_BATCH) as { gmail_message_id: string }[];
+      const messageIds = rows.map((batchRow) => batchRow.gmail_message_id);
+      const feed = new CrmChangeFeed(driver);
+      let terminalCursor = await publishMessageChanges(feed, repo, job.account, messageIds, job.jobId);
+      const attachments = await storeMessageAttachments({ source, feed, bucket: env.ATTACHMENTS, account: job.account, messageIds, jobId: job.jobId });
+      terminalCursor = attachments.lastCursor ?? terminalCursor;
+      const nextAfter = messageIds[messageIds.length - 1] ?? after;
+      const drained = messageIds.length < CRM_BACKFILL_BATCH;
+      progress['crm_backfill'] = { published: messageIds.length, attachments, after, next_after: nextAfter, drained };
+      await update('running', progress);
+      await notifyCrmCompletion({
+        url: env.CRM_WEBHOOK_URL,
+        secret: env.CRM_WEBHOOK_SECRET,
+        payload: { account: job.account, terminalCursor: terminalCursor ?? null, jobId: job.jobId },
+        fetchImpl,
+      });
+      await update('done', progress);
+      console.log(JSON.stringify({ event: 'job_finish', job_id: job.jobId, kind: job.kind, counts: { published: messageIds.length } }));
+      // Enqueued only after this job is done: enqueueJob coalesces onto a live
+      // job for the same kind and account, so an earlier call would no-op.
+      if (!drained) await enqueueCrmBackfillJob(env, job.account, nextAfter);
+      return;
     } else if (job.kind === 'sync' || job.kind === 'backfill') {
       const sync = await syncMetadata({
         account: job.account,
