@@ -44,6 +44,16 @@ function decodeCursor(cursor?: string): number {
   return sequence;
 }
 
+/**
+ * The index holds every authorized mailbox, but a CRM only receives the ones
+ * its operator chose. CRM_ACCOUNTS is a comma-separated allowlist; unset means
+ * every account publishes, which is the pre-allowlist behaviour.
+ */
+export function crmAccountAllowed(env: { CRM_ACCOUNTS?: string }, account: string): boolean {
+  const allowed = (env.CRM_ACCOUNTS ?? '').split(',').map((entry) => entry.trim()).filter(Boolean);
+  return allowed.length === 0 || allowed.includes(account);
+}
+
 export class CrmChangeFeed {
   constructor(private readonly driver: StorageDriver) {}
 
@@ -77,19 +87,23 @@ export class CrmChangeFeed {
     return encodeCursor(existing.sequence);
   }
 
-  async read(options: { after?: string; limit?: number } = {}): Promise<CrmChangePage> {
+  async read(options: { after?: string; limit?: number; accounts?: readonly string[] } = {}): Promise<CrmChangePage> {
     const after = decodeCursor(options.after);
     const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
+    // Filtered in SQL, not after the fact: a page emptied by the filter would
+    // leave the cursor where it was and stall the reader forever.
+    const accounts = options.accounts ?? [];
+    const scope = accounts.length > 0 ? ` AND account IN (${accounts.map(() => '?').join(',')})` : '';
     const terminal = await this.driver.prepare(
-      'SELECT COALESCE(MAX(sequence),0) AS sequence FROM crm_change_events',
-    ).get() as { sequence: number };
+      `SELECT COALESCE(MAX(sequence),0) AS sequence FROM crm_change_events WHERE 1=1${scope}`,
+    ).get(...accounts) as { sequence: number };
     const rows = await this.driver.prepare(
       `SELECT sequence,account,entity_type,entity_key,operation,reason,payload_json,created_at
          FROM crm_change_events
-        WHERE sequence > ?
+        WHERE sequence > ?${scope}
         ORDER BY sequence ASC
         LIMIT ?`,
-    ).all(after, limit) as Array<Record<string, unknown>>;
+    ).all(after, ...accounts, limit) as Array<Record<string, unknown>>;
     const events = rows.map((row): CrmChangeEvent => ({
       account: String(row['account']),
       entityType: String(row['entity_type']),

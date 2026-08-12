@@ -4,7 +4,7 @@ import { Miniflare } from 'miniflare';
 
 import { D1Driver } from '../dist/index/drivers/d1.js';
 import { runMigrations } from '../dist/index/migrations.js';
-import { CrmChangeFeed } from '../dist-worker/worker/crm-feed.js';
+import { CrmChangeFeed, crmAccountAllowed } from '../dist-worker/worker/crm-feed.js';
 import { handleAuthorizedRequest } from '../dist-worker/worker/index.js';
 
 test('CRM change feed replays an ordered deployment cursor with tombstones', async () => {
@@ -49,6 +49,33 @@ test('CRM change feed replays an ordered deployment cursor with tombstones', asy
     assert.equal(replay.hasMore, false);
 
     assert.deepEqual(await feed.read({ after: firstCursor, limit: 10 }), replay);
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test('an account allowlist keeps other mailboxes out of the CRM feed', async () => {
+  const mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok") } }', d1Databases: ['DB'] });
+  try {
+    const driver = new D1Driver(await mf.getD1Database('DB'));
+    await runMigrations(driver);
+    const feed = new CrmChangeFeed(driver);
+    for (const account of ['personal', 'unsold-group', 'fora', 'unsold-group']) {
+      await feed.append({ account, entityType: 'message', entityKey: `${account}-${Math.random()}`, operation: 'upsert' });
+    }
+
+    assert.equal(crmAccountAllowed({ CRM_ACCOUNTS: 'unsold-group' }, 'unsold-group'), true);
+    assert.equal(crmAccountAllowed({ CRM_ACCOUNTS: 'unsold-group' }, 'personal'), false);
+    assert.equal(crmAccountAllowed({}, 'personal'), true, 'an unset allowlist keeps the pre-allowlist behaviour');
+
+    // A page must not come back empty just because the filter removed its rows:
+    // the reader would sit on the same cursor and never drain.
+    const page = await feed.read({ limit: 1, accounts: ['unsold-group'] });
+    assert.equal(page.events.length, 1);
+    assert.equal(page.events[0]?.account, 'unsold-group');
+    const rest = await feed.read({ after: page.nextCursor, accounts: ['unsold-group'] });
+    assert.deepEqual(rest.events.map((event) => event.account), ['unsold-group']);
+    assert.equal(rest.hasMore, false);
   } finally {
     await mf.dispose();
   }

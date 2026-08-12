@@ -11,7 +11,7 @@ import { accessTokenProvider } from './google-oauth.js';
 import { markQueueEnqueueFailed } from './job-state.js';
 import type { Env } from './index.js';
 import { deliverWebhook, evaluateRules, type DeliveryParams } from './triggers.js';
-import { CrmChangeFeed, publishMessageChanges } from './crm-feed.js';
+import { CrmChangeFeed, crmAccountAllowed, publishMessageChanges } from './crm-feed.js';
 import { notifyCrmCompletion } from './crm-webhook.js';
 import { storeMessageAttachments } from './attachments.js';
 
@@ -196,7 +196,9 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       const rows = await driver.prepare(
         `SELECT gmail_message_id FROM messages WHERE account=? AND gmail_message_id > ? ORDER BY gmail_message_id LIMIT ?`,
       ).all(job.account, after, CRM_BACKFILL_BATCH) as { gmail_message_id: string }[];
-      const messageIds = rows.map((batchRow) => batchRow.gmail_message_id);
+      const messageIds = crmAccountAllowed(env, job.account)
+        ? rows.map((batchRow) => batchRow.gmail_message_id)
+        : [];
       const feed = new CrmChangeFeed(driver);
       let terminalCursor = await publishMessageChanges(feed, repo, job.account, messageIds, job.jobId);
       const attachments = await storeMessageAttachments({ source, feed, bucket: env.ATTACHMENTS, account: job.account, messageIds, jobId: job.jobId });
@@ -228,16 +230,17 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       progress['triggers'] = { deliveries: await evaluateRules(env, driver, repo, job.account, sync.messageIds) }; await update('running', progress);
       const enriched = await enrich({ account: job.account, source, repo, selector: { rule: 'direct' } });
       progress['enrich'] = { fetched: enriched.fetched, enriched: enriched.enriched }; await update('running', progress);
+      const crmIds = crmAccountAllowed(env, job.account) ? sync.messageIds : [];
       let terminalCursor = await publishMessageChanges(
         new CrmChangeFeed(driver),
         repo,
         job.account,
-        sync.messageIds,
+        crmIds,
         job.jobId,
       );
-      const attachments = await storeMessageAttachments({ source, feed: new CrmChangeFeed(driver), bucket: env.ATTACHMENTS, account: job.account, messageIds: sync.messageIds, jobId: job.jobId });
+      const attachments = await storeMessageAttachments({ source, feed: new CrmChangeFeed(driver), bucket: env.ATTACHMENTS, account: job.account, messageIds: crmIds, jobId: job.jobId });
       terminalCursor = attachments.lastCursor ?? terminalCursor;
-      progress['crm'] = { published: sync.messageIds.length, attachments, terminal_cursor: terminalCursor ?? null };
+      progress['crm'] = { published: crmIds.length, attachments, terminal_cursor: terminalCursor ?? null };
       await update('running', progress);
       await notifyCrmCompletion({
         url: env.CRM_WEBHOOK_URL,

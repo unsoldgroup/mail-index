@@ -36,6 +36,8 @@ export interface Env {
   SYNC_LOOKBACK_MONTHS?: string;
   CRM_WEBHOOK_URL?: string;
   CRM_WEBHOOK_SECRET?: string;
+  /** Comma-separated mailboxes allowed to reach the CRM; unset means all. */
+  CRM_ACCOUNTS?: string;
   ATTACHMENTS?: AttachmentBucket;
 }
 

@@ -41,6 +41,9 @@
     "SYNC_INTERVAL": "1h",
     "SYNC_LOOKBACK_MONTHS": "240",
     "OPERATOR_EMAILS": "al@unsold.group,alexandre.stemarie@gmail.com,alex.stemarie@fora.travel",
+    // CRM_ACCOUNTS is deliberately unset: which mailboxes reach a CRM is
+    // chosen per workspace in the app's mailbox selector, so a second switch
+    // here would silently override it. It stays available as a hard guard.
     "CRM_WEBHOOK_URL": "https://ei.unsold.cloud/s/mail-index/completed"
   }
 }
