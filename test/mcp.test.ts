@@ -238,6 +238,75 @@ test('search: a STALE index carries freshness.stale + auto-spawns a background r
   assert.equal(spawnedSince, '2d', 'refresh is incremental (ceil(5h/24h)+1 = 2 days)');
 });
 
+/** Record a Deployment grant for ACCOUNT, optionally already rejected by Google. */
+async function recordGrant(repo, authError = null) {
+  const now = new Date(T).toISOString();
+  await repo.driver
+    .prepare(`INSERT INTO google_tokens(account,address,scopes,refresh_token_ciphertext,iv,created_at,updated_at,auth_error,auth_failed_at)
+      VALUES(?,?,?,?,?,?,?,?,?)`)
+    .run(ACCOUNT, 'a@example.com', 'scope', new Uint8Array([1]), new Uint8Array([2]), now, now, authError, authError ? now : null);
+}
+
+test('search: a dead grant reports needs_reauth and refuses to promise a refresh', async () => {
+  const repo = await freshRepo();
+  await seedMailbox(repo);
+  await recordSync(repo, new Date(T - 5 * 3_600_000).toISOString());
+  await recordGrant(repo, 'invalid_grant');
+  let spawned = false;
+  let enqueued = false;
+  const ctx = ctxFor(repo, {
+    backgroundSync: () => { spawned = true; return true; },
+    enqueueJob: async () => { enqueued = true; return 'job-1'; },
+    reauthUrl: (account) => `https://worker.example/setup/google/start?account=${account}`,
+  });
+
+  const res = await search(ctx, { query: 'antarctica logistics', limit: 10 });
+  assert.equal(res.freshness.stale, true, 'the index is still stale');
+  assert.equal(res.freshness.auth, 'needs_reauth');
+  assert.equal(res.freshness.auth_failed_at, new Date(T).toISOString());
+  assert.equal(res.sync_started, undefined, 'never claims a refresh that cannot succeed');
+  assert.equal(res.eta_seconds, undefined);
+  assert.equal(res.freshness.syncing, false);
+  assert.equal(spawned, false, 'no local sync spawned against a dead grant');
+  assert.equal(enqueued, false, 'no Job queued against a dead grant');
+  assert.deepEqual(res.freshness.refresh_command, {
+    kind: 'reauth',
+    account: ACCOUNT,
+    status: 'blocked',
+    reason: 'invalid_grant',
+    reconsent_url: `https://worker.example/setup/google/start?account=${ACCOUNT}`,
+  });
+});
+
+test('search: a healthy grant still auto-spawns, and reports auth ok', async () => {
+  const repo = await freshRepo();
+  await seedMailbox(repo);
+  await recordSync(repo, new Date(T - 5 * 3_600_000).toISOString());
+  await recordGrant(repo);
+  let enqueued = false;
+  const ctx = ctxFor(repo, { enqueueJob: async () => { enqueued = true; return 'job-1'; } });
+
+  const res = await search(ctx, { query: 'antarctica logistics', limit: 10 });
+  assert.equal(res.freshness.auth, 'ok');
+  assert.equal(res.sync_started, true, 'a healthy stale Account still refreshes');
+  assert.equal(enqueued, true);
+});
+
+test('get_message: a body that stayed meta because of a dead grant says so', async () => {
+  const repo = await freshRepo();
+  await seedMailbox(repo);
+  await recordSync(repo, NOW.toISOString());
+  await recordGrant(repo, 'invalid_grant');
+  const ctx = ctxFor(repo, {
+    buildSource: () => { throw new Error('Google token exchange failed: invalid_grant'); },
+  });
+
+  const res = await getMessage(ctx, { ref: `${ACCOUNT}:m3`, level: 'body' });
+  assert.equal(res.body, null);
+  assert.equal(res.enriched, false);
+  assert.equal(res.body_error, 'auth', 'the caller learns the body is unreachable, not absent');
+});
+
 test('search: a vague half-remembered term still recalls (recall, not lookup)', async () => {
   const repo = await freshRepo();
   await seedMailbox(repo);

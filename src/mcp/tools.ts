@@ -112,6 +112,8 @@ export interface ToolContext {
   /** Remote Deployment Job status; absent locally so the local response shape is unchanged. */
   jobStatus?: (account?: string) => Promise<unknown>;
   enqueueJob?: EnqueueJob;
+  /** Remote-Deployment re-consent link builder; absent locally (no hosted setup pages). */
+  reauthUrl?: (account: string) => string;
   /** Remote-Deployment Trigger rule administration; absent on local Deployment. */
   triggerAdmin?: TriggerAdmin;
 }
@@ -158,6 +160,33 @@ async function indexAsOf(repo: Repo, account?: string): Promise<string | null> {
 }
 
 /**
+ * Whether this scope's mailbox credential still works.
+ *
+ * `needs_reauth` means Google has rejected the stored grant outright — no sync
+ * can succeed until a human re-consents, so a stale index will STAY stale. It
+ * is the difference between "refreshing shortly" and "silently frozen", which
+ * is the whole reason it is stamped on every response.
+ * `unknown` = no grant row for this scope (the local CLI, which authenticates
+ * through the operator's own adapters rather than a stored Deployment grant).
+ */
+export type AuthHealth = 'ok' | 'needs_reauth' | 'unknown';
+
+/** Read the Deployment grant's recorded auth health for an Account. */
+async function authHealth(repo: Repo, account: string | undefined): Promise<{ auth: AuthHealth; failedAt: string | null }> {
+  if (!account) return { auth: 'unknown', failedAt: null };
+  try {
+    const row = (await repo.driver
+      .prepare('SELECT auth_error, auth_failed_at FROM google_tokens WHERE account = ?')
+      .get(account)) as { auth_error: string | null; auth_failed_at: string | null } | undefined;
+    if (!row) return { auth: 'unknown', failedAt: null };
+    return row.auth_error ? { auth: 'needs_reauth', failedAt: row.auth_failed_at } : { auth: 'ok', failedAt: null };
+  } catch {
+    // A local index predating the grant table has no auth to report.
+    return { auth: 'unknown', failedAt: null };
+  }
+}
+
+/**
  * The freshness/status block stamped on EVERY response (ADR-0005): tells the
  * agent how stale the index is and how to refresh it, so it never has to guess.
  */
@@ -170,6 +199,10 @@ export interface Freshness {
   stale: boolean;
   /** True when a sync for this account is in flight right now. */
   syncing: boolean;
+  /** Whether the stored mailbox credential still works ({@link AuthHealth}). */
+  auth: AuthHealth;
+  /** When the credential was first rejected (ISO), or null while healthy. */
+  auth_failed_at?: string | null;
   /** The CLI command to refresh this scope manually. */
   refresh_command: unknown;
 }
@@ -208,19 +241,27 @@ async function withMeta<T extends object>(ctx: ToolContext, account: string | un
   const ageMs = asOf == null ? null : now - new Date(asOf).getTime();
   const stale = ageMs == null || ageMs > STALE_AFTER_MS;
   const syncing = acct != null && await ctx.repo.activeSyncRun(acct) != null;
-  const refresh_command: unknown = ctx.enqueueJob
-    ? { kind: 'sync', account: acct ?? null, status: 'available', poll: 'sync_status' }
-    : acct ? handback('sync', '--account', acct) : handback('sync', '--all-accounts');
+  const { auth, failedAt } = await authHealth(ctx.repo, acct);
+  const needsReauth = auth === 'needs_reauth';
+  const refresh_command: unknown = needsReauth && acct
+    ? { kind: 'reauth', account: acct, status: 'blocked', reason: 'invalid_grant', reconsent_url: ctx.reauthUrl?.(acct) ?? null }
+    : ctx.enqueueJob
+      ? { kind: 'sync', account: acct ?? null, status: 'available', poll: 'sync_status' }
+      : acct ? handback('sync', '--account', acct) : handback('sync', '--all-accounts');
 
   const meta: WithMeta = {
     index_as_of: asOf,
-    freshness: { index_as_of: asOf, age_seconds: ageMs == null ? null : Math.floor(ageMs / 1000), stale, syncing, refresh_command },
+    freshness: { index_as_of: asOf, age_seconds: ageMs == null ? null : Math.floor(ageMs / 1000), stale, syncing, auth, auth_failed_at: failedAt, refresh_command },
   };
 
   // Auto-refresh on any stale account-scoped read (ADR-0005): spawn a detached
   // INCREMENTAL sync. `since` = days elapsed + 1 day of overlap (idempotent
   // upsert makes re-fetching the boundary day harmless); a never-synced account
   // passes no `since`, so its first sweep is a correct initial full sync.
+  // A dead grant makes the auto-refresh a lie: the Job would be queued, fail on
+  // the token exchange, and leave the caller believing fresh mail is 90 seconds
+  // away. Report the blockage instead of spawning work that cannot succeed.
+  if (needsReauth) return { ...body, ...meta };
   if (acct && stale && !syncing && ctx.enqueueJob) {
     const since = asOf == null ? undefined : `${Math.ceil(ageMs! / 86_400_000) + 1}d`;
     const jobId = await ctx.enqueueJob('sync', acct, since ? { since } : {});
@@ -564,6 +605,14 @@ export interface MessageDetail extends WithMeta {
   snippet: string | null;
   /** True when this call performed the single O(1) inline enrich (ADR-0001). */
   enriched: boolean;
+  /**
+   * Why `body` is still null at `level: 'body'`, when the inline enrich was
+   * attempted and could not deliver one. Absent when nothing went wrong.
+   * `auth` = the mailbox credential is rejected (re-consent needed, see
+   * {@link AuthHealth}); `fetch_failed` = the provider call failed;
+   * `no_source` = no adapter is configured for this Account.
+   */
+  body_error?: 'auth' | 'fetch_failed' | 'no_source';
 }
 
 /**
@@ -584,6 +633,7 @@ export async function getMessage(ctx: ToolContext, args: GetMessageArgs): Promis
   }
 
   let enriched = false;
+  let bodyError: 'auth' | 'fetch_failed' | 'no_source' | null = null;
   // ADR-0001: ONE bounded inline fetch, only when the agent asked for the body
   // and the row is still meta, and only when a source is wired in.
   if (level === 'body' && row.body_state === 'meta' && ctx.buildSource) {
@@ -594,10 +644,12 @@ export async function getMessage(ctx: ToolContext, args: GetMessageArgs): Promis
         enriched = await enrichOne({ account, id, source, repo: ctx.repo });
         const refreshed = await ctx.repo.getMessage(account, id);
         if (refreshed) row = refreshed;
-      }
-    } catch {
-      // Best-effort inline enrich: a fetch failure falls back to the meta shape
-      // (read-only resilience; the agent can run `show` via a handback instead).
+      } else bodyError = 'no_source';
+    } catch (error) {
+      // Best-effort inline enrich: a fetch failure still returns the meta shape,
+      // but WHY it stayed meta is reported. Swallowing this is what let a dead
+      // grant read as "this message simply has no body".
+      bodyError = error instanceof Error && /invalid_grant|No Google grant/.test(error.message) ? 'auth' : 'fetch_failed';
     }
   }
 
@@ -631,6 +683,7 @@ export async function getMessage(ctx: ToolContext, args: GetMessageArgs): Promis
     ocrImages,
     needsOcr,
     enriched,
+    ...(bodyError ? { body_error: bodyError } : {}),
   });
 }
 
@@ -1114,6 +1167,10 @@ export interface SyncStatusEntry {
   syncing: boolean;
   messages: number;
   bodyStates: { meta: number; full: number; 'summary-only': number };
+  /** Credential health for this Account ({@link AuthHealth}). */
+  auth: AuthHealth;
+  /** When the credential was first rejected (ISO), or null while healthy. */
+  auth_failed_at: string | null;
 }
 
 /** `sync_status` — counts, last run, body-ladder split, freshness (PLAN §12). */
@@ -1131,12 +1188,15 @@ export async function syncStatus(ctx: ToolContext, args: SyncStatusArgs): Promis
         counts[r.body_state] = r.c;
       }
     }
+    const health = await authHealth(ctx.repo, account);
     return {
       account,
       index_as_of: await indexAsOf(ctx.repo, account),
       syncing: await ctx.repo.activeSyncRun(account) != null,
       messages: await ctx.repo.countMessages(account),
       bodyStates: counts,
+      auth: health.auth,
+      auth_failed_at: health.failedAt,
     };
   }));
   const body: { accounts: SyncStatusEntry[]; jobs?: unknown } = { accounts };
@@ -1203,12 +1263,15 @@ export async function relayMenuStatus(ctx: ToolContext): Promise<RelayMenuStatus
     }
     const index_as_of = await indexAsOf(ctx.repo, account);
     const age = ageSeconds(now, index_as_of);
+    const health = await authHealth(ctx.repo, account);
     return {
       account,
       index_as_of,
       syncing: await ctx.repo.activeSyncRun(account) != null,
       messages: await ctx.repo.countMessages(account),
       bodyStates: counts,
+      auth: health.auth,
+      auth_failed_at: health.failedAt,
       age_seconds: age,
       stale: age == null || age * 1000 > STALE_AFTER_MS,
     };
@@ -1239,7 +1302,10 @@ export async function relayMenuStatus(ctx: ToolContext): Promise<RelayMenuStatus
       `${totalMessages} indexed message${totalMessages === 1 ? '' : 's'}`,
       `Last sync ${formatAge(freshest)}`,
       ...accounts.slice(0, 4).map((a) =>
-        `${a.account}: ${a.messages} messages · ${a.syncing ? 'syncing' : a.stale ? 'stale' : 'ready'} · ${formatAge(a.age_seconds)}`,
+        // A rejected credential outranks staleness in the menu line: "stale" reads
+        // as "catching up", which is precisely the wrong thing to tell a human
+        // whose mailbox will never catch up without them re-consenting.
+        `${a.account}: ${a.messages} messages · ${a.auth === 'needs_reauth' ? 'needs re-auth' : a.syncing ? 'syncing' : a.stale ? 'stale' : 'ready'} · ${formatAge(a.age_seconds)}`,
       ),
     ],
     accounts,
@@ -1275,7 +1341,17 @@ export async function syncNow(ctx: ToolContext, args: SyncNowArgs): Promise<With
       skipped.push(account);
       continue;
     }
-    if (ctx.backgroundSync?.(account)) started.push(account);
+    // A rejected grant cannot sync; queueing here would only manufacture another
+    // failed Job and report `started` for work that is guaranteed to fail.
+    if ((await authHealth(ctx.repo, account)).auth === 'needs_reauth') {
+      skipped.push(account);
+      continue;
+    }
+    // The remote Deployment has no local process to spawn — it queues a Job.
+    // Without this branch `sync_now` was inert on the Worker: it always answered
+    // `started: false` and handed back a CLI command the caller cannot run.
+    if (ctx.enqueueJob) { await ctx.enqueueJob('sync', account, {}); started.push(account); }
+    else if (ctx.backgroundSync?.(account)) started.push(account);
     else skipped.push(account);
   }
   const command = args.account ? handback('sync', '--account', args.account) : handback('sync', '--all-accounts');

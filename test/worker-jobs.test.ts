@@ -44,6 +44,54 @@ test('cron enqueues one sync Job per connected Account without Gmail', async () 
   finally { await mf.dispose(); }
 });
 
+test('the scheduler skips an Account whose grant Google already rejected', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    await saveGrant(driver, { account: 'acct-dead', address: 'dead@example.com', scopes: ['https://www.googleapis.com/auth/gmail.readonly'], refreshToken: 'refresh', key });
+    await driver.prepare("UPDATE google_tokens SET auth_error='invalid_grant',auth_failed_at=? WHERE account=?")
+      .run(new Date().toISOString(), 'acct-dead');
+
+    await enqueueScheduledSyncs(env);
+    const accounts = sent.map((message) => (message as { account: string }).account);
+    assert.deepEqual(accounts, ['acct-a'], 'only the healthy Account is swept');
+
+    // Repairing the grant puts it straight back in the rotation.
+    await driver.prepare('UPDATE google_tokens SET auth_error=NULL,auth_failed_at=NULL WHERE account=?').run('acct-dead');
+    await enqueueScheduledSyncs(env);
+    assert.ok(sent.some((message) => (message as { account: string }).account === 'acct-dead'), 're-consent resumes syncing');
+  } finally { await mf.dispose(); }
+});
+
+test('a Job past its lease is reclaimed within one cron period, not six hours', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    // Wedged 20 minutes ago: past the 15-minute lease, far short of six hours.
+    const wedged = new Date(Date.now() - 20 * 60_000).toISOString();
+    await driver.prepare(`INSERT INTO jobs(id,kind,account,params_json,status,progress_json,created_at,started_at)
+      VALUES(?,?,?,?,?,?,?,?)`).run('wedged', 'sync', 'acct-a', '{}', 'running', '{}', wedged, wedged);
+
+    const replacement = await enqueueJob(env, 'sync', 'acct-a');
+    assert.notEqual(replacement, 'wedged', 'the corpse no longer suppresses new work');
+    assert.equal(sent.length, 1, 'a real Job reached the Queue');
+    const reaped = await driver.prepare('SELECT status,terminal,error FROM jobs WHERE id=?').get('wedged') as { status: string; terminal: number; error: string };
+    assert.equal(reaped.status, 'failed');
+    assert.equal(reaped.terminal, 1);
+    assert.match(reaped.error, /stale Job lock expired after 15 minutes/);
+  } finally { await mf.dispose(); }
+});
+
+test('a Job inside its lease still de-duplicates', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    const recent = new Date(Date.now() - 60_000).toISOString();
+    await driver.prepare(`INSERT INTO jobs(id,kind,account,params_json,status,progress_json,created_at,started_at)
+      VALUES(?,?,?,?,?,?,?,?)`).run('live', 'sync', 'acct-a', '{}', 'running', '{}', recent, recent);
+
+    assert.equal(await enqueueJob(env, 'sync', 'acct-a'), 'live', 'a live Job is still the answer');
+    assert.equal(sent.length, 0, 'no duplicate work queued');
+  } finally { await mf.dispose(); }
+});
+
 test('a Queue send failure is marked failed and never strands Job deduplication', async () => {
   const { mf, env, driver, sent } = await fixture();
   try {
