@@ -118,7 +118,10 @@ export async function publishMessageChanges(
   repo: Pick<Repo, 'getMessage'>,
   account: string,
   messageIds: readonly string[],
-  jobId: string,
+  // Accepted for call-site symmetry with the attachment publisher, but not
+  // recorded: crm_change_events has no Job column, so there is nowhere to put it
+  // without a migration. Underscored so it does not read as a dropped write.
+  _jobId: string,
 ): Promise<string | undefined> {
   let cursor: string | undefined;
   for (const id of messageIds) {

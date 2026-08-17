@@ -12,6 +12,12 @@ export const oauthProvider = new OAuthProvider<Env>({
   clientRegistrationEndpoint: '/register',
   scopesSupported: ['mail-index', 'crm.read', 'crm.index', 'crm.jobs'],
   allowPlainPKCE: false,
+  // The library defaults to a 90-day KV TTL on every registered client, which
+  // silently deletes the CRM's client record and breaks Twenty's OAuth. These
+  // registrations are operator-managed and few, so they do not expire.
+  // The key must be PRESENT with an undefined value: the provider applies its
+  // default via object spread, so omitting it entirely restores the 90 days.
+  clientRegistrationTTL: undefined,
 });
 
 export default {
