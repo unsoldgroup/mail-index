@@ -768,6 +768,28 @@ test('retention evicts only what aged out, and never what the user is attached t
   assert.ok(!promotable.includes('r-old'), 'an evicted body is not re-promoted on the next cycle');
 });
 
+test('retention exemptions match the right senders and no lookalikes', async () => {
+  const repo = await freshRepo();
+  await seedMailbox(repo);
+  const cutoff = windowCutoff({ body_window_months: 3, retention: 'window', onboarding_completed_at: null }, NOW);
+  const old = cutoff - 86_400_000;
+
+  await seed(repo, { id: 'x-vip', threadId: 't-x', internalDate: old, from: 'VIP <vip@partner.example.com>', subject: 'old vip', bodyText: 'b', bodyState: 'full' });
+  await seed(repo, { id: 'x-domain', threadId: 't-x', internalDate: old, from: 'Someone <hi@partner.example.com>', subject: 'old domain', bodyText: 'b', bodyState: 'full' });
+  // The lookalike: a domain that merely STARTS with the curated one. A bare
+  // substring test would wrongly exempt this, so it must stay evictable.
+  await seed(repo, { id: 'x-lookalike', threadId: 't-x', internalDate: old, from: 'Spoof <hi@partner.example.com.attacker.net>', subject: 'old spoof', bodyText: 'b', bodyState: 'full' });
+  await repo.driver
+    .prepare(`INSERT INTO threads (account, thread_id, msg_count, unread_count, user_participated) VALUES (?, ?, 3, 0, 0)`)
+    .run(ACCOUNT, 't-x');
+  await curationSet(repo, ACCOUNT, { domains: [{ domain: 'partner.example.com', curation: 'important' }] });
+
+  const eligible = await repo.retentionEligible(ACCOUNT, cutoff);
+  assert.ok(!eligible.includes('x-vip'), 'curated-important domain keeps its body at any age');
+  assert.ok(!eligible.includes('x-domain'), 'so does another sender on that domain');
+  assert.ok(eligible.includes('x-lookalike'), 'a lookalike domain inherits no exemption');
+});
+
 test('surface: exactly the PLAN §12 tools are advertised, all with schemas, all dispatch', async () => {
   const expected = [
     'search', 'list_labeled', 'refresh_inbox', 'get_message', 'get_message_attachment', 'get_thread', 'list_contacts',
