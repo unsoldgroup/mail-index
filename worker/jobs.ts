@@ -205,6 +205,18 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       let fetched = 0;
       let indexed = 0;
 
+      // The Account-level sync lock is held by whichever sweep is running, and
+      // the cron queues the incremental sync alongside this one. Losing that
+      // race is normal, not a failure: history is not going anywhere, so yield
+      // the tick and let the next one pick the slice up. Advancing the cursor
+      // here would silently SKIP a year of mail.
+      if (await repo.activeSyncRun(job.account) != null) {
+        progress['backfill'] = { skipped: 'account busy', since, until };
+        await update('done', progress);
+        console.log(JSON.stringify({ event: 'job_finish', job_id: job.jobId, kind: job.kind, counts: {} }));
+        return;
+      }
+
       // Pass 1 — everything sent in the slice. Cheap, and it is what discovers
       // (and scores) the Correspondents pass 2 depends on.
       const sent = await syncMetadata({ account: job.account, source, repo, scope: { since, until, query: 'in:sent' } });

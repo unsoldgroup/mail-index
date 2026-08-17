@@ -17,9 +17,14 @@
     // progress — and a stuck row suppresses the next enqueue for that Account.
     // One Job per invocation gives each the full budget.
     //
+    // max_concurrency 1 because several Job kinds (sync, enrich_bulk, retention,
+    // backfill_slice) all take the same Account-level sync lock. Run in parallel
+    // they simply collide — the cron queues them together, so the loser fails
+    // with "already in progress" through no fault of its own.
+    //
     // max_retries is bounded so a Job that kills its isolate stops being
     // redelivered forever; the Job row's lease is what reclaims it after that.
-    "consumers": [{ "queue": "mail-index-jobs", "max_batch_size": 1, "max_retries": 3 }]
+    "consumers": [{ "queue": "mail-index-jobs", "max_batch_size": 1, "max_concurrency": 1, "max_retries": 3 }]
   },
   "kv_namespaces": [
     { "binding": "OAUTH_KV", "id": "3a709f7cc8884412aacb9347345a90ad" }

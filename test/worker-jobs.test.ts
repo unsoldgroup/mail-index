@@ -108,6 +108,24 @@ test('a backfill slice sweeps sent mail and Correspondents, not the whole year',
   } finally { await mf.dispose(); }
 });
 
+test('a backfill slice yields to a busy Account without losing its place', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    const repo = new Repo(driver);
+    // Something else holds the Account-level sync lock.
+    await repo.startSyncRun({ account: 'acct-a', phase: 'sync', selector: null });
+
+    const jobId = await enqueueJob(env, 'backfill_slice', 'acct-a', { since: '2024-01-01', until: '2025-01-01' });
+    await runJob(env, sent.find((m) => (m as { jobId: string }).jobId === jobId) as never, gmailFetch);
+
+    const row = await driver.prepare('SELECT status,progress_json FROM jobs WHERE id=?').get(jobId) as { status: string; progress_json: string };
+    assert.equal(row.status, 'done', 'losing the race is not a failure');
+    assert.match(row.progress_json, /account busy/);
+    // Crucially the cursor did NOT move — advancing it would skip the year.
+    assert.equal((await repo.getAccountSettings('acct-a')).backfill_cursor, null);
+  } finally { await mf.dispose(); }
+});
+
 test('the Queue consumer takes one Job per invocation', async () => {
   // The consumer awaits each message SERIALLY, so a batch larger than one makes
   // several sync pipelines share a single 30s CPU budget. Exhausting it kills
@@ -120,6 +138,9 @@ test('the Queue consumer takes one Job per invocation', async () => {
     const config = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
     const consumer = /"consumers"\s*:\s*\[\{([^}]*)\}/.exec(config)?.[1] ?? '';
     assert.match(consumer, /"max_batch_size"\s*:\s*1\b/, `${path} must take one Job per invocation`);
+    // Several Job kinds share the Account-level sync lock, so concurrent
+    // invocations collide with "already in progress" rather than doing work.
+    assert.match(consumer, /"max_concurrency"\s*:\s*1\b/, `${path} must run one Job at a time`);
   }
 });
 
