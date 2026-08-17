@@ -2,6 +2,7 @@
 import { D1Driver } from '../src/index/drivers/d1.js';
 import { Repo } from '../src/index/repo.js';
 import { runMigrations } from '../src/index/migrations.js';
+import { windowCutoff } from '../src/index/settings.js';
 import { syncMetadata } from '../src/ingest/sync.js';
 import { enrich } from '../src/ingest/enrich.js';
 import { buildGraph } from '../src/graph/index.js';
@@ -14,7 +15,7 @@ import { CrmChangeFeed, publishMessageChanges } from './crm-feed.js';
 import { notifyCrmCompletion } from './crm-webhook.js';
 import { storeMessageAttachments } from './attachments.js';
 
-export type JobKind = 'sync' | 'backfill' | 'enrich_bulk' | 'webhook_delivery';
+export type JobKind = 'sync' | 'backfill' | 'enrich_bulk' | 'retention' | 'webhook_delivery';
 export interface JobMessage { jobId: string; kind: JobKind; account: string; params: Record<string, unknown> }
 
 const DEFAULT_LOOKBACK_MONTHS = 12;
@@ -42,6 +43,18 @@ function configuredLookbackSince(env: Pick<Env, 'SYNC_LOOKBACK_MONTHS'>): string
  * of syncs — which is exactly how an Account went five days without indexing.
  */
 const JOB_STALE_AFTER_MS = 15 * 60_000;
+
+/**
+ * How many Messages one working-set Job touches per run.
+ *
+ * Both sweeps are O(mailbox), so they must never try to finish in one
+ * invocation — a Worker isolate killed by the CPU or subrequest limit leaves
+ * its Job wedged (that is the failure this whole change set exists to prevent).
+ * Bounded batches make each run cheap and the work resumable: every tick drains
+ * a slice, and the sweep goes quiet once nothing is left.
+ */
+const RETENTION_BATCH = 200;
+const BACKFILL_BATCH = 100;
 
 export async function enqueueJob(env: Env, kind: JobKind, account: string, params: Record<string, unknown> = {}): Promise<string> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
@@ -76,12 +89,34 @@ export async function enqueueScheduledSyncs(env: Env): Promise<string[]> {
   // the full lookback window, so every hour would replay a 12-month sweep that
   // can only fail. Skip it until the grant is repaired (see markAuthFailed).
   const rows = await driver.prepare('SELECT account FROM google_tokens WHERE auth_error IS NULL ORDER BY account').all() as { account: string }[];
-  return Promise.all(rows.map(async (row) => {
+  const ids = await Promise.all(rows.map(async (row) => {
     const watermark = await driver.prepare(`SELECT finished_at FROM sync_runs WHERE account=? AND phase='sync' AND finished_at IS NOT NULL AND error IS NULL ORDER BY finished_at DESC LIMIT 1`).get(row.account) as { finished_at: string } | undefined;
     const minimumSince = configuredLookbackSince(env);
     const since = watermark?.finished_at && watermark.finished_at > minimumSince ? watermark.finished_at : minimumSince;
     return enqueueSyncJob(env, row.account, since);
   }));
+  return [...ids, ...await enqueueWorkingSetJobs(env, driver, rows.map((row) => row.account))];
+}
+
+/**
+ * Keep each Account's working set at its configured shape: fill in bodies inside
+ * the retention window, evict the ones that fell out of it.
+ *
+ * These ride the same cron as the sync, one bounded batch per Account per tick,
+ * so the window converges over a few cycles instead of one enormous run. The
+ * Job-level de-dupe means a batch still draining is never doubled up.
+ */
+export async function enqueueWorkingSetJobs(env: Env, driver: D1Driver, accounts: readonly string[]): Promise<string[]> {
+  const repo = new Repo(driver);
+  const queued: string[] = [];
+  for (const account of accounts) {
+    const settings = await repo.getAccountSettings(account);
+    // An unconfigured window means the operator has not chosen a policy yet;
+    // the defaults apply, which is a 3-month working set.
+    if (windowCutoff(settings) != null) queued.push(await enqueueJob(env, 'enrich_bulk', account, { limit: BACKFILL_BATCH }));
+    if (settings.retention === 'window') queued.push(await enqueueJob(env, 'retention', account, { limit: RETENTION_BATCH }));
+  }
+  return queued;
 }
 
 export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fetch = fetch): Promise<void> {
@@ -144,8 +179,40 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
         await repo.finishSyncRun(graphRun, { fetched: 0, indexed: graph?.nodes ?? 0 });
       }
       progress['graph'] = graph; await update('running', progress);
+    } else if (job.kind === 'retention') {
+      // Evict bodies that aged out of the working set. Bounded per run so the
+      // sweep can never exhaust the isolate's CPU budget; whatever it does not
+      // reach this tick, the next one does.
+      const settings = await repo.getAccountSettings(job.account);
+      const cutoff = windowCutoff(settings, new Date());
+      let evicted = 0;
+      if (settings.retention === 'window' && cutoff != null) {
+        const limit = Number(job.params['limit'] ?? RETENTION_BATCH);
+        for (const id of await repo.retentionEligible(job.account, cutoff, limit)) {
+          if (await repo.evictBody(job.account, id)) evicted += 1;
+        }
+      }
+      progress['retention'] = { evicted, cutoff };
     } else {
-      const enriched = await enrich({ account: job.account, source, repo, selector: { profile: true, ...(job.params['limit'] ? { limit: Number(job.params['limit']) } : {}) } });
+      // Backfill bodies INSIDE the working set. `since` comes from the same
+      // windowCutoff the retention sweep uses — if the two ever disagreed, the
+      // boundary messages would be re-fetched and re-dropped every cycle.
+      const settings = await repo.getAccountSettings(job.account);
+      const cutoff = windowCutoff(settings, new Date());
+      //
+      // Inside the window the policy is "everything readable", not "everything
+      // the interest profile happens to match" — an empty profile is exactly why
+      // an Account could hold 10k messages and 33 bodies. With the window off we
+      // fall back to the profile, which is the pre-window behaviour.
+      const enriched = await enrich({
+        account: job.account,
+        source,
+        repo,
+        selector: {
+          ...(cutoff != null ? { rule: 'all' as const, since: cutoff } : { profile: true }),
+          ...(job.params['limit'] ? { limit: Number(job.params['limit']) } : {}),
+        },
+      });
       progress['enrich'] = { fetched: enriched.fetched, enriched: enriched.enriched };
     }
     await update('done', progress);

@@ -64,6 +64,7 @@ import { reconcileInbox } from '../ingest/reconcile-inbox.js';
 import { isLikelyImageOnly } from '../intelligence/images.js';
 import { computeCadence, type CadenceRow } from '../intelligence/cadence.js';
 import { buildMatch } from '../index/fts.js';
+import { windowCutoff, type AccountSettings } from '../index/settings.js';
 import { propose, set as curationSet, get as curationGet } from '../curation/index.js';
 import {
   saveSummary,
@@ -1014,6 +1015,240 @@ export async function graphCommunities(
     body.build_command = handback('graph', 'build', '--account', account);
   }
   return await withMeta(ctx, account, body);
+}
+
+// ---- settings + guided first run ------------------------------------------
+
+/** Resolve the Account a settings/onboarding call applies to. */
+async function settingsAccount(ctx: ToolContext, account?: string): Promise<string> {
+  const resolved = account ?? await soleAccount(ctx);
+  if (!resolved) {
+    throw new McpToolError(
+      'more than one mailbox is connected — pass `account` to say which one these settings apply to',
+    );
+  }
+  return resolved;
+}
+
+export interface SettingsGetArgs { account?: string }
+
+/** `settings_get` — the Account's working-set policy, fully defaulted. */
+export async function settingsGet(ctx: ToolContext, args: SettingsGetArgs): Promise<WithMeta & {
+  account: string;
+  settings: AccountSettings;
+}> {
+  const account = await settingsAccount(ctx, args.account);
+  return await withMeta(ctx, account, { account, settings: await ctx.repo.getAccountSettings(account) });
+}
+
+export interface SettingsSetArgs {
+  account?: string;
+  body_window_months?: number;
+  retention?: 'window' | 'off';
+}
+
+/**
+ * `settings_set` — change the working-set policy.
+ *
+ * Patch semantics: omitted keys keep their stored value, so a caller that knows
+ * about one setting cannot silently reset another.
+ */
+export async function settingsSet(ctx: ToolContext, args: SettingsSetArgs): Promise<WithMeta & {
+  account: string;
+  settings: AccountSettings;
+  note: string;
+}> {
+  const account = await settingsAccount(ctx, args.account);
+  const settings = await ctx.repo.setAccountSettings(account, {
+    ...(args.body_window_months != null ? { body_window_months: args.body_window_months } : {}),
+    ...(args.retention != null ? { retention: args.retention } : {}),
+  });
+  const note = settings.body_window_months > 0
+    ? `Bodies are kept for the last ${settings.body_window_months} month(s); older ones are ${settings.retention === 'window' ? 'evicted (re-fetchable on demand)' : 'kept'}.`
+    : 'No time window: bodies are selected by the interest profile alone.';
+  return await withMeta(ctx, account, { account, settings, note });
+}
+
+export interface BackfillBodiesArgs { account?: string; limit?: number }
+
+/**
+ * `backfill_bodies` — fill in the bodies inside the retention window.
+ *
+ * The scheduled sweep does this a batch at a time; this is the "do it now"
+ * handle for the end of onboarding, when the operator has just chosen a window
+ * and wants the mailbox readable without waiting for the next tick.
+ */
+export async function backfillBodies(ctx: ToolContext, args: BackfillBodiesArgs): Promise<WithMeta & {
+  started: boolean;
+  account: string;
+  pending_bodies: number;
+  job_id?: string;
+  note: string;
+}> {
+  const account = await settingsAccount(ctx, args.account);
+  const settings = await ctx.repo.getAccountSettings(account);
+  const cutoff = windowCutoff(settings, ctx.now?.() ?? new Date());
+  const pending = (await ctx.repo.driver
+    .prepare(
+      `SELECT count(*) AS n FROM messages
+        WHERE account = ? AND body_state = 'meta'` + (cutoff != null ? ` AND internal_date >= ?` : ``),
+    )
+    .get(...(cutoff != null ? [account, cutoff] : [account]))) as { n: number };
+
+  if ((await authHealth(ctx.repo, account)).auth === 'needs_reauth') {
+    return await withMeta(ctx, account, {
+      started: false,
+      account,
+      pending_bodies: pending.n,
+      note: 'This mailbox needs re-authorising before any body can be fetched — see freshness.refresh_command.',
+    });
+  }
+  if (!ctx.enqueueJob) {
+    return await withMeta(ctx, account, {
+      started: false,
+      account,
+      pending_bodies: pending.n,
+      note: `Run ${handback('enrich', '--account', account)} to fill these in.`,
+    });
+  }
+  const jobId = await ctx.enqueueJob('enrich_bulk', account, { ...(args.limit != null ? { limit: args.limit } : {}) });
+  return await withMeta(ctx, account, {
+    started: true,
+    account,
+    pending_bodies: pending.n,
+    job_id: jobId,
+    note: `Backfilling bodies for the last ${settings.body_window_months} month(s); poll sync_status.`,
+  });
+}
+
+/** One question in the guided first run. */
+export interface OnboardingStep {
+  step: 'accounts' | 'retention' | 'interests' | 'backfill' | 'done';
+  question: string;
+  /** The offered answers; absent on informational steps. */
+  options?: { value: string | number; label: string }[];
+  /** What the agent should say or show alongside the question. */
+  context: string[];
+  remaining_steps: string[];
+  progress: { done: number; total: number };
+}
+
+export interface OnboardingArgs { account?: string; step?: string; answer?: string | number }
+
+const ONBOARDING_ORDER = ['accounts', 'retention', 'interests', 'backfill'] as const;
+
+/**
+ * `onboarding` — the guided first run, as a state machine the agent drives.
+ *
+ * MCP elicitation would be the natural fit, but the deployed Worker serves MCP
+ * statelessly (no session, no server→client requests), so the server cannot ask
+ * the user anything directly. Returning the question as DATA works on every
+ * transport: the agent renders it, collects the answer, and calls back. A client
+ * that does support elicitation can render the same payload natively.
+ */
+export async function onboarding(ctx: ToolContext, args: OnboardingArgs): Promise<WithMeta & OnboardingStep> {
+  const account = await settingsAccount(ctx, args.account);
+
+  // Record the answer for the step being replied to, then advance.
+  if (args.step === 'retention' && args.answer != null) {
+    await ctx.repo.setAccountSettings(account, {
+      body_window_months: Number(args.answer),
+      retention: Number(args.answer) > 0 ? 'window' : 'off',
+    });
+  }
+  if (args.step === 'backfill' && args.answer != null) {
+    if (String(args.answer) !== 'skip') await backfillBodies(ctx, { account });
+    await ctx.repo.setAccountSettings(account, { onboarding_completed_at: new Date().toISOString() });
+  }
+
+  const fresh = await ctx.repo.getAccountSettings(account);
+  const health = await authHealth(ctx.repo, account);
+  // The walk is a plain ordered list: an answer advances to the step after the
+  // one it replied to, and a call with no `step` either resumes at the start or
+  // reports completion. Anything cleverer here becomes a state machine that can
+  // re-ask a question the user has already answered.
+  const answeredIndex = args.step ? ONBOARDING_ORDER.indexOf(args.step as typeof ONBOARDING_ORDER[number]) : -1;
+  const nextIndex = fresh.onboarding_completed_at != null ? ONBOARDING_ORDER.length : answeredIndex + 1;
+  const next = ONBOARDING_ORDER[nextIndex];
+
+  const remaining = ONBOARDING_ORDER.slice(nextIndex + 1);
+  const progress = { done: Math.min(nextIndex, ONBOARDING_ORDER.length), total: ONBOARDING_ORDER.length };
+
+  const step: OnboardingStep = ((): OnboardingStep => {
+    switch (next) {
+      case 'accounts':
+        return {
+          step: 'accounts',
+          question: `Mailbox "${account}" is connected. Ready to set how much of it stays instantly readable?`,
+          options: [{ value: 'yes', label: 'Continue' }],
+          context: health.auth === 'needs_reauth'
+            ? [`"${account}" needs re-authorising first — its stored credential was rejected.`]
+            : [`"${account}" is authorised and syncing.`],
+          remaining_steps: [...remaining],
+          progress,
+        };
+      case 'retention':
+        return {
+          step: 'retention',
+          question: 'How much mail should stay instantly readable?',
+          options: [
+            { value: 3, label: 'Last 3 months (recommended)' },
+            { value: 6, label: 'Last 6 months' },
+            { value: 12, label: 'Last 12 months' },
+            { value: 0, label: 'No window — only what my interests match' },
+          ],
+          context: [
+            'mail-index always indexes every message’s headers, subject and snippet.',
+            'This setting is about full BODIES, which cost storage: inside the window every message is readable in one hop; outside it, bodies are dropped and re-fetched on demand.',
+            'Mail you replied to, and senders you mark important, keep their bodies at any age.',
+          ],
+          remaining_steps: [...remaining],
+          progress,
+        };
+      case 'interests':
+        return {
+          step: 'interests',
+          question: 'Which senders and topics matter enough to keep readable beyond the window?',
+          options: [
+            { value: 'propose', label: 'Suggest some from my mail' },
+            { value: 'skip', label: 'Skip for now' },
+          ],
+          context: [
+            'Run interest_propose for a ranked shortlist, then interest_set to persist it.',
+            'Anything marked important is exempt from body eviction, however old.',
+          ],
+          remaining_steps: [...remaining],
+          progress,
+        };
+      case 'backfill':
+        return {
+          step: 'backfill',
+          question: `Fill in the missing bodies for the last ${fresh.body_window_months} month(s) now?`,
+          options: [
+            { value: 'now', label: 'Yes, start now' },
+            { value: 'skip', label: 'No, let the hourly sweep do it' },
+          ],
+          context: ['Existing mail is header-only until it is backfilled; new mail is enriched as it arrives.'],
+          remaining_steps: [...remaining],
+          progress,
+        };
+      default:
+        return {
+          step: 'done',
+          question: 'Setup is complete.',
+          context: [
+            fresh.body_window_months > 0
+              ? `Bodies are kept for the last ${fresh.body_window_months} month(s).`
+              : 'Bodies follow the interest profile only.',
+            'Change any of this later with settings_set.',
+          ],
+          remaining_steps: [],
+          progress: { done: ONBOARDING_ORDER.length, total: ONBOARDING_ORDER.length },
+        };
+    }
+  })();
+
+  return await withMeta(ctx, account, step);
 }
 
 // ---- curation write-back loop (M3.1, PLAN §11) ----------------------------

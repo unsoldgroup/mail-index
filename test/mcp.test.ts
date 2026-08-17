@@ -57,7 +57,10 @@ import {
   modifyLabels,
   parseSince,
   handback,
+  onboarding,
+  settingsSet,
 } from '../dist/mcp/tools.js';
+import { windowCutoff } from '../dist/index/settings.js';
 import { TOOLS, toolList, dispatch } from '../dist/mcp/server.js';
 import { InsufficientScopeError } from '../dist/source/index.js';
 import {
@@ -691,11 +694,85 @@ test('parseSince: relative tokens and ISO', async () => {
   assert.throws(() => parseSince('soon', base));
 });
 
+test('onboarding walks its steps, persists the window, and completes once', async () => {
+  const repo = await freshRepo();
+  await seedMailbox(repo);
+  await recordSync(repo, NOW.toISOString());
+  const ctx = ctxFor(repo, { enqueueJob: async () => 'job-1' });
+
+  const first = await onboarding(ctx, {});
+  assert.equal(first.step, 'accounts');
+  assert.ok(first.remaining_steps.includes('retention'));
+
+  const retention = await onboarding(ctx, { step: 'accounts', answer: 'yes' });
+  assert.equal(retention.step, 'retention');
+  assert.deepEqual(retention.options?.map((option) => option.value), [3, 6, 12, 0]);
+
+  const interests = await onboarding(ctx, { step: 'retention', answer: 3 });
+  assert.equal(interests.step, 'interests');
+  assert.equal((await repo.getAccountSettings(ACCOUNT)).body_window_months, 3, 'the answer is persisted immediately');
+
+  const backfill = await onboarding(ctx, { step: 'interests', answer: 'skip' });
+  assert.equal(backfill.step, 'backfill');
+
+  const done = await onboarding(ctx, { step: 'backfill', answer: 'skip' });
+  assert.equal(done.step, 'done');
+  const settings = await repo.getAccountSettings(ACCOUNT);
+  assert.ok(settings.onboarding_completed_at, 'completion is stamped');
+
+  // Re-running after completion does not re-ask.
+  assert.equal((await onboarding(ctx, {})).step, 'done');
+});
+
+test('settings_set patches one field without resetting the others', async () => {
+  const repo = await freshRepo();
+  await seedMailbox(repo);
+  await recordSync(repo, NOW.toISOString());
+  const ctx = ctxFor(repo);
+
+  await settingsSet(ctx, { body_window_months: 6 });
+  const res = await settingsSet(ctx, { retention: 'off' });
+  assert.equal(res.settings.body_window_months, 6, 'the untouched field survives');
+  assert.equal(res.settings.retention, 'off');
+});
+
+test('retention evicts only what aged out, and never what the user is attached to', async () => {
+  const repo = await freshRepo();
+  await seedMailbox(repo);
+  const cutoff = windowCutoff({ body_window_months: 3, retention: 'window', onboarding_completed_at: null }, NOW);
+  assert.ok(cutoff != null);
+
+  // Three full bodies: one inside the window, two outside it — one of those on a
+  // thread the user joined, which must survive at any age.
+  await seed(repo, { id: 'r-inside', threadId: 't-cold', internalDate: cutoff + 86_400_000, from: 'shop@example.com', subject: 'Recent order', bodyText: 'inside', bodyState: 'full' });
+  await seed(repo, { id: 'r-old', threadId: 't-cold', internalDate: cutoff - 86_400_000, from: 'shop@example.com', subject: 'Old order', bodyText: 'outside', bodyState: 'full' });
+  await seed(repo, { id: 'r-mine', threadId: 't-warm', internalDate: cutoff - 86_400_000, from: 'shop@example.com', subject: 'Old but mine', bodyText: 'outside', bodyState: 'full' });
+  // Threads are normally derived by aggregation; seed the one bit retention reads.
+  const thread = repo.driver.prepare(
+    `INSERT INTO threads (account, thread_id, msg_count, unread_count, user_participated) VALUES (?, ?, 1, 0, ?)`,
+  );
+  await thread.run(ACCOUNT, 't-warm', 1);
+  await thread.run(ACCOUNT, 't-cold', 0);
+
+  const eligible = await repo.retentionEligible(ACCOUNT, cutoff);
+  assert.deepEqual(eligible, ['r-old'], 'only the aged-out, unattached body is eligible');
+
+  assert.equal(await repo.evictBody(ACCOUNT, 'r-old'), true);
+  const evicted = await repo.getMessage(ACCOUNT, 'r-old');
+  assert.equal(evicted?.body_text, null);
+  assert.equal(evicted?.body_state, 'meta', 'no summary → honest "fetchable, not fetched"');
+
+  // And the enrichment side agrees on the boundary, so the two never fight.
+  const promotable = await repo.selectMetaMessages(ACCOUNT, { rule: 'all', since: cutoff });
+  assert.ok(!promotable.includes('r-old'), 'an evicted body is not re-promoted on the next cycle');
+});
+
 test('surface: exactly the PLAN §12 tools are advertised, all with schemas, all dispatch', async () => {
   const expected = [
     'search', 'list_labeled', 'refresh_inbox', 'get_message', 'get_thread', 'list_contacts',
     'get_contact', 'find_person', 'list_threads', 'graph_neighbors', 'graph_communities',
     'interest_propose', 'interest_set', 'interest_get', 'save_summary',
+    'onboarding', 'settings_get', 'settings_set', 'backfill_bodies',
     'domains_to_categorize', 'save_domain_category', 'cadence', 'sync_status',
     'relay_menu_status', 'sync_now', 'catch_up', 'digest_sources', 'archive_message', 'modify_labels',
     'trigger_rule_save', 'trigger_rule_list', 'trigger_rule_delete',
@@ -750,8 +827,10 @@ test('setup mode: with config present the full tool surface is what serve() woul
   // The config-present path serves the full surface — assert its size/identity
   // here so the bootstrapping branch never silently shrinks the real surface.
   // 21 original read tools + the 2 opt-in writers (archive_message,
-  // modify_labels) + 2 relay/status quick-action tools.
-  assert.equal(TOOLS.length, 30, 'full surface includes five remote Trigger rule tools');
+  // modify_labels) + 2 relay/status quick-action tools + five remote Trigger
+  // rule tools + the four working-set tools (onboarding, settings_get,
+  // settings_set, backfill_bodies).
+  assert.equal(TOOLS.length, 34, 'full surface includes the working-set tools');
 });
 
 test('setup_status reports observation and does not crash with no config', async () => {
