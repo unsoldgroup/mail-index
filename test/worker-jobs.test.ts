@@ -138,9 +138,10 @@ test('the Queue consumer takes one Job per invocation', async () => {
     const config = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
     const consumer = /"consumers"\s*:\s*\[\{([^}]*)\}/.exec(config)?.[1] ?? '';
     assert.match(consumer, /"max_batch_size"\s*:\s*1\b/, `${path} must take one Job per invocation`);
-    // Several Job kinds share the Account-level sync lock, so concurrent
-    // invocations collide with "already in progress" rather than doing work.
-    assert.match(consumer, /"max_concurrency"\s*:\s*1\b/, `${path} must run one Job at a time`);
+    // Capped, but NOT to 1: the sync lock is per Account, so one invocation per
+    // mailbox is the useful ceiling. Serialising globally made a tick drain
+    // slower than the hour that queues it and starved the last-enqueued kind.
+    assert.match(consumer, /"max_concurrency"\s*:\s*[1-9]\d*\b/, `${path} must cap concurrency to the Account count`);
   }
 });
 
