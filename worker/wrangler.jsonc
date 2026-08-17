@@ -10,7 +10,7 @@
   "queues": {
     "producers": [{ "binding": "SYNC_QUEUE", "queue": "mail-index-jobs" }],
     // One Job per invocation — see the note in wrangler.production.jsonc.
-    "consumers": [{ "queue": "mail-index-jobs", "max_batch_size": 1, "max_retries": 3 }]
+    "consumers": [{ "queue": "mail-index-jobs", "max_batch_size": 1, "max_concurrency": 1, "max_retries": 3 }]
   },
   "kv_namespaces": [
     { "binding": "OAUTH_KV", "id": "replace-with-operator-kv-id" }
