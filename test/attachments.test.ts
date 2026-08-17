@@ -8,7 +8,9 @@ test('attachment storage writes safe R2 keys and emits CRM metadata', async () =
   const events: Array<Record<string, unknown>> = [];
   const source = {
     getFull: async () => ({ attachments: [{ attachmentId: 'att-1', filename: 'quote final.pdf', mimeType: 'application/pdf', sizeBytes: 2, inline: false }] }),
-    getAttachment: async () => Uint8Array.from([1, 2]).buffer,
+    // getAttachment returns base64 (the shape the MCP tool also consumes); the
+    // R2 path decodes it back to bytes.
+    getAttachment: async () => ({ data: Buffer.from([1, 2]).toString('base64'), size: 2 }),
   };
   const result = await storeMessageAttachments({
     source,

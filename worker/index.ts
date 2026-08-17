@@ -62,8 +62,8 @@ async function storage(env: Env) { const driver = new D1Driver(env.DB); await ru
  * Each request therefore gets its own server + transport. The tool surface is
  * rebuilt from D1 per request, so nothing of value lived in that map anyway.
  */
-async function handleMcp(request: Request, env: Env): Promise<Response> {
-  const server = buildServer(await buildWorkerToolContext(env, fetch, new URL(request.url).origin));
+async function handleMcp(request: Request, env: Env, fetchImpl: typeof fetch = fetch): Promise<Response> {
+  const server = buildServer(await buildWorkerToolContext(env, fetchImpl, new URL(request.url).origin));
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   await server.connect(transport);
   return transport.handleRequest(request);
@@ -90,10 +90,10 @@ export async function buildWorkerToolContext(env: Env, fetchImpl: typeof fetch =
 
 export interface WorkerDependencies { fetchImpl?: typeof fetch }
 
-export async function handleAuthorizedRequest(request: Request, env: Partial<Env>): Promise<Response> {
+export async function handleAuthorizedRequest(request: Request, env: Partial<Env>, dependencies: WorkerDependencies = {}): Promise<Response> {
   assertBindings(env);
   const url = new URL(request.url);
-  if (url.pathname === '/mcp' && ['GET', 'POST', 'DELETE'].includes(request.method)) return handleMcp(request, env);
+  if (url.pathname === '/mcp' && ['GET', 'POST', 'DELETE'].includes(request.method)) return handleMcp(request, env, dependencies.fetchImpl);
   if (url.pathname === '/a2a' && request.method === 'POST') return handleA2a(request, await buildWorkerToolContext(env));
   if (url.pathname.startsWith('/crm/v1/')) return handleCrmRequest(request, env);
   return Response.json({ error: 'not_found' }, { status: 404 });

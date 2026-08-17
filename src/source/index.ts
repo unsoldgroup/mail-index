@@ -143,6 +143,25 @@ export interface AttachmentMetadata {
   inlineDataBase64?: string;
 }
 
+/** Metadata for one provider-hosted message attachment. */
+export interface MessageAttachment {
+  /** Provider attachment id, unique within the parent Message. */
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number | null;
+}
+
+/** Raw attachment bytes, encoded for safe transport through JSON/MCP. */
+export interface MessageAttachmentData {
+  /** Standard RFC 4648 base64 (not Gmail's base64url variant). */
+  data: string;
+  size: number;
+}
+
+/** Maximum raw attachment size returned inline through MCP (25 MiB). */
+export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
 /**
  * Thrown by {@link MailSource.modify} when the provider rejects the write for
  * lack of a mutating scope (the default `gmail.readonly` install). Carries a
@@ -234,8 +253,17 @@ export interface MailSource {
   /** Fetch the full record (metadata + body) for one id, or null if missing. */
   getFull(id: string): Promise<MessageFull | null>;
 
-  /** Fetch attachment bytes for a full message when the provider supports it. */
-  getAttachment?(messageId: string, attachmentId: string): Promise<ArrayBuffer>;
+  /** List attachment metadata for one Message. Optional when unsupported. */
+  listAttachments?(id: string): Promise<MessageAttachment[]>;
+
+  /**
+   * Fetch one attachment's raw bytes. Optional when unsupported.
+   *
+   * Returns base64 rather than an ArrayBuffer because the same bytes serve two
+   * consumers with opposite needs: the MCP tool hands them to an agent through
+   * JSON, and the Deployment's R2 store decodes them back to binary.
+   */
+  getAttachment?(id: string, attachmentId: string): Promise<MessageAttachmentData | null>;
 
   /**
    * List the mailbox's label catalogue (id → name → type). Optional: adapters

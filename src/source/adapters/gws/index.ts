@@ -38,7 +38,11 @@ import { InsufficientScopeError } from '../../index.js';
 import {
   type GmailMessage,
   buildGmailQuery,
+  extractAttachments,
+  toMessageAttachment,
   extractBodies,
+  extractInlineAttachment,
+  normalizeAttachmentBase64,
   parseLabelList,
   toMetadata,
 } from '../gmail-shared.js';
@@ -193,6 +197,31 @@ export class GwsAdapter implements MailSource {
     if (!res?.id) return null;
     const { bodyText, bodyHtml, mimeType } = extractBodies(res.payload);
     return { ...toMetadata(res), bodyText, bodyHtml, mimeType };
+  }
+
+  async listAttachments(id: string) {
+    const res = (await this.#run([
+      'gmail', 'users', 'messages', 'get', '--params',
+      JSON.stringify({ userId: 'me', id, format: 'full' }),
+    ])) as GmailMessage;
+    return extractAttachments(res.payload).map(toMessageAttachment);
+  }
+
+  async getAttachment(id: string, attachmentId: string) {
+    if (attachmentId.startsWith('inline:')) {
+      const message = (await this.#run([
+        'gmail', 'users', 'messages', 'get', '--params',
+        JSON.stringify({ userId: 'me', id, format: 'full' }),
+      ])) as GmailMessage;
+      return extractInlineAttachment(message.payload, attachmentId);
+    }
+    const result = (await this.#run([
+      'gmail', 'users', 'messages', 'attachments', 'get', '--params',
+      JSON.stringify({ userId: 'me', messageId: id, id: attachmentId }),
+    ])) as { data?: string; size?: number };
+    if (!result.data) return null;
+    const data = normalizeAttachmentBase64(result.data);
+    return { data, size: result.size ?? Buffer.from(data, 'base64').byteLength };
   }
 
   /** List the mailbox label catalogue via `gws gmail users labels list`. */

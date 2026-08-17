@@ -34,11 +34,14 @@ import type {
   ProviderLabel,
   SourceIdentity,
 } from '../../index.js';
-import { InsufficientScopeError } from '../../index.js';
+import { InsufficientScopeError, MAX_ATTACHMENT_BYTES } from '../../index.js';
 import {
   type GmailMessage,
   buildGmailQuery,
   extractBodies,
+  extractAttachments,
+  toMessageAttachment,
+  extractInlineAttachment,
   parseLabelList,
   toMetadata,
 } from '../gmail-shared.js';
@@ -188,6 +191,32 @@ export class GogAdapter implements MailSource {
     if (!res?.id) return null;
     const { bodyText, bodyHtml, mimeType } = extractBodies(res.payload);
     return { ...toMetadata(res), bodyText, bodyHtml, mimeType };
+  }
+
+  async listAttachments(id: string) {
+    const message = (await this.#run(['gmail', 'raw', id, '-a', this.#account])) as GmailMessage;
+    return extractAttachments(message.payload).map(toMessageAttachment);
+  }
+
+  async getAttachment(id: string, attachmentId: string) {
+    if (attachmentId.startsWith('inline:')) {
+      const message = (await this.#run(['gmail', 'raw', id, '-a', this.#account])) as GmailMessage;
+      return extractInlineAttachment(message.payload, attachmentId);
+    }
+    const result = (await this.#run([
+      'gmail', 'attachment', id, attachmentId,
+      '-a', this.#account,
+      '--inline', '--inline-max-bytes', String(MAX_ATTACHMENT_BYTES),
+      '--out', process.platform === 'win32' ? 'NUL' : '/dev/null',
+    ])) as { contentBase64?: string; bytes?: number; reason?: string };
+    if (!result.contentBase64) {
+      if (result.reason) throw new GogError(result.reason);
+      return null;
+    }
+    return {
+      data: result.contentBase64,
+      size: result.bytes ?? Buffer.from(result.contentBase64, 'base64').byteLength,
+    };
   }
 
   /** List the mailbox label catalogue via `gog gmail labels list`. */

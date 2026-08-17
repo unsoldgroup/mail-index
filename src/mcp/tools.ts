@@ -50,7 +50,7 @@ import type {
   ContactSort,
   GraphNeighborRow,
 } from '../index/index.js';
-import type { LabelChange, MailSource } from '../source/index.js';
+import { MAX_ATTACHMENT_BYTES, type LabelChange, type MailSource } from '../source/index.js';
 import { InsufficientScopeError } from '../source/index.js';
 import {
   applyLabelChange as applyMailboxLabelChange,
@@ -94,14 +94,14 @@ export interface TriggerAdmin {
   deleteConsumer(id: string): Promise<unknown>;
 }
 
-/** Everything the tools read/write. INDEX-ONLY except the one O(1) enrich seam. */
+/** Everything the tools read/write. Index-first with bounded single-Message provider reads. */
 export interface ToolContext {
   repo: Repo;
   /** Operator config — used only to resolve an account's adapter for inline enrich. */
   config: OperatorConfig;
   /**
-   * Build the per-account {@link MailSource} for the ONE permitted inline enrich
-   * (`get_message`, ADR-0001). Optional: when absent (or it throws), a `meta`
+   * Build the per-account {@link MailSource} for bounded single-Message reads:
+   * body enrichment and attachment list/download. Optional: when absent (or it throws), a `meta`
    * `get_message` simply returns the meta shape rather than enriching — the
    * server stays usable read-only without provider creds.
    */
@@ -685,6 +685,85 @@ export async function getMessage(ctx: ToolContext, args: GetMessageArgs): Promis
     needsOcr,
     enriched,
     ...(bodyError ? { body_error: bodyError } : {}),
+  });
+}
+
+export interface GetMessageAttachmentArgs {
+  ref: string;
+  /** Filename or provider attachment id. Omit to list available attachments. */
+  attachment?: string;
+}
+
+export interface MessageAttachmentDownload {
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  encoding: 'base64';
+  data: string;
+}
+
+/**
+ * List or download one Message attachment through the same bounded provider
+ * seam in both local and remote Deployments. Raw bytes are never persisted.
+ */
+export async function getMessageAttachment(
+  ctx: ToolContext,
+  args: GetMessageAttachmentArgs,
+): Promise<WithMeta & {
+  ref: string;
+  attachments: { id: string; filename: string; mimeType: string; size: number | null }[];
+  attachment: MessageAttachmentDownload | null;
+}> {
+  const { account, id } = parseToolRef(args.ref);
+  if (!(await ctx.repo.getMessage(account, id))) {
+    throw new McpToolError(`message ${account}:${id} is not in the index`);
+  }
+  const accountConfig = ctx.config.accounts[account];
+  if (!accountConfig) throw new McpToolError(`unknown account "${account}"`);
+  if (!ctx.buildSource) {
+    throw new McpToolError('attachment access is not available in this server context');
+  }
+  const source = ctx.buildSource(accountConfig);
+  if (!source.listAttachments) {
+    throw new McpToolError(`${source.provider}: attachment listing is not supported`);
+  }
+  const attachments = await source.listAttachments(id);
+  if (!args.attachment) {
+    return withMeta(ctx, account, { ref: `${account}:${id}`, attachments, attachment: null });
+  }
+  const selector = args.attachment.trim();
+  const metadata = attachments.find((item) => item.id === selector)
+    ?? attachments.find((item) => item.filename.toLowerCase() === selector.toLowerCase());
+  if (!metadata) {
+    throw new McpToolError(
+      `attachment "${selector}" is not on ${account}:${id}; call without attachment to list filenames and ids`,
+    );
+  }
+  if (metadata.size != null && metadata.size > MAX_ATTACHMENT_BYTES) {
+    throw new McpToolError(
+      `attachment "${metadata.filename}" is ${metadata.size} bytes; maximum inline download is ${MAX_ATTACHMENT_BYTES} bytes`,
+    );
+  }
+  if (!source.getAttachment) {
+    throw new McpToolError(`${source.provider}: attachment download is not supported`);
+  }
+  const downloaded = await source.getAttachment(id, metadata.id);
+  if (!downloaded) throw new McpToolError(`attachment ${metadata.id} could not be downloaded`);
+  if (downloaded.size > MAX_ATTACHMENT_BYTES) {
+    throw new McpToolError(
+      `attachment "${metadata.filename}" is ${downloaded.size} bytes; maximum inline download is ${MAX_ATTACHMENT_BYTES} bytes`,
+    );
+  }
+  return withMeta(ctx, account, {
+    ref: `${account}:${id}`,
+    attachments,
+    attachment: {
+      ...metadata,
+      size: downloaded.size,
+      encoding: 'base64',
+      data: downloaded.data,
+    },
   });
 }
 

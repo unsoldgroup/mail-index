@@ -45,6 +45,31 @@ test('GogAdapter decodes a base64url plain-text body via getFull', async () => {
   assert.equal(full.mimeType, 'text/plain');
 });
 
+test('GogAdapter lists and downloads attachments inline without persisting a file', async () => {
+  const calls = [];
+  const adapter = new GogAdapter({
+    account: 'al@example.com',
+    runner: async (args) => {
+      calls.push(args);
+      if (args[1] === 'raw') {
+        return { id: 'msg-1', payload: { mimeType: 'multipart/mixed', parts: [
+          { filename: 'receipt.pdf', mimeType: 'application/pdf', body: { attachmentId: 'att-1', size: 8 } },
+        ] } };
+      }
+      return { contentBase64: Buffer.from('%PDFtest').toString('base64'), bytes: 8 };
+    },
+  });
+  assert.deepEqual(await adapter.listAttachments('msg-1'), [
+    { id: 'att-1', filename: 'receipt.pdf', mimeType: 'application/pdf', size: 8 },
+  ]);
+  assert.deepEqual(await adapter.getAttachment('msg-1', 'att-1'), {
+    data: Buffer.from('%PDFtest').toString('base64'), size: 8,
+  });
+  assert.deepEqual(calls[1].slice(0, 4), ['gmail', 'attachment', 'msg-1', 'att-1']);
+  assert.ok(calls[1].includes('--inline'));
+  assert.equal(calls[1][calls[1].indexOf('--out') + 1], process.platform === 'win32' ? 'NUL' : '/dev/null');
+});
+
 test('GogAdapter extracts a nested text/html part from a multipart payload', async () => {
   const full = await makeAdapter().getFull('fixt-list-1');
   assert.ok(full);

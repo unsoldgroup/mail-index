@@ -63,7 +63,8 @@ that sole mailbox.
 The server is **read-only on the mailbox by default** ([D15](PLAN.md)) — the
 exceptions are the two opt-in writers `archive_message` / `modify_labels`
 ([ADR-0007](adr/0007-opt-in-mailbox-writes.md)). The single permitted read-side
-provider contact is `get_message`'s one inline O(1) body fetch
+provider contacts are bounded single-Message reads: `get_message`'s inline O(1)
+body fetch and `get_message_attachment`'s list/download calls
 ([ADR-0001](adr/0001-inline-enrichment-is-o1-only.md)). Anything bulk — sync,
 bulk enrich, graph build, compact — is returned as a **command handback**: the
 exact `mail-index` CLI command string the agent runs itself. The CLI is the
@@ -129,8 +130,9 @@ All of the above also carry `index_as_of` on the top-level response object.
 
 ## Tools
 
-The full surface is **23 tools** — 21 read-only, plus the two opt-in writers
-`archive_message` / `modify_labels`. Account resolution: tools that need an
+The surface includes read-only recall and attachment tools, local write-backs,
+remote administration, plus the two opt-in mailbox writers `archive_message` /
+`modify_labels`. Account resolution: tools that need an
 account take an optional `account`; when omitted and exactly one account is
 configured / indexed, it is used, otherwise the tool errors asking for one.
 
@@ -165,6 +167,21 @@ ladder.
 
 Returns a full message detail incl. `bodyState`, `summary`, `body` (only at
 `level: "body"`), `enriched`, and `index_as_of`.
+
+#### `get_message_attachment`
+List or download attachments from one indexed Message without persisting the
+raw bytes.
+
+| Arg | Type | Notes |
+|-----|------|-------|
+| `ref` | string (required) | `<account>:<message-id>` |
+| `attachment` | string | exact filename or provider attachment id; omit to list |
+
+With only `ref`, returns attachment metadata (`id`, `filename`, `mimeType`,
+`size`). With `attachment`, the selected file is returned as an embedded MCP
+blob resource; the text metadata intentionally omits the base64 payload so it
+does not consume the model's text context. This is a bounded read-only provider
+fetch and is available through the same tool in local and remote Deployments.
 
 **Offers in images — `ocr_images` + `needs_ocr`.** Marketing email often puts the
 offer/price/deadline inside an image, leaving the distilled text near-empty.
