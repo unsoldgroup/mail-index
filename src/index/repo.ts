@@ -2403,6 +2403,27 @@ export class Repo {
    * profile (M3.1, PLAN §11). Ordered by address for a stable shape. `curation`
    * is non-null by the WHERE clause.
    */
+  /**
+   * Addresses the user has actually written to (`msgs_sent > 0`) — the
+   * Correspondents (CONTEXT.md).
+   *
+   * Deep history is swept by correspondence rather than wholesale: mail from
+   * someone you have replied to is the mail you might ask about, while a decade
+   * of newsletters is volume without recall value. Ordered by engagement so a
+   * chunked provider query spends its first requests on the strongest ties.
+   */
+  async correspondentAddresses(account: string, limit?: number): Promise<string[]> {
+    const sql =
+      `SELECT address FROM contacts
+        WHERE account = ? AND msgs_sent > 0 AND address IS NOT NULL AND address <> ''
+        ORDER BY COALESCE(engagement_score, 0) DESC, msgs_sent DESC, address ASC` +
+      (limit != null ? ` LIMIT ?` : ``);
+    const rows = limit != null
+      ? await this.#prepare(sql).all(account, limit)
+      : await this.#prepare(sql).all(account);
+    return (rows as { address: string }[]).map((row) => row.address);
+  }
+
   async curatedContacts(account: string): Promise<{ address: string; curation: Curation }[]> {
     return await this.#prepare(
       `SELECT address, curation FROM contacts

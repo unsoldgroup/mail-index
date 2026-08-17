@@ -45,6 +45,12 @@ export interface MailScope {
    * the adapter understands (e.g. `30d`, `1mo`). Matches the CLI `--since`.
    */
   since?: string;
+  /**
+   * Upper bound on message age (exclusive), as an ISO-8601 timestamp or
+   * `YYYY-MM-DD`. Pairs with {@link MailScope.since} to sweep one historical
+   * slice at a time, so a deep backfill never becomes one unbounded request.
+   */
+  until?: string;
   /** Hard cap on the number of ids returned. */
   limit?: number;
   /** Include messages the user sent (PLAN D11 — Sent metadata is indexed). */

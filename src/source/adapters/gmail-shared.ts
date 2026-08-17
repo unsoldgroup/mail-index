@@ -202,13 +202,39 @@ export function toMetadata(msg: GmailMessage): MessageMetadata {
 export function buildGmailQuery(scope: {
   query?: string;
   since?: string;
+  until?: string;
   includeSent?: boolean;
 }): string {
   const terms: string[] = [];
   if (scope.query) terms.push(scope.query);
-  if (scope.since) terms.push(`newer_than:${normaliseSince(scope.since)}`);
+  if (scope.since) {
+    // Gmail's `newer_than:` takes a RELATIVE token only. An absolute timestamp
+    // has to go through `after:YYYY/MM/DD` — passing an ISO string to
+    // `newer_than:` yields a term Gmail does not honour, which silently turns a
+    // bounded sweep into an unbounded one.
+    const absolute = gmailDate(scope.since);
+    terms.push(absolute ? `after:${absolute}` : `newer_than:${normaliseSince(scope.since)}`);
+  }
+  if (scope.until) {
+    const absolute = gmailDate(scope.until);
+    if (absolute) terms.push(`before:${absolute}`);
+  }
   if (scope.includeSent === false) terms.push('-in:sent');
   return terms.join(' ').trim();
+}
+
+/**
+ * Render an absolute date token as Gmail's `YYYY/MM/DD`, or null when the token
+ * is relative (`30d`, `1mo`) and belongs in `newer_than:` instead.
+ */
+export function gmailDate(token: string): string | null {
+  const value = token.trim();
+  if (/^\d+(d|m|y|mo)$/i.test(value)) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  const month = String(parsed.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(parsed.getUTCDate()).padStart(2, '0');
+  return `${parsed.getUTCFullYear()}/${month}/${day}`;
 }
 
 /**

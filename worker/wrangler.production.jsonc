@@ -32,7 +32,7 @@
   "triggers": { "crons": ["0 * * * *"] },
   "vars": {
     "SYNC_INTERVAL": "1h",
-    "SYNC_LOOKBACK_MONTHS": "12",
+    "SYNC_LOOKBACK_MONTHS": "240",
     "OPERATOR_EMAILS": "al@unsold.group,alexandre.stemarie@gmail.com,alex.stemarie@fora.travel",
     "CRM_WEBHOOK_URL": "https://ei.unsold.cloud/s/mail-index/completed"
   }
