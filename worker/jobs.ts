@@ -205,17 +205,10 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       let fetched = 0;
       let indexed = 0;
 
-      // The Account-level sync lock is held by whichever sweep is running, and
-      // the cron queues the incremental sync alongside this one. Losing that
-      // race is normal, not a failure: history is not going anywhere, so yield
-      // the tick and let the next one pick the slice up. Advancing the cursor
-      // here would silently SKIP a year of mail.
-      if (await repo.activeSyncRun(job.account) != null) {
-        progress['backfill'] = { skipped: 'account busy', since, until };
-        await update('done', progress);
-        console.log(JSON.stringify({ event: 'job_finish', job_id: job.jobId, kind: job.kind, counts: {} }));
-        return;
-      }
+      // Losing the race for the Account lock is normal, not a failure: history
+      // is not going anywhere, so yield the tick. Note this deliberately does
+      // NOT advance the cursor — that would silently SKIP a year of mail.
+      if (await yieldIfBusy(repo, job.account, 'backfill', progress, update, job)) return;
 
       // Pass 1 — everything sent in the slice. Cheap, and it is what discovers
       // (and scores) the Correspondents pass 2 depends on.
@@ -273,6 +266,9 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       }
       progress['retention'] = { evicted, cutoff };
     } else {
+      // enrich takes the same Account lock as sync, so yield rather than fail
+      // when the cron's own sync is still running.
+      if (await yieldIfBusy(repo, job.account, 'enrich', progress, update, job)) return;
       // Backfill bodies INSIDE the working set. `since` comes from the same
       // windowCutoff the retention sweep uses — if the two ever disagreed, the
       // boundary messages would be re-fetched and re-dropped every cycle.
@@ -313,6 +309,30 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
  * spaces, capitals or punctuation is prose, which may quote Message content and
  * must never reach a log line (ADR-0002).
  */
+/**
+ * Skip this run when another Job already holds the Account's sync lock.
+ *
+ * `sync`, `enrich_bulk` and `backfill_slice` all take it, and the cron queues
+ * them together, so collisions are routine rather than exceptional. Reporting
+ * one as a FAILURE is what made a healthy tick look broken. The sweep simply
+ * runs on the next tick; callers must not advance any cursor when this returns
+ * true.
+ */
+async function yieldIfBusy(
+  repo: Repo,
+  account: string,
+  phase: string,
+  progress: Record<string, unknown>,
+  update: (status: string, progress: object, error?: string) => Promise<void>,
+  job: JobMessage,
+): Promise<boolean> {
+  if (await repo.activeSyncRun(account) == null) return false;
+  progress[phase] = { skipped: 'account busy' };
+  await update('done', progress);
+  console.log(JSON.stringify({ event: 'job_finish', job_id: job.jobId, kind: job.kind, counts: {} }));
+  return true;
+}
+
 function errorCode(error: unknown): string | null {
   const message = error instanceof Error ? error.message : String(error);
   const tail = message.split(':').pop()?.trim() ?? '';
