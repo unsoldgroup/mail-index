@@ -35,13 +35,64 @@ test('cron enqueues one sync Job per connected Account without Gmail', async () 
     let pending: Promise<unknown> | undefined;
     worker.scheduled({}, env, { waitUntil(promise: Promise<unknown>) { pending = promise; }, passThroughOnException() {} });
     await pending;
-    assert.equal(sent.length, 1);
+    // One tick queues three kinds per Account: the sync, plus the two bounded
+    // working-set sweeps (fill bodies inside the window, evict those outside).
+    const kinds = sent.map((message) => (message as { kind: string }).kind);
+    assert.deepEqual(kinds, ['sync', 'enrich_bulk', 'retention']);
     const params = (sent[0] as { params: Record<string, unknown> }).params;
     assert.equal(typeof params['since'], 'string');
     const ageDays = (Date.now() - Date.parse(String(params['since']))) / 86_400_000;
     assert.ok(ageDays > 360 && ageDays < 380, `expected a 12-month lookback, got ${ageDays} days`);
   }
   finally { await mf.dispose(); }
+});
+
+test('the scheduler skips an Account whose grant Google already rejected', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    await saveGrant(driver, { account: 'acct-dead', address: 'dead@example.com', scopes: ['https://www.googleapis.com/auth/gmail.readonly'], refreshToken: 'refresh', key });
+    await driver.prepare("UPDATE google_tokens SET auth_error='invalid_grant',auth_failed_at=? WHERE account=?")
+      .run(new Date().toISOString(), 'acct-dead');
+
+    await enqueueScheduledSyncs(env);
+    const swept = new Set(sent.map((message) => (message as { account: string }).account));
+    assert.deepEqual([...swept], ['acct-a'], 'only the healthy Account is swept');
+
+    // Repairing the grant puts it straight back in the rotation.
+    await driver.prepare('UPDATE google_tokens SET auth_error=NULL,auth_failed_at=NULL WHERE account=?').run('acct-dead');
+    await enqueueScheduledSyncs(env);
+    assert.ok(sent.some((message) => (message as { account: string }).account === 'acct-dead'), 're-consent resumes syncing');
+  } finally { await mf.dispose(); }
+});
+
+test('a Job past its lease is reclaimed within one cron period, not six hours', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    // Wedged 20 minutes ago: past the 15-minute lease, far short of six hours.
+    const wedged = new Date(Date.now() - 20 * 60_000).toISOString();
+    await driver.prepare(`INSERT INTO jobs(id,kind,account,params_json,status,progress_json,created_at,started_at)
+      VALUES(?,?,?,?,?,?,?,?)`).run('wedged', 'sync', 'acct-a', '{}', 'running', '{}', wedged, wedged);
+
+    const replacement = await enqueueJob(env, 'sync', 'acct-a');
+    assert.notEqual(replacement, 'wedged', 'the corpse no longer suppresses new work');
+    assert.equal(sent.length, 1, 'a real Job reached the Queue');
+    const reaped = await driver.prepare('SELECT status,terminal,error FROM jobs WHERE id=?').get('wedged') as { status: string; terminal: number; error: string };
+    assert.equal(reaped.status, 'failed');
+    assert.equal(reaped.terminal, 1);
+    assert.match(reaped.error, /stale Job lock expired after 15 minutes/);
+  } finally { await mf.dispose(); }
+});
+
+test('a Job inside its lease still de-duplicates', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    const recent = new Date(Date.now() - 60_000).toISOString();
+    await driver.prepare(`INSERT INTO jobs(id,kind,account,params_json,status,progress_json,created_at,started_at)
+      VALUES(?,?,?,?,?,?,?,?)`).run('live', 'sync', 'acct-a', '{}', 'running', '{}', recent, recent);
+
+    assert.equal(await enqueueJob(env, 'sync', 'acct-a'), 'live', 'a live Job is still the answer');
+    assert.equal(sent.length, 0, 'no duplicate work queued');
+  } finally { await mf.dispose(); }
 });
 
 test('a Queue send failure is marked failed and never strands Job deduplication', async () => {
@@ -53,8 +104,9 @@ test('a Queue send failure is marked failed and never strands Job deduplication'
     assert.equal(failed.status, 'failed'); assert.equal(failed.error, 'queue enqueue failed');
     env.SYNC_QUEUE.send = async (message: unknown) => { sent.push(message); };
     await enqueueScheduledSyncs(env);
-    const rows = await driver.prepare('SELECT id,status FROM jobs ORDER BY created_at').all() as { id: string; status: string }[];
-    assert.equal(rows.length, 2); assert.notEqual(rows[1]?.id, failed.id); assert.equal(sent.length, 1);
+    const rows = await driver.prepare("SELECT id,status FROM jobs WHERE kind='sync' ORDER BY created_at").all() as { id: string; status: string }[];
+    assert.equal(rows.length, 2); assert.notEqual(rows[1]?.id, failed.id);
+    assert.equal(sent.filter((message) => (message as { kind: string }).kind === 'sync').length, 1);
   } finally { await mf.dispose(); }
 });
 
@@ -69,8 +121,11 @@ test('scheduled sync Job runs the full sync, enrichment, and graph pipeline', as
     const second = await driver.prepare('SELECT count(*) n FROM messages').get() as { n: number };
     assert.equal(first.n, 1); assert.equal(second.n, 1);
     const status = await jobStatus(env, 'acct-a');
-    assert.equal(status.queue_depth, 0); assert.equal(status.recent[0]?.status, 'done');
-    const progress = status.recent[0]?.progress as Record<string, unknown>;
+    // The working-set sweeps queued by the same tick are still pending here, so
+    // assert on the sync Job itself rather than the head of the list.
+    const syncJob = status.recent.find((row) => row['id'] === message.jobId);
+    assert.equal(syncJob?.['status'], 'done');
+    const progress = syncJob?.['progress'] as Record<string, unknown>;
     assert.ok(progress['enrich']);
     assert.ok(progress['graph']);
     const runs = await driver.prepare('SELECT phase FROM sync_runs ORDER BY id').all() as { phase: string }[];
@@ -168,7 +223,11 @@ test('failed Job records failure and remains retryable', async () => {
     await worker.queue({ messages: [{ body: { jobId: 'missing', kind: 'sync', account: 'acct-a', params: {} }, ack() {}, retry() { retried = true; } }] }, env);
     assert.equal(retried, true);
     const status = await jobStatus(env, 'acct-a');
-    assert.ok(status.last_cron_run); assert.equal(status.queue_depth, 0); assert.equal(status.failed_jobs[0]?.error, row.error);
+    assert.ok(status.last_cron_run); assert.equal(status.failed_jobs[0]?.error, row.error);
+    // The sync Job is off the queue; the working-set sweeps from the same tick
+    // are legitimately still queued, so depth is not zero any more.
+    const pendingSyncs = status.recent.filter((job) => job['kind'] === 'sync' && ['queued', 'running'].includes(String(job['status'])));
+    assert.equal(pendingSyncs.length, 0);
   } finally { await mf.dispose(); }
 });
 
@@ -206,8 +265,8 @@ test('sync Job evaluates Trigger rules and signed webhook retries until 2xx', as
     const consumer = await admin.registerConsumer({ url: 'https://consumer.example/hook', secret: 'shared-secret' }) as { id: string };
     await admin.saveRule({ name: 'Primary mail', predicate: { conditions: [{ type: 'category', value: 'primary' }] }, consumer_ids: [consumer.id] });
     await enqueueScheduledSyncs(env); await runJob(env, sent[0] as never, gmailFetch);
-    const delivery = sent[1] as { jobId: string; kind: 'webhook_delivery'; account: string; params: Record<string, unknown> };
-    assert.equal(delivery.kind, 'webhook_delivery');
+    const delivery = sent.find((message) => (message as { kind: string }).kind === 'webhook_delivery') as { jobId: string; kind: 'webhook_delivery'; account: string; params: Record<string, unknown> };
+    assert.ok(delivery, 'the Trigger rule queued a webhook delivery');
     let attempts = 0; let captured: RequestInit | undefined;
     const consumerFetch = (async (_input: RequestInfo | URL, init?: RequestInit) => { attempts++; captured = init; return new Response('', { status: attempts === 1 ? 500 : 200 }); }) as typeof fetch;
     await assert.rejects(() => runJob(env, delivery as never, consumerFetch), /500/);

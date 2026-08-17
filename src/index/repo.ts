@@ -22,6 +22,7 @@
 import type { StorageDriver, PreparedStatement } from './driver.js';
 import { IndexError } from './db.js';
 import { bm25Expr, projectBody, projectRecipients } from './fts.js';
+import { DEFAULT_ACCOUNT_SETTINGS, normalizeSettings, type AccountSettings } from './settings.js';
 import { classifyCategory, classifyDirection } from '../ingest/classify.js';
 import {
   BODY_STATES,
@@ -138,6 +139,11 @@ export interface MetaSelector {
   match?: string;
   /** Cap the number of ids returned (newest-first). */
   limit?: number;
+  /**
+   * Epoch-ms floor on `internal_date` — the working-set window from
+   * {@link windowCutoff}. Omit for no time bound.
+   */
+  since?: number;
 }
 
 export interface ContactInput {
@@ -986,6 +992,13 @@ export class Repo {
       params.push(selector.match);
     }
 
+    // The working-set window: never promote a body that the retention sweep
+    // would evict on the same cycle (see windowCutoff).
+    if (selector.since != null) {
+      where.push(`m.internal_date >= ?`);
+      params.push(selector.since);
+    }
+
     let sql = `SELECT m.gmail_message_id AS id FROM ${fromClause} WHERE ${where.join(' AND ')} ORDER BY m.internal_date DESC`;
     if (selector.limit != null) {
       sql += ` LIMIT ?`;
@@ -1019,7 +1032,7 @@ export class Repo {
    * keyword hits) — the caller treats that as "the profile enriches nothing
    * here", not an error. INDEX-ONLY: reads derived rows + FTS, no provider.
    */
-  async selectProfileMetaMessages(account: string, limit?: number): Promise<string[]> {
+  async selectProfileMetaMessages(account: string, limit?: number, since?: number): Promise<string[]> {
     // The curated dispositions. `important` entities drive inclusion; `muted`
     // and `blocked` drive exclusion (both mean "never enrich", §7).
     const importantAddrs = await this.#prepare(
@@ -1080,6 +1093,13 @@ export class Repo {
     for (const { domain } of mutedDomains) {
       where.push(`NOT (lower(m.from_addr) LIKE ? OR lower(m.from_addr) LIKE ?)`);
       params.push(`%@${domain.toLowerCase()}`, `%@${domain.toLowerCase()}>%`);
+    }
+
+    // Same working-set window as the plain meta selector: a profile match that
+    // has aged out must not be promoted only to be evicted again.
+    if (since != null) {
+      where.push(`m.internal_date >= ?`);
+      params.push(since);
     }
 
     let sql = `SELECT m.gmail_message_id AS id FROM messages m WHERE ${where.join(' AND ')} ORDER BY m.internal_date DESC`;
@@ -2431,6 +2451,137 @@ export class Repo {
          updated_at    = excluded.updated_at`,
     ).run(account, JSON.stringify([...keywords]), updatedAt);
     return updatedAt;
+  }
+
+  /**
+   * The Account's settings, fully defaulted. An absent row is not an error —
+   * it is an Account that has never been configured, which is a valid state.
+   */
+  async getAccountSettings(account: string): Promise<AccountSettings> {
+    const row = await this.#prepare(
+      `SELECT settings_json FROM account_settings WHERE account = ?`,
+    ).get(account) as { settings_json: string | null } | undefined;
+    if (!row?.settings_json) return { ...DEFAULT_ACCOUNT_SETTINGS };
+    try {
+      return normalizeSettings(JSON.parse(row.settings_json));
+    } catch {
+      return { ...DEFAULT_ACCOUNT_SETTINGS };
+    }
+  }
+
+  /**
+   * Merge a partial update into the Account's settings and persist the whole
+   * normalized blob. Patch semantics keep a caller that knows about one setting
+   * from clobbering another it has never heard of.
+   */
+  async setAccountSettings(account: string, patch: Partial<AccountSettings>, at?: string): Promise<AccountSettings> {
+    const merged = normalizeSettings({ ...(await this.getAccountSettings(account)), ...patch });
+    await this.#prepare(
+      `INSERT INTO account_settings (account, settings_json, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(account) DO UPDATE SET
+         settings_json = excluded.settings_json,
+         updated_at    = excluded.updated_at`,
+    ).run(account, JSON.stringify(merged), at ?? new Date().toISOString());
+    return merged;
+  }
+
+  /**
+   * Messages whose body has aged out of the working set (PLAN §7, ADR-0003).
+   *
+   * `before` is an epoch-ms cutoff from {@link windowCutoff} — the SAME value
+   * enrichment uses, or the two sweeps fight over the boundary forever.
+   *
+   * Age alone does not make a body droppable. This preserves ADR-0003's
+   * protections verbatim: a thread the user took part in, and any
+   * curated-important sender or domain, keep their body at ANY age. Those are
+   * the messages whose bodies were most deliberately acquired.
+   */
+  async retentionEligible(account: string, before: number, limit?: number): Promise<string[]> {
+    const sql =
+      `SELECT m.gmail_message_id
+         FROM messages m
+        WHERE m.account = ?
+          AND m.body_state = 'full'
+          AND m.internal_date IS NOT NULL
+          AND m.internal_date < ?
+          -- never drop a body from a conversation the user joined
+          AND NOT EXISTS (
+            SELECT 1 FROM threads t
+             WHERE t.account = m.account AND t.thread_id = m.thread_id
+               AND t.user_participated = 1
+          )
+          -- never drop a curated-important sender (contact or its domain)
+          AND NOT EXISTS (
+            SELECT 1 FROM contacts c
+             WHERE c.account = m.account AND c.curation = 'important'
+               AND (
+                 m.from_addr = c.address
+                 OR lower(m.from_addr) LIKE '%<' || lower(c.address) || '>%'
+               )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM domains d
+             WHERE d.account = m.account AND d.curation = 'important'
+               AND (
+                 lower(m.from_addr) LIKE '%@' || lower(d.domain)
+                 OR lower(m.from_addr) LIKE '%@' || lower(d.domain) || '>%'
+               )
+          )
+        ORDER BY m.internal_date ASC, m.gmail_message_id ASC` +
+      (limit != null ? ` LIMIT ?` : ``);
+    const rows = limit != null
+      ? await this.#prepare(sql).all(account, before, limit)
+      : await this.#prepare(sql).all(account, before);
+    return (rows as { gmail_message_id: string }[]).map((row) => row.gmail_message_id);
+  }
+
+  /**
+   * Drop a message's body because it aged out of the working set.
+   *
+   * Where a summary exists the row lands on `summary-only` — the summary is the
+   * distillate the body was fetched for, and the no-downgrade ladder protects
+   * it. Where none exists the row returns to `meta`, which is the honest state:
+   * "fetchable, not fetched". Never data loss either way — the provider is the
+   * archive and `get_message(level:'body')` re-enriches by id on demand.
+   *
+   * Returns false when the row is absent or was not `full`.
+   */
+  async evictBody(account: string, gmailMessageId: string): Promise<boolean> {
+    return await this.transaction(async () => {
+      const row = await this.#prepare(
+        `SELECT rowid, subject, from_addr, to_addr, cc_addr, snippet, body_state, summary_text
+           FROM messages WHERE account = ? AND gmail_message_id = ?`,
+      ).get(account, gmailMessageId) as
+        | {
+            rowid: number;
+            subject: string | null;
+            from_addr: string | null;
+            to_addr: string | null;
+            cc_addr: string | null;
+            snippet: string | null;
+            body_state: BodyState;
+            summary_text: string | null;
+          }
+        | undefined;
+      if (!row || row.body_state !== 'full') return false;
+      const nextState: BodyState = row.summary_text ? 'summary-only' : 'meta';
+
+      await this.#prepare(
+        `UPDATE messages SET body_state = ?, body_text = NULL, body_fetched_at = NULL
+          WHERE account = ? AND gmail_message_id = ?`,
+      ).run(nextState, account, gmailMessageId);
+
+      await this.#syncFts(row.rowid, {
+        subject: row.subject,
+        sender: row.from_addr,
+        recipients: [row.to_addr, row.cc_addr].filter(Boolean).join(' ') || null,
+        snippet: row.snippet,
+        bodyText: null, // body dropped
+        summary: row.summary_text,
+      });
+      return true;
+    });
   }
 
   /**

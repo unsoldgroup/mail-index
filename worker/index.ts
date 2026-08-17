@@ -63,13 +63,13 @@ async function storage(env: Env) { const driver = new D1Driver(env.DB); await ru
  * rebuilt from D1 per request, so nothing of value lived in that map anyway.
  */
 async function handleMcp(request: Request, env: Env): Promise<Response> {
-  const server = buildServer(await buildWorkerToolContext(env));
+  const server = buildServer(await buildWorkerToolContext(env, fetch, new URL(request.url).origin));
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   await server.connect(transport);
   return transport.handleRequest(request);
 }
 
-export async function buildWorkerToolContext(env: Env, fetchImpl: typeof fetch = fetch): Promise<ToolContext> {
+export async function buildWorkerToolContext(env: Env, fetchImpl: typeof fetch = fetch, origin?: string): Promise<ToolContext> {
   const { driver, repo } = await storage(env);
   const connected = await driver.prepare('SELECT account,scopes FROM google_tokens ORDER BY account').all() as { account: string; scopes: string }[];
   const labels = connected.length ? connected.map((row) => row.account) : ['default'];
@@ -80,7 +80,12 @@ export async function buildWorkerToolContext(env: Env, fetchImpl: typeof fetch =
     const source = new GmailRestAdapter({ fetchImpl, tokenProvider: accessTokenProvider(driver, label, env, fetchImpl) });
     if (!scopes.get(label)?.includes(GMAIL_MODIFY)) Object.defineProperty(source, 'modify', { value: async () => { throw new InsufficientScopeError('gmail-rest', `/setup?account=${encodeURIComponent(label)}&writes=1`, 'Reconnect this Account with mailbox writes enabled.'); } });
     return source;
-  }, jobStatus: (account) => jobStatus(env, account), enqueueJob: (kind, account, params) => enqueueJob(env, kind, account, params), triggerAdmin: triggerAdmin(driver) };
+  }, jobStatus: (account) => jobStatus(env, account), enqueueJob: (kind, account, params) => enqueueJob(env, kind, account, params),
+    // The exact link a human must open to repair a rejected grant. Keeping the
+    // `account=` label verbatim matters: consenting a different mailbox under an
+    // existing label is refused (AccountMismatchError), by design.
+    reauthUrl: origin ? (account: string) => `${origin}/setup/google/start?account=${encodeURIComponent(account)}` : undefined,
+    triggerAdmin: triggerAdmin(driver) };
 }
 
 export interface WorkerDependencies { fetchImpl?: typeof fetch }
@@ -201,6 +206,13 @@ export const defaultHandler = { fetch: (request: Request, env: Env, ctx: WorkerC
 
 export default {
   fetch(request: Request, env: Env, ctx: WorkerContext) { return handlePublicRequest(request, env, ctx); },
-  scheduled(_controller: unknown, env: Env, ctx: WorkerContext) { ctx.waitUntil(enqueueScheduledSyncs(env)); },
+  // An unobserved rejection here loses the whole hour's fan-out for EVERY
+  // Account silently — a single D1 hiccup would look identical to a healthy
+  // quiet tick. Log it so a missed cycle is visible in Workers logs.
+  scheduled(_controller: unknown, env: Env, ctx: WorkerContext) {
+    ctx.waitUntil(enqueueScheduledSyncs(env).catch((error: unknown) => {
+      console.log(JSON.stringify({ event: 'cron_fail', error_name: error instanceof Error ? error.name : 'Error' }));
+    }));
+  },
   async queue(batch: QueueBatch<JobMessage>, env: Env) { for (const message of batch.messages) { try { await runJob(env, message.body); message.ack(); } catch { message.retry(); } } },
 };

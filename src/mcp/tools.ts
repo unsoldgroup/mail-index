@@ -64,6 +64,7 @@ import { reconcileInbox } from '../ingest/reconcile-inbox.js';
 import { isLikelyImageOnly } from '../intelligence/images.js';
 import { computeCadence, type CadenceRow } from '../intelligence/cadence.js';
 import { buildMatch } from '../index/fts.js';
+import { windowCutoff, type AccountSettings } from '../index/settings.js';
 import { propose, set as curationSet, get as curationGet } from '../curation/index.js';
 import {
   saveSummary,
@@ -112,6 +113,8 @@ export interface ToolContext {
   /** Remote Deployment Job status; absent locally so the local response shape is unchanged. */
   jobStatus?: (account?: string) => Promise<unknown>;
   enqueueJob?: EnqueueJob;
+  /** Remote-Deployment re-consent link builder; absent locally (no hosted setup pages). */
+  reauthUrl?: (account: string) => string;
   /** Remote-Deployment Trigger rule administration; absent on local Deployment. */
   triggerAdmin?: TriggerAdmin;
 }
@@ -158,6 +161,33 @@ async function indexAsOf(repo: Repo, account?: string): Promise<string | null> {
 }
 
 /**
+ * Whether this scope's mailbox credential still works.
+ *
+ * `needs_reauth` means Google has rejected the stored grant outright — no sync
+ * can succeed until a human re-consents, so a stale index will STAY stale. It
+ * is the difference between "refreshing shortly" and "silently frozen", which
+ * is the whole reason it is stamped on every response.
+ * `unknown` = no grant row for this scope (the local CLI, which authenticates
+ * through the operator's own adapters rather than a stored Deployment grant).
+ */
+export type AuthHealth = 'ok' | 'needs_reauth' | 'unknown';
+
+/** Read the Deployment grant's recorded auth health for an Account. */
+async function authHealth(repo: Repo, account: string | undefined): Promise<{ auth: AuthHealth; failedAt: string | null }> {
+  if (!account) return { auth: 'unknown', failedAt: null };
+  try {
+    const row = (await repo.driver
+      .prepare('SELECT auth_error, auth_failed_at FROM google_tokens WHERE account = ?')
+      .get(account)) as { auth_error: string | null; auth_failed_at: string | null } | undefined;
+    if (!row) return { auth: 'unknown', failedAt: null };
+    return row.auth_error ? { auth: 'needs_reauth', failedAt: row.auth_failed_at } : { auth: 'ok', failedAt: null };
+  } catch {
+    // A local index predating the grant table has no auth to report.
+    return { auth: 'unknown', failedAt: null };
+  }
+}
+
+/**
  * The freshness/status block stamped on EVERY response (ADR-0005): tells the
  * agent how stale the index is and how to refresh it, so it never has to guess.
  */
@@ -170,6 +200,10 @@ export interface Freshness {
   stale: boolean;
   /** True when a sync for this account is in flight right now. */
   syncing: boolean;
+  /** Whether the stored mailbox credential still works ({@link AuthHealth}). */
+  auth: AuthHealth;
+  /** When the credential was first rejected (ISO), or null while healthy. */
+  auth_failed_at?: string | null;
   /** The CLI command to refresh this scope manually. */
   refresh_command: unknown;
 }
@@ -208,19 +242,27 @@ async function withMeta<T extends object>(ctx: ToolContext, account: string | un
   const ageMs = asOf == null ? null : now - new Date(asOf).getTime();
   const stale = ageMs == null || ageMs > STALE_AFTER_MS;
   const syncing = acct != null && await ctx.repo.activeSyncRun(acct) != null;
-  const refresh_command: unknown = ctx.enqueueJob
-    ? { kind: 'sync', account: acct ?? null, status: 'available', poll: 'sync_status' }
-    : acct ? handback('sync', '--account', acct) : handback('sync', '--all-accounts');
+  const { auth, failedAt } = await authHealth(ctx.repo, acct);
+  const needsReauth = auth === 'needs_reauth';
+  const refresh_command: unknown = needsReauth && acct
+    ? { kind: 'reauth', account: acct, status: 'blocked', reason: 'invalid_grant', reconsent_url: ctx.reauthUrl?.(acct) ?? null }
+    : ctx.enqueueJob
+      ? { kind: 'sync', account: acct ?? null, status: 'available', poll: 'sync_status' }
+      : acct ? handback('sync', '--account', acct) : handback('sync', '--all-accounts');
 
   const meta: WithMeta = {
     index_as_of: asOf,
-    freshness: { index_as_of: asOf, age_seconds: ageMs == null ? null : Math.floor(ageMs / 1000), stale, syncing, refresh_command },
+    freshness: { index_as_of: asOf, age_seconds: ageMs == null ? null : Math.floor(ageMs / 1000), stale, syncing, auth, auth_failed_at: failedAt, refresh_command },
   };
 
   // Auto-refresh on any stale account-scoped read (ADR-0005): spawn a detached
   // INCREMENTAL sync. `since` = days elapsed + 1 day of overlap (idempotent
   // upsert makes re-fetching the boundary day harmless); a never-synced account
   // passes no `since`, so its first sweep is a correct initial full sync.
+  // A dead grant makes the auto-refresh a lie: the Job would be queued, fail on
+  // the token exchange, and leave the caller believing fresh mail is 90 seconds
+  // away. Report the blockage instead of spawning work that cannot succeed.
+  if (needsReauth) return { ...body, ...meta };
   if (acct && stale && !syncing && ctx.enqueueJob) {
     const since = asOf == null ? undefined : `${Math.ceil(ageMs! / 86_400_000) + 1}d`;
     const jobId = await ctx.enqueueJob('sync', acct, since ? { since } : {});
@@ -564,6 +606,14 @@ export interface MessageDetail extends WithMeta {
   snippet: string | null;
   /** True when this call performed the single O(1) inline enrich (ADR-0001). */
   enriched: boolean;
+  /**
+   * Why `body` is still null at `level: 'body'`, when the inline enrich was
+   * attempted and could not deliver one. Absent when nothing went wrong.
+   * `auth` = the mailbox credential is rejected (re-consent needed, see
+   * {@link AuthHealth}); `fetch_failed` = the provider call failed;
+   * `no_source` = no adapter is configured for this Account.
+   */
+  body_error?: 'auth' | 'fetch_failed' | 'no_source';
 }
 
 /**
@@ -584,6 +634,7 @@ export async function getMessage(ctx: ToolContext, args: GetMessageArgs): Promis
   }
 
   let enriched = false;
+  let bodyError: 'auth' | 'fetch_failed' | 'no_source' | null = null;
   // ADR-0001: ONE bounded inline fetch, only when the agent asked for the body
   // and the row is still meta, and only when a source is wired in.
   if (level === 'body' && row.body_state === 'meta' && ctx.buildSource) {
@@ -594,10 +645,12 @@ export async function getMessage(ctx: ToolContext, args: GetMessageArgs): Promis
         enriched = await enrichOne({ account, id, source, repo: ctx.repo });
         const refreshed = await ctx.repo.getMessage(account, id);
         if (refreshed) row = refreshed;
-      }
-    } catch {
-      // Best-effort inline enrich: a fetch failure falls back to the meta shape
-      // (read-only resilience; the agent can run `show` via a handback instead).
+      } else bodyError = 'no_source';
+    } catch (error) {
+      // Best-effort inline enrich: a fetch failure still returns the meta shape,
+      // but WHY it stayed meta is reported. Swallowing this is what let a dead
+      // grant read as "this message simply has no body".
+      bodyError = error instanceof Error && /invalid_grant|No Google grant/.test(error.message) ? 'auth' : 'fetch_failed';
     }
   }
 
@@ -631,6 +684,7 @@ export async function getMessage(ctx: ToolContext, args: GetMessageArgs): Promis
     ocrImages,
     needsOcr,
     enriched,
+    ...(bodyError ? { body_error: bodyError } : {}),
   });
 }
 
@@ -963,6 +1017,240 @@ export async function graphCommunities(
   return await withMeta(ctx, account, body);
 }
 
+// ---- settings + guided first run ------------------------------------------
+
+/** Resolve the Account a settings/onboarding call applies to. */
+async function settingsAccount(ctx: ToolContext, account?: string): Promise<string> {
+  const resolved = account ?? await soleAccount(ctx);
+  if (!resolved) {
+    throw new McpToolError(
+      'more than one mailbox is connected — pass `account` to say which one these settings apply to',
+    );
+  }
+  return resolved;
+}
+
+export interface SettingsGetArgs { account?: string }
+
+/** `settings_get` — the Account's working-set policy, fully defaulted. */
+export async function settingsGet(ctx: ToolContext, args: SettingsGetArgs): Promise<WithMeta & {
+  account: string;
+  settings: AccountSettings;
+}> {
+  const account = await settingsAccount(ctx, args.account);
+  return await withMeta(ctx, account, { account, settings: await ctx.repo.getAccountSettings(account) });
+}
+
+export interface SettingsSetArgs {
+  account?: string;
+  body_window_months?: number;
+  retention?: 'window' | 'off';
+}
+
+/**
+ * `settings_set` — change the working-set policy.
+ *
+ * Patch semantics: omitted keys keep their stored value, so a caller that knows
+ * about one setting cannot silently reset another.
+ */
+export async function settingsSet(ctx: ToolContext, args: SettingsSetArgs): Promise<WithMeta & {
+  account: string;
+  settings: AccountSettings;
+  note: string;
+}> {
+  const account = await settingsAccount(ctx, args.account);
+  const settings = await ctx.repo.setAccountSettings(account, {
+    ...(args.body_window_months != null ? { body_window_months: args.body_window_months } : {}),
+    ...(args.retention != null ? { retention: args.retention } : {}),
+  });
+  const note = settings.body_window_months > 0
+    ? `Bodies are kept for the last ${settings.body_window_months} month(s); older ones are ${settings.retention === 'window' ? 'evicted (re-fetchable on demand)' : 'kept'}.`
+    : 'No time window: bodies are selected by the interest profile alone.';
+  return await withMeta(ctx, account, { account, settings, note });
+}
+
+export interface BackfillBodiesArgs { account?: string; limit?: number }
+
+/**
+ * `backfill_bodies` — fill in the bodies inside the retention window.
+ *
+ * The scheduled sweep does this a batch at a time; this is the "do it now"
+ * handle for the end of onboarding, when the operator has just chosen a window
+ * and wants the mailbox readable without waiting for the next tick.
+ */
+export async function backfillBodies(ctx: ToolContext, args: BackfillBodiesArgs): Promise<WithMeta & {
+  started: boolean;
+  account: string;
+  pending_bodies: number;
+  job_id?: string;
+  note: string;
+}> {
+  const account = await settingsAccount(ctx, args.account);
+  const settings = await ctx.repo.getAccountSettings(account);
+  const cutoff = windowCutoff(settings, ctx.now?.() ?? new Date());
+  const pending = (await ctx.repo.driver
+    .prepare(
+      `SELECT count(*) AS n FROM messages
+        WHERE account = ? AND body_state = 'meta'` + (cutoff != null ? ` AND internal_date >= ?` : ``),
+    )
+    .get(...(cutoff != null ? [account, cutoff] : [account]))) as { n: number };
+
+  if ((await authHealth(ctx.repo, account)).auth === 'needs_reauth') {
+    return await withMeta(ctx, account, {
+      started: false,
+      account,
+      pending_bodies: pending.n,
+      note: 'This mailbox needs re-authorising before any body can be fetched — see freshness.refresh_command.',
+    });
+  }
+  if (!ctx.enqueueJob) {
+    return await withMeta(ctx, account, {
+      started: false,
+      account,
+      pending_bodies: pending.n,
+      note: `Run ${handback('enrich', '--account', account)} to fill these in.`,
+    });
+  }
+  const jobId = await ctx.enqueueJob('enrich_bulk', account, { ...(args.limit != null ? { limit: args.limit } : {}) });
+  return await withMeta(ctx, account, {
+    started: true,
+    account,
+    pending_bodies: pending.n,
+    job_id: jobId,
+    note: `Backfilling bodies for the last ${settings.body_window_months} month(s); poll sync_status.`,
+  });
+}
+
+/** One question in the guided first run. */
+export interface OnboardingStep {
+  step: 'accounts' | 'retention' | 'interests' | 'backfill' | 'done';
+  question: string;
+  /** The offered answers; absent on informational steps. */
+  options?: { value: string | number; label: string }[];
+  /** What the agent should say or show alongside the question. */
+  context: string[];
+  remaining_steps: string[];
+  progress: { done: number; total: number };
+}
+
+export interface OnboardingArgs { account?: string; step?: string; answer?: string | number }
+
+const ONBOARDING_ORDER = ['accounts', 'retention', 'interests', 'backfill'] as const;
+
+/**
+ * `onboarding` — the guided first run, as a state machine the agent drives.
+ *
+ * MCP elicitation would be the natural fit, but the deployed Worker serves MCP
+ * statelessly (no session, no server→client requests), so the server cannot ask
+ * the user anything directly. Returning the question as DATA works on every
+ * transport: the agent renders it, collects the answer, and calls back. A client
+ * that does support elicitation can render the same payload natively.
+ */
+export async function onboarding(ctx: ToolContext, args: OnboardingArgs): Promise<WithMeta & OnboardingStep> {
+  const account = await settingsAccount(ctx, args.account);
+
+  // Record the answer for the step being replied to, then advance.
+  if (args.step === 'retention' && args.answer != null) {
+    await ctx.repo.setAccountSettings(account, {
+      body_window_months: Number(args.answer),
+      retention: Number(args.answer) > 0 ? 'window' : 'off',
+    });
+  }
+  if (args.step === 'backfill' && args.answer != null) {
+    if (String(args.answer) !== 'skip') await backfillBodies(ctx, { account });
+    await ctx.repo.setAccountSettings(account, { onboarding_completed_at: new Date().toISOString() });
+  }
+
+  const fresh = await ctx.repo.getAccountSettings(account);
+  const health = await authHealth(ctx.repo, account);
+  // The walk is a plain ordered list: an answer advances to the step after the
+  // one it replied to, and a call with no `step` either resumes at the start or
+  // reports completion. Anything cleverer here becomes a state machine that can
+  // re-ask a question the user has already answered.
+  const answeredIndex = args.step ? ONBOARDING_ORDER.indexOf(args.step as typeof ONBOARDING_ORDER[number]) : -1;
+  const nextIndex = fresh.onboarding_completed_at != null ? ONBOARDING_ORDER.length : answeredIndex + 1;
+  const next = ONBOARDING_ORDER[nextIndex];
+
+  const remaining = ONBOARDING_ORDER.slice(nextIndex + 1);
+  const progress = { done: Math.min(nextIndex, ONBOARDING_ORDER.length), total: ONBOARDING_ORDER.length };
+
+  const step: OnboardingStep = ((): OnboardingStep => {
+    switch (next) {
+      case 'accounts':
+        return {
+          step: 'accounts',
+          question: `Mailbox "${account}" is connected. Ready to set how much of it stays instantly readable?`,
+          options: [{ value: 'yes', label: 'Continue' }],
+          context: health.auth === 'needs_reauth'
+            ? [`"${account}" needs re-authorising first — its stored credential was rejected.`]
+            : [`"${account}" is authorised and syncing.`],
+          remaining_steps: [...remaining],
+          progress,
+        };
+      case 'retention':
+        return {
+          step: 'retention',
+          question: 'How much mail should stay instantly readable?',
+          options: [
+            { value: 3, label: 'Last 3 months (recommended)' },
+            { value: 6, label: 'Last 6 months' },
+            { value: 12, label: 'Last 12 months' },
+            { value: 0, label: 'No window — only what my interests match' },
+          ],
+          context: [
+            'mail-index always indexes every message’s headers, subject and snippet.',
+            'This setting is about full BODIES, which cost storage: inside the window every message is readable in one hop; outside it, bodies are dropped and re-fetched on demand.',
+            'Mail you replied to, and senders you mark important, keep their bodies at any age.',
+          ],
+          remaining_steps: [...remaining],
+          progress,
+        };
+      case 'interests':
+        return {
+          step: 'interests',
+          question: 'Which senders and topics matter enough to keep readable beyond the window?',
+          options: [
+            { value: 'propose', label: 'Suggest some from my mail' },
+            { value: 'skip', label: 'Skip for now' },
+          ],
+          context: [
+            'Run interest_propose for a ranked shortlist, then interest_set to persist it.',
+            'Anything marked important is exempt from body eviction, however old.',
+          ],
+          remaining_steps: [...remaining],
+          progress,
+        };
+      case 'backfill':
+        return {
+          step: 'backfill',
+          question: `Fill in the missing bodies for the last ${fresh.body_window_months} month(s) now?`,
+          options: [
+            { value: 'now', label: 'Yes, start now' },
+            { value: 'skip', label: 'No, let the hourly sweep do it' },
+          ],
+          context: ['Existing mail is header-only until it is backfilled; new mail is enriched as it arrives.'],
+          remaining_steps: [...remaining],
+          progress,
+        };
+      default:
+        return {
+          step: 'done',
+          question: 'Setup is complete.',
+          context: [
+            fresh.body_window_months > 0
+              ? `Bodies are kept for the last ${fresh.body_window_months} month(s).`
+              : 'Bodies follow the interest profile only.',
+            'Change any of this later with settings_set.',
+          ],
+          remaining_steps: [],
+          progress: { done: ONBOARDING_ORDER.length, total: ONBOARDING_ORDER.length },
+        };
+    }
+  })();
+
+  return await withMeta(ctx, account, step);
+}
+
 // ---- curation write-back loop (M3.1, PLAN §11) ----------------------------
 
 export interface InterestProposeArgs {
@@ -1114,6 +1402,10 @@ export interface SyncStatusEntry {
   syncing: boolean;
   messages: number;
   bodyStates: { meta: number; full: number; 'summary-only': number };
+  /** Credential health for this Account ({@link AuthHealth}). */
+  auth: AuthHealth;
+  /** When the credential was first rejected (ISO), or null while healthy. */
+  auth_failed_at: string | null;
 }
 
 /** `sync_status` — counts, last run, body-ladder split, freshness (PLAN §12). */
@@ -1131,12 +1423,15 @@ export async function syncStatus(ctx: ToolContext, args: SyncStatusArgs): Promis
         counts[r.body_state] = r.c;
       }
     }
+    const health = await authHealth(ctx.repo, account);
     return {
       account,
       index_as_of: await indexAsOf(ctx.repo, account),
       syncing: await ctx.repo.activeSyncRun(account) != null,
       messages: await ctx.repo.countMessages(account),
       bodyStates: counts,
+      auth: health.auth,
+      auth_failed_at: health.failedAt,
     };
   }));
   const body: { accounts: SyncStatusEntry[]; jobs?: unknown } = { accounts };
@@ -1203,12 +1498,15 @@ export async function relayMenuStatus(ctx: ToolContext): Promise<RelayMenuStatus
     }
     const index_as_of = await indexAsOf(ctx.repo, account);
     const age = ageSeconds(now, index_as_of);
+    const health = await authHealth(ctx.repo, account);
     return {
       account,
       index_as_of,
       syncing: await ctx.repo.activeSyncRun(account) != null,
       messages: await ctx.repo.countMessages(account),
       bodyStates: counts,
+      auth: health.auth,
+      auth_failed_at: health.failedAt,
       age_seconds: age,
       stale: age == null || age * 1000 > STALE_AFTER_MS,
     };
@@ -1239,7 +1537,10 @@ export async function relayMenuStatus(ctx: ToolContext): Promise<RelayMenuStatus
       `${totalMessages} indexed message${totalMessages === 1 ? '' : 's'}`,
       `Last sync ${formatAge(freshest)}`,
       ...accounts.slice(0, 4).map((a) =>
-        `${a.account}: ${a.messages} messages · ${a.syncing ? 'syncing' : a.stale ? 'stale' : 'ready'} · ${formatAge(a.age_seconds)}`,
+        // A rejected credential outranks staleness in the menu line: "stale" reads
+        // as "catching up", which is precisely the wrong thing to tell a human
+        // whose mailbox will never catch up without them re-consenting.
+        `${a.account}: ${a.messages} messages · ${a.auth === 'needs_reauth' ? 'needs re-auth' : a.syncing ? 'syncing' : a.stale ? 'stale' : 'ready'} · ${formatAge(a.age_seconds)}`,
       ),
     ],
     accounts,
@@ -1275,7 +1576,17 @@ export async function syncNow(ctx: ToolContext, args: SyncNowArgs): Promise<With
       skipped.push(account);
       continue;
     }
-    if (ctx.backgroundSync?.(account)) started.push(account);
+    // A rejected grant cannot sync; queueing here would only manufacture another
+    // failed Job and report `started` for work that is guaranteed to fail.
+    if ((await authHealth(ctx.repo, account)).auth === 'needs_reauth') {
+      skipped.push(account);
+      continue;
+    }
+    // The remote Deployment has no local process to spawn — it queues a Job.
+    // Without this branch `sync_now` was inert on the Worker: it always answered
+    // `started: false` and handed back a CLI command the caller cannot run.
+    if (ctx.enqueueJob) { await ctx.enqueueJob('sync', account, {}); started.push(account); }
+    else if (ctx.backgroundSync?.(account)) started.push(account);
     else skipped.push(account);
   }
   const command = args.account ? handback('sync', '--account', args.account) : handback('sync', '--all-accounts');

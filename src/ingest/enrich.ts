@@ -56,6 +56,13 @@ export interface EnrichSelector {
    * `repo.selectProfileMetaMessages`.
    */
   profile?: boolean;
+  /**
+   * Epoch-ms floor on `internal_date` — the working-set window (see
+   * `windowCutoff`). Applies in EVERY mode, `profile` included, because a body
+   * outside the window would be evicted by the retention sweep on the same
+   * cycle. Omit for no time bound.
+   */
+  since?: number;
 }
 
 /** Options for {@link enrich}. */
@@ -250,7 +257,13 @@ export async function enrich(options: EnrichOptions): Promise<EnrichResult> {
   const provided = options.selector ?? {};
   let selector: EnrichSelector;
   if (provided.profile) {
-    selector = { profile: true, ...(provided.limit != null ? { limit: provided.limit } : {}) };
+    // `since` survives the profile reset alongside `limit`: it is a bound on the
+    // working set, not part of the policy the profile expresses.
+    selector = {
+      profile: true,
+      ...(provided.limit != null ? { limit: provided.limit } : {}),
+      ...(provided.since != null ? { since: provided.since } : {}),
+    };
   } else {
     const hasNarrowing = provided.sender != null || provided.match != null;
     selector =
@@ -267,13 +280,14 @@ export async function enrich(options: EnrichOptions): Promise<EnrichResult> {
     // other mode resolves them from the deterministic MetaSelector.
     let ids: string[];
     if (selector.profile) {
-      ids = await repo.selectProfileMetaMessages(account, selector.limit);
+      ids = await repo.selectProfileMetaMessages(account, selector.limit, selector.since);
     } else {
       const candidate: MetaSelector = {
         ...(selector.rule ? { rule: selector.rule } : {}),
         ...(selector.sender ? { sender: selector.sender } : {}),
         ...(selector.match ? { match: selector.match } : {}),
         ...(selector.limit != null ? { limit: selector.limit } : {}),
+        ...(selector.since != null ? { since: selector.since } : {}),
       };
       ids = await repo.selectMetaMessages(account, candidate);
     }

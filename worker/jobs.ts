@@ -2,6 +2,7 @@
 import { D1Driver } from '../src/index/drivers/d1.js';
 import { Repo } from '../src/index/repo.js';
 import { runMigrations } from '../src/index/migrations.js';
+import { windowCutoff } from '../src/index/settings.js';
 import { syncMetadata } from '../src/ingest/sync.js';
 import { enrich } from '../src/ingest/enrich.js';
 import { buildGraph } from '../src/graph/index.js';
@@ -14,7 +15,7 @@ import { CrmChangeFeed, publishMessageChanges } from './crm-feed.js';
 import { notifyCrmCompletion } from './crm-webhook.js';
 import { storeMessageAttachments } from './attachments.js';
 
-export type JobKind = 'sync' | 'backfill' | 'enrich_bulk' | 'webhook_delivery';
+export type JobKind = 'sync' | 'backfill' | 'enrich_bulk' | 'retention' | 'webhook_delivery';
 export interface JobMessage { jobId: string; kind: JobKind; account: string; params: Record<string, unknown> }
 
 const DEFAULT_LOOKBACK_MONTHS = 12;
@@ -31,7 +32,29 @@ function configuredLookbackSince(env: Pick<Env, 'SYNC_LOOKBACK_MONTHS'>): string
   return lookbackSince(months);
 }
 
-const JOB_STALE_AFTER_MS = 6 * 60 * 60_000;
+/**
+ * How long a non-terminal Job may sit before the next enqueue treats it as a
+ * corpse and replaces it.
+ *
+ * This is a LEASE, not a timeout: a Job killed mid-flight by a Worker CPU or
+ * subrequest limit never reaches `failed`, and the de-dupe below would hand its
+ * id back to every later cron tick forever. The lease must therefore be shorter
+ * than the cron period (hourly), or one wedged Job silently costs a whole cycle
+ * of syncs — which is exactly how an Account went five days without indexing.
+ */
+const JOB_STALE_AFTER_MS = 15 * 60_000;
+
+/**
+ * How many Messages one working-set Job touches per run.
+ *
+ * Both sweeps are O(mailbox), so they must never try to finish in one
+ * invocation — a Worker isolate killed by the CPU or subrequest limit leaves
+ * its Job wedged (that is the failure this whole change set exists to prevent).
+ * Bounded batches make each run cheap and the work resumable: every tick drains
+ * a slice, and the sweep goes quiet once nothing is left.
+ */
+const RETENTION_BATCH = 200;
+const BACKFILL_BATCH = 100;
 
 export async function enqueueJob(env: Env, kind: JobKind, account: string, params: Record<string, unknown> = {}): Promise<string> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
@@ -40,7 +63,7 @@ export async function enqueueJob(env: Env, kind: JobKind, account: string, param
   await driver.prepare(`UPDATE jobs SET status='failed',terminal=1,error=?,finished_at=?
     WHERE kind=? AND account=? AND status IN ('queued','running')
       AND COALESCE(started_at,created_at) < ?`)
-    .run('stale Job lock expired after 6 hours', nowIso, kind, account, staleBefore);
+    .run(`stale Job lock expired after ${Math.round(JOB_STALE_AFTER_MS / 60_000)} minutes`, nowIso, kind, account, staleBefore);
   const existing = await driver.prepare(`SELECT id FROM jobs WHERE kind=? AND account=? AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1`).get(kind, account) as { id: string } | undefined;
   if (existing) return existing.id;
   const id = crypto.randomUUID();
@@ -60,13 +83,40 @@ export function enqueueSyncJob(env: Env, account: string, since?: string): Promi
 
 export async function enqueueScheduledSyncs(env: Env): Promise<string[]> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
-  const rows = await driver.prepare('SELECT account FROM google_tokens ORDER BY account').all() as { account: string }[];
-  return Promise.all(rows.map(async (row) => {
+  // An Account whose grant Google has already rejected as `invalid_grant` cannot
+  // sync until someone re-consents, and its doomed retry is also the MOST
+  // expensive one: with no successful watermark the `since` below falls back to
+  // the full lookback window, so every hour would replay a 12-month sweep that
+  // can only fail. Skip it until the grant is repaired (see markAuthFailed).
+  const rows = await driver.prepare('SELECT account FROM google_tokens WHERE auth_error IS NULL ORDER BY account').all() as { account: string }[];
+  const ids = await Promise.all(rows.map(async (row) => {
     const watermark = await driver.prepare(`SELECT finished_at FROM sync_runs WHERE account=? AND phase='sync' AND finished_at IS NOT NULL AND error IS NULL ORDER BY finished_at DESC LIMIT 1`).get(row.account) as { finished_at: string } | undefined;
     const minimumSince = configuredLookbackSince(env);
     const since = watermark?.finished_at && watermark.finished_at > minimumSince ? watermark.finished_at : minimumSince;
     return enqueueSyncJob(env, row.account, since);
   }));
+  return [...ids, ...await enqueueWorkingSetJobs(env, driver, rows.map((row) => row.account))];
+}
+
+/**
+ * Keep each Account's working set at its configured shape: fill in bodies inside
+ * the retention window, evict the ones that fell out of it.
+ *
+ * These ride the same cron as the sync, one bounded batch per Account per tick,
+ * so the window converges over a few cycles instead of one enormous run. The
+ * Job-level de-dupe means a batch still draining is never doubled up.
+ */
+export async function enqueueWorkingSetJobs(env: Env, driver: D1Driver, accounts: readonly string[]): Promise<string[]> {
+  const repo = new Repo(driver);
+  const queued: string[] = [];
+  for (const account of accounts) {
+    const settings = await repo.getAccountSettings(account);
+    // An unconfigured window means the operator has not chosen a policy yet;
+    // the defaults apply, which is a 3-month working set.
+    if (windowCutoff(settings) != null) queued.push(await enqueueJob(env, 'enrich_bulk', account, { limit: BACKFILL_BATCH }));
+    if (settings.retention === 'window') queued.push(await enqueueJob(env, 'retention', account, { limit: RETENTION_BATCH }));
+  }
+  return queued;
 }
 
 export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fetch = fetch): Promise<void> {
@@ -117,21 +167,77 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
         payload: { account: job.account, terminalCursor: terminalCursor ?? null, jobId: job.jobId },
         fetchImpl,
       });
+      // startSyncRun is the non-atomic open, so this row IS the Account's sync
+      // lock until it closes. Without the finally a throwing buildGraph leaves it
+      // open, and activeSyncRun then reports the Account busy for the full
+      // STALE_LOCK_MS window — blocking every later sync behind a failure.
       const graphRun = await repo.startSyncRun({ account: job.account, phase: 'graph', selector: null });
-      const graph = await buildGraph(repo, job.account);
-      await repo.finishSyncRun(graphRun, { fetched: 0, indexed: graph.nodes });
+      let graph;
+      try {
+        graph = await buildGraph(repo, job.account);
+      } finally {
+        await repo.finishSyncRun(graphRun, { fetched: 0, indexed: graph?.nodes ?? 0 });
+      }
       progress['graph'] = graph; await update('running', progress);
+    } else if (job.kind === 'retention') {
+      // Evict bodies that aged out of the working set. Bounded per run so the
+      // sweep can never exhaust the isolate's CPU budget; whatever it does not
+      // reach this tick, the next one does.
+      const settings = await repo.getAccountSettings(job.account);
+      const cutoff = windowCutoff(settings, new Date());
+      let evicted = 0;
+      if (settings.retention === 'window' && cutoff != null) {
+        const limit = Number(job.params['limit'] ?? RETENTION_BATCH);
+        for (const id of await repo.retentionEligible(job.account, cutoff, limit)) {
+          if (await repo.evictBody(job.account, id)) evicted += 1;
+        }
+      }
+      progress['retention'] = { evicted, cutoff };
     } else {
-      const enriched = await enrich({ account: job.account, source, repo, selector: { profile: true, ...(job.params['limit'] ? { limit: Number(job.params['limit']) } : {}) } });
+      // Backfill bodies INSIDE the working set. `since` comes from the same
+      // windowCutoff the retention sweep uses — if the two ever disagreed, the
+      // boundary messages would be re-fetched and re-dropped every cycle.
+      const settings = await repo.getAccountSettings(job.account);
+      const cutoff = windowCutoff(settings, new Date());
+      //
+      // Inside the window the policy is "everything readable", not "everything
+      // the interest profile happens to match" — an empty profile is exactly why
+      // an Account could hold 10k messages and 33 bodies. With the window off we
+      // fall back to the profile, which is the pre-window behaviour.
+      const enriched = await enrich({
+        account: job.account,
+        source,
+        repo,
+        selector: {
+          ...(cutoff != null ? { rule: 'all' as const, since: cutoff } : { profile: true }),
+          ...(job.params['limit'] ? { limit: Number(job.params['limit']) } : {}),
+        },
+      });
       progress['enrich'] = { fetched: enriched.fetched, enriched: enriched.enriched };
     }
     await update('done', progress);
     console.log(JSON.stringify({ event: 'job_finish', job_id: job.jobId, kind: job.kind, counts: logCounts(progress) }));
   } catch (error) {
     await update('failed', progress, error instanceof Error ? error.message : String(error));
-    console.log(JSON.stringify({ event: 'job_fail', job_id: job.jobId, kind: job.kind, error_name: error instanceof Error ? error.name : 'Error' }));
+    // error_code is the first token of the message — enough to see `invalid_grant`
+    // in Workers logs without ever emitting Message content (see the log-leak test).
+    console.log(JSON.stringify({ event: 'job_fail', job_id: job.jobId, kind: job.kind, error_name: error instanceof Error ? error.name : 'Error', error_code: errorCode(error) }));
     throw error;
   }
+}
+
+/**
+ * A machine-readable code for a failure, or null when the message has none.
+ *
+ * Only a bare lower_snake_case trailing segment qualifies — the shape of an
+ * OAuth/API error code (`invalid_grant`, `rate_limit_exceeded`). Anything with
+ * spaces, capitals or punctuation is prose, which may quote Message content and
+ * must never reach a log line (ADR-0002).
+ */
+function errorCode(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : String(error);
+  const tail = message.split(':').pop()?.trim() ?? '';
+  return /^[a-z][a-z0-9_]{2,40}$/.test(tail) ? tail : null;
 }
 
 function logCounts(progress: Record<string, unknown>): Record<string, number> {

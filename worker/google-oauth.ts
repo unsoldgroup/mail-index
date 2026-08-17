@@ -110,6 +110,26 @@ export async function saveGrant(driver: D1Driver, input: { account: string; addr
   accessCache.delete(input.account);
 }
 
+/**
+ * Google's terminal answer for a refresh token that can no longer be traded:
+ * revoked, expired (a Testing-mode consent screen expires them every 7 days),
+ * or issued under credentials that have since changed. Retrying never helps —
+ * only re-consent does, which is why this alone is recorded as auth failure.
+ */
+export const INVALID_GRANT = 'invalid_grant';
+
+/** Record the Account as needing re-consent. Terminal states only — see {@link INVALID_GRANT}. */
+export async function markAuthFailed(driver: D1Driver, account: string, error: string): Promise<void> {
+  await driver.prepare('UPDATE google_tokens SET auth_error=?,auth_failed_at=? WHERE account=?')
+    .run(error, new Date().toISOString(), account);
+}
+
+/** Clear a previously recorded auth failure. No-op when the Account is already healthy. */
+export async function clearAuthFailure(driver: D1Driver, account: string): Promise<void> {
+  await driver.prepare('UPDATE google_tokens SET auth_error=NULL,auth_failed_at=NULL WHERE account=? AND auth_error IS NOT NULL')
+    .run(account);
+}
+
 export function accessTokenProvider(driver: D1Driver, account: string, env: { TOKEN_ENC_KEY: string; GOOGLE_CLIENT_ID: string; GOOGLE_CLIENT_SECRET: string }, fetchImpl: typeof fetch): () => Promise<string> {
   return async () => {
     const cached = accessCache.get(account);
@@ -117,9 +137,18 @@ export function accessTokenProvider(driver: D1Driver, account: string, env: { TO
     const row = await driver.prepare('SELECT refresh_token_ciphertext,iv FROM google_tokens WHERE account=?').get(account) as { refresh_token_ciphertext: ArrayBuffer; iv: ArrayBuffer } | undefined;
     if (!row) throw new Error(`No Google grant for Account "${account}"`);
     const refreshToken = await decryptRefreshToken(row.refresh_token_ciphertext, row.iv, env.TOKEN_ENC_KEY);
-    const token = await exchangeToken(fetchImpl, { client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, refresh_token: refreshToken, grant_type: 'refresh_token' });
+    let token: Record<string, unknown>;
+    try {
+      token = await exchangeToken(fetchImpl, { client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, refresh_token: refreshToken, grant_type: 'refresh_token' });
+    } catch (error) {
+      // A dead grant is durable state, not a transient job failure: record it so
+      // the scheduler stops sweeping this Account and every read can say why.
+      if (error instanceof Error && error.message.includes(INVALID_GRANT)) await markAuthFailed(driver, account, INVALID_GRANT);
+      throw error;
+    }
     const access = String(token['access_token'] ?? '');
     if (!access) throw new Error('Google token exchange returned no access token');
+    await clearAuthFailure(driver, account);
     accessCache.set(account, { token: access, expiresAt: Date.now() + Number(token['expires_in'] ?? 3600) * 1000 });
     return access;
   };

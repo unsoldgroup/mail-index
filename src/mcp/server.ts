@@ -40,6 +40,10 @@ import {
   interestPropose,
   interestSet,
   interestGet,
+  onboarding,
+  settingsGet,
+  settingsSet,
+  backfillBodies,
   saveSummaryTool,
   domainsToCategorizeTool,
   saveDomainCategoryTool,
@@ -259,6 +263,44 @@ export const TOOLS: ToolDef[] = [
     description: 'Read back the curated interest profile: curated contacts/domains + keywords.',
     inputSchema: obj({ account: str }),
     run: (ctx, a) => interestGet(ctx, { ...optStr(a, 'account') }),
+  },
+  // ---- settings + guided first run ----
+  {
+    name: 'onboarding',
+    description:
+      'The guided first run. Call with no arguments to get the next question plus its options; present it to the user, then call again with `step` and their `answer`. Walks: accounts → retention window → interests → backfill. Returns step:"done" when there is nothing left to ask.',
+    inputSchema: obj({ account: str, step: str, answer: { type: ['string', 'number'] } }),
+    run: (ctx, a) =>
+      onboarding(ctx, {
+        ...optStr(a, 'account'),
+        ...optStr(a, 'step'),
+        ...(a['answer'] != null ? { answer: a['answer'] as string | number } : {}),
+      }),
+  },
+  {
+    name: 'settings_get',
+    description: 'Read this mailbox\'s working-set policy: how many months of mail keep full bodies, and whether older bodies are evicted.',
+    inputSchema: obj({ account: str }),
+    run: (ctx, a) => settingsGet(ctx, { ...optStr(a, 'account') }),
+  },
+  {
+    name: 'settings_set',
+    description:
+      'Change the working-set policy. body_window_months: months of mail that keep full bodies (0 = no window, interest profile only). retention: "window" evicts bodies past the window (re-fetchable on demand), "off" keeps everything. Omitted fields are left unchanged.',
+    inputSchema: obj({ account: str, body_window_months: num, retention: { type: 'string', enum: ['window', 'off'] } }),
+    run: (ctx, a) =>
+      settingsSet(ctx, {
+        ...optStr(a, 'account'),
+        ...optNum(a, 'body_window_months'),
+        ...(a['retention'] != null ? { retention: String(a['retention']) as 'window' | 'off' } : {}),
+      }),
+  },
+  {
+    name: 'backfill_bodies',
+    description:
+      'Fetch the missing bodies inside the retention window now, instead of waiting for the hourly sweep. Use after changing the window or finishing onboarding. Returns how many messages are still header-only.',
+    inputSchema: obj({ account: str, limit: num }),
+    run: (ctx, a) => backfillBodies(ctx, { ...optStr(a, 'account'), ...optNum(a, 'limit') }),
   },
   // ---- summarization write-back ----
   {
@@ -510,7 +552,12 @@ export function buildServer(ctx: ToolContext): Server {
         '`catch_up`; the snippet rows already carry sender/subject/date, so only call ' +
         '`get_message` for the few rows you actually need the full body of — do not ' +
         'fetch every result. Local-first and read-only: it never sends or changes ' +
-        'mail. No telemetry — to report a bug or give feedback, help the user draft ' +
+        'mail. If a response carries `freshness.auth: "needs_reauth"`, the mailbox ' +
+        'credential has been rejected and the index is FROZEN — tell the user and ' +
+        'give them `freshness.refresh_command`; do not present stale results as ' +
+        'current. If `settings_get` reports no `onboarding_completed_at`, run ' +
+        '`onboarding` first: it returns one question at a time for you to ask. ' +
+        'No telemetry — to report a bug or give feedback, help the user draft ' +
         'it and point them to https://github.com/unsoldgroup/mail-index/issues ' +
         '(nothing is sent automatically).',
     },
