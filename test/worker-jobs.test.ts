@@ -47,6 +47,21 @@ test('cron enqueues one sync Job per connected Account without Gmail', async () 
   finally { await mf.dispose(); }
 });
 
+test('the Queue consumer takes one Job per invocation', async () => {
+  // The consumer awaits each message SERIALLY, so a batch larger than one makes
+  // several sync pipelines share a single 30s CPU budget. Exhausting it kills
+  // the isolate mid-Job: the D1 writes already made survive, but the closing
+  // `update('done')` never lands and the row sticks at `running` forever —
+  // which then suppresses every later enqueue for that Account. Config, so
+  // nothing else would catch a regression.
+  const { readFileSync } = await import('node:fs');
+  for (const path of ['worker/wrangler.jsonc', 'worker/wrangler.production.jsonc']) {
+    const config = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+    const consumer = /"consumers"\s*:\s*\[\{([^}]*)\}/.exec(config)?.[1] ?? '';
+    assert.match(consumer, /"max_batch_size"\s*:\s*1\b/, `${path} must take one Job per invocation`);
+  }
+});
+
 test('the scheduler skips an Account whose grant Google already rejected', async () => {
   const { mf, env, driver, sent } = await fixture();
   try {
@@ -127,9 +142,20 @@ test('scheduled sync Job runs the full sync, enrichment, and graph pipeline', as
     assert.equal(syncJob?.['status'], 'done');
     const progress = syncJob?.['progress'] as Record<string, unknown>;
     assert.ok(progress['enrich']);
-    assert.ok(progress['graph']);
+    // The graph is O(mailbox), so the sync HANDS IT OFF rather than running it
+    // inline — that tail is what exhausted the invocation's CPU budget.
+    const graphJobId = (progress['graph'] as { queued_job?: string })?.queued_job;
+    assert.ok(graphJobId, 'sync queues a follow-up graph Job');
     const runs = await driver.prepare('SELECT phase FROM sync_runs ORDER BY id').all() as { phase: string }[];
-    assert.deepEqual(runs.map((r) => r.phase), ['sync', 'enrich', 'graph']);
+    assert.deepEqual(runs.map((r) => r.phase), ['sync', 'enrich'], 'no graph run inside the sync Job');
+
+    // Running that follow-up completes the graph exactly as before.
+    const graphMessage = sent.find((m) => (m as { kind: string }).kind === 'graph') as never;
+    await runJob(env, graphMessage, gmailFetch);
+    const after = await driver.prepare('SELECT phase FROM sync_runs ORDER BY id').all() as { phase: string }[];
+    assert.deepEqual(after.map((r) => r.phase), ['sync', 'enrich', 'graph']);
+    const graphStatus = await jobStatus(env, 'acct-a');
+    assert.equal(graphStatus.recent.find((row) => row['id'] === graphJobId)?.['status'], 'done');
   } finally { await mf.dispose(); }
 });
 
@@ -183,11 +209,11 @@ test('explicit backfill Job retains the full enrichment and graph pipeline', asy
     await enqueueJob(env, 'backfill', 'acct-a');
     await runJob(env, sent[0] as never, gmailFetch);
     const status = await jobStatus(env, 'acct-a');
-    const progress = status.recent[0]?.progress as Record<string, unknown>;
+    const progress = status.recent.find((row) => row['kind'] === 'backfill')?.['progress'] as Record<string, unknown>;
     assert.ok(progress['enrich']);
-    assert.ok(progress['graph']);
+    assert.ok((progress['graph'] as { queued_job?: string })?.queued_job, 'backfill hands the graph off too');
     const runs = await driver.prepare('SELECT phase FROM sync_runs ORDER BY id').all() as { phase: string }[];
-    assert.deepEqual(runs.map((r) => r.phase), ['sync', 'enrich', 'graph']);
+    assert.deepEqual(runs.map((r) => r.phase), ['sync', 'enrich']);
     const changes = await driver.prepare(
       'SELECT account,entity_type,entity_key,operation,payload_json FROM crm_change_events ORDER BY sequence',
     ).all() as Array<Record<string, unknown>>;

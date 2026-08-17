@@ -15,7 +15,7 @@ import { CrmChangeFeed, publishMessageChanges } from './crm-feed.js';
 import { notifyCrmCompletion } from './crm-webhook.js';
 import { storeMessageAttachments } from './attachments.js';
 
-export type JobKind = 'sync' | 'backfill' | 'enrich_bulk' | 'retention' | 'webhook_delivery';
+export type JobKind = 'sync' | 'backfill' | 'enrich_bulk' | 'retention' | 'graph' | 'webhook_delivery';
 export interface JobMessage { jobId: string; kind: JobKind; account: string; params: Record<string, unknown> }
 
 const DEFAULT_LOOKBACK_MONTHS = 12;
@@ -167,9 +167,17 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
         payload: { account: job.account, terminalCursor: terminalCursor ?? null, jobId: job.jobId },
         fetchImpl,
       });
+      // The graph is rebuilt over the WHOLE mailbox, so it is O(N) work and
+      // belongs in its own Job (ADR-0009) rather than the tail of every sync
+      // tick. Inline, it was the phase most likely to exhaust the invocation's
+      // CPU budget on a large Account — killing the isolate before this Job
+      // could mark itself done, which is what left rows stuck at `running`.
+      progress['graph'] = { queued_job: await enqueueJob(env, 'graph', job.account, {}) };
+      await update('running', progress);
+    } else if (job.kind === 'graph') {
       // startSyncRun is the non-atomic open, so this row IS the Account's sync
-      // lock until it closes. Without the finally a throwing buildGraph leaves it
-      // open, and activeSyncRun then reports the Account busy for the full
+      // lock until it closes. Without the finally a throwing buildGraph leaves
+      // it open, and activeSyncRun then reports the Account busy for the full
       // STALE_LOCK_MS window — blocking every later sync behind a failure.
       const graphRun = await repo.startSyncRun({ account: job.account, phase: 'graph', selector: null });
       let graph;
@@ -178,7 +186,7 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       } finally {
         await repo.finishSyncRun(graphRun, { fetched: 0, indexed: graph?.nodes ?? 0 });
       }
-      progress['graph'] = graph; await update('running', progress);
+      progress['graph'] = graph;
     } else if (job.kind === 'retention') {
       // Evict bodies that aged out of the working set. Bounded per run so the
       // sweep can never exhaust the isolate's CPU budget; whatever it does not

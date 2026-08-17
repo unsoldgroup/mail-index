@@ -9,10 +9,17 @@
   ],
   "queues": {
     "producers": [{ "binding": "SYNC_QUEUE", "queue": "mail-index-jobs" }],
-    // max_retries is bounded so a Job that kills its isolate (CPU/subrequest
-    // limit) stops being redelivered forever; the Job row's lease is what
-    // reclaims it after that.
-    "consumers": [{ "queue": "mail-index-jobs", "max_retries": 3 }]
+    // max_batch_size MUST stay 1. The consumer runs a batch SERIALLY in one
+    // invocation, so any larger batch makes several whole sync pipelines share
+    // a single 30s CPU budget. When that budget runs out the isolate is killed
+    // mid-Job: the D1 writes already made survive, but the final
+    // `update('done')` never lands, leaving rows stuck at `running` with empty
+    // progress — and a stuck row suppresses the next enqueue for that Account.
+    // One Job per invocation gives each the full budget.
+    //
+    // max_retries is bounded so a Job that kills its isolate stops being
+    // redelivered forever; the Job row's lease is what reclaims it after that.
+    "consumers": [{ "queue": "mail-index-jobs", "max_batch_size": 1, "max_retries": 3 }]
   },
   "kv_namespaces": [
     { "binding": "OAUTH_KV", "id": "3a709f7cc8884412aacb9347345a90ad" }
