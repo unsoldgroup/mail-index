@@ -1388,15 +1388,24 @@ export class Repo {
              WHERE c.account = m.account AND c.curation = 'important'
                AND (
                  m.from_addr = c.address
-                 OR lower(m.from_addr) LIKE '%<' || lower(c.address) || '>%'
+                 -- instr, not LIKE: a pattern BUILT by concatenation is not a
+                 -- literal, so SQLite cannot precompile it and D1 rejects it
+                 -- outright with "LIKE or GLOB pattern too complex". instr does
+                 -- the same substring test with no pattern limit.
+                 OR instr(lower(m.from_addr), '<' || lower(c.address) || '>') > 0
                )
           )
           AND NOT EXISTS (
             SELECT 1 FROM domains d
              WHERE d.account = m.account AND d.curation = 'important'
                AND (
-                 lower(m.from_addr) LIKE '%@' || lower(d.domain)
-                 OR lower(m.from_addr) LIKE '%@' || lower(d.domain) || '>%'
+                 -- Same reason as the contact clause above: no concatenated
+                 -- LIKE patterns. Anchored deliberately — a bare substring test
+                 -- would let "@example.com.attacker.net" inherit the exemption
+                 -- granted to "example.com". Either the address ENDS with
+                 -- "@domain", or it contains "@domain>" (the display-name form).
+                 substr(lower(m.from_addr), -length('@' || lower(d.domain))) = '@' || lower(d.domain)
+                 OR instr(lower(m.from_addr), '@' || lower(d.domain) || '>') > 0
                )
           )
         ORDER BY m.summarized_at ASC, m.gmail_message_id ASC` +
@@ -2517,15 +2526,24 @@ export class Repo {
              WHERE c.account = m.account AND c.curation = 'important'
                AND (
                  m.from_addr = c.address
-                 OR lower(m.from_addr) LIKE '%<' || lower(c.address) || '>%'
+                 -- instr, not LIKE: a pattern BUILT by concatenation is not a
+                 -- literal, so SQLite cannot precompile it and D1 rejects it
+                 -- outright with "LIKE or GLOB pattern too complex". instr does
+                 -- the same substring test with no pattern limit.
+                 OR instr(lower(m.from_addr), '<' || lower(c.address) || '>') > 0
                )
           )
           AND NOT EXISTS (
             SELECT 1 FROM domains d
              WHERE d.account = m.account AND d.curation = 'important'
                AND (
-                 lower(m.from_addr) LIKE '%@' || lower(d.domain)
-                 OR lower(m.from_addr) LIKE '%@' || lower(d.domain) || '>%'
+                 -- Same reason as the contact clause above: no concatenated
+                 -- LIKE patterns. Anchored deliberately — a bare substring test
+                 -- would let "@example.com.attacker.net" inherit the exemption
+                 -- granted to "example.com". Either the address ENDS with
+                 -- "@domain", or it contains "@domain>" (the display-name form).
+                 substr(lower(m.from_addr), -length('@' || lower(d.domain))) = '@' || lower(d.domain)
+                 OR instr(lower(m.from_addr), '@' || lower(d.domain) || '>') > 0
                )
           )
         ORDER BY m.internal_date ASC, m.gmail_message_id ASC` +
