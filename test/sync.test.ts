@@ -236,6 +236,23 @@ function sourceAs(provider: string, address: string): FakeMailSource {
   return s;
 }
 
+test('named mailbox syncs remain isolated through account-scoped search', async () => {
+  const repo = await freshRepo();
+  const bindings = [
+    ['personal', 'personal@example.test'],
+    ['fora', 'fora@example.test'],
+    ['unsold-group', 'unsold@example.test'],
+  ] as const;
+  for (const [account, address] of bindings) {
+    await syncMetadata({ account, source: sourceAs('gmail-rest', address), repo });
+  }
+  for (const [account] of bindings) {
+    const hits = await repo.searchMessages('Antarctica', { account });
+    assert.ok(hits.length > 0);
+    assert.deepEqual([...new Set(hits.map((hit) => hit.account))], [account]);
+  }
+});
+
 test('identity guard: first sync pins the label to the authenticated mailbox', async () => {
   const repo = await freshRepo();
   await syncMetadata({ account: ACCOUNT, source: sourceAs('gws', 'al@example.com'), repo });

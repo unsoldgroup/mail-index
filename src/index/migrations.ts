@@ -575,6 +575,31 @@ const m016_crm_feed_repair: Migration = {
   },
 };
 
+/**
+ * Migration 17 — mark a queued Job's failure terminal.
+ *
+ * A Job reaped for holding a stale lock must never be retried by a late queue
+ * delivery: the row is a corpse, and re-running it would reopen the lock the
+ * reaper just released. `terminal=1` is that tombstone, checked by `runJob`
+ * before any work starts.
+ */
+const m017_terminal_jobs: Migration = {
+  version: 17,
+  name: 'terminal queued Job failures',
+  up: async (db) => {
+    // ADD COLUMN has no IF NOT EXISTS in SQLite, and this migration sits at the
+    // tail of the chain, where the repair preflight and concurrent first-request
+    // convergence both replay it against a database that may already carry the
+    // column. Probing first is what makes the replay a no-op instead of an error.
+    const columns = (await db.prepare('PRAGMA table_info(jobs)').all()) as { name: string }[];
+    if (columns.some((column) => column.name === 'terminal')) return;
+    await db.exec(`
+      ALTER TABLE jobs ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0
+        CHECK (terminal IN (0,1));
+    `);
+  },
+};
+
 /** All migrations, in ascending version order. Append-only. */
 export const MIGRATIONS: readonly Migration[] = [
   m001_initial,
@@ -593,6 +618,7 @@ export const MIGRATIONS: readonly Migration[] = [
   m014_crm_event_deduplication,
   m015_rfc_message_identity,
   m016_crm_feed_repair,
+  m017_terminal_jobs,
 ];
 
 /**

@@ -18,6 +18,7 @@ import { parseArgs } from 'node:util';
 import { ConfigError, loadConfig, resolveAccount } from '../config/index.js';
 import { IndexError, openDb } from '../index/db.js';
 import { Repo } from '../index/repo.js';
+import { SCHEMA_VERSION } from '../index/schema.js';
 import { SyncError } from '../ingest/sync.js';
 import { enrich, EnrichError, type EnrichSelector } from '../ingest/enrich.js';
 
@@ -974,8 +975,8 @@ async function main(argv: string[]): Promise<number> {
 
 async function cmdExport(argv: string[]): Promise<number> {
   const { values } = parseArgs({ args: argv, options: { db: { type: 'string' }, out: { type: 'string' }, account: { type: 'string' }, 'schema-version': { type: 'string' }, help: { type: 'boolean' } }, allowPositionals: false });
-  if (values.help) { process.stdout.write('Usage: mail-index export [--db <path>] [--out <file>] [--account <label>] [--schema-version 12]\n'); return 0; }
-  if (values['schema-version'] != null && Number(values['schema-version']) !== 12) throw new CliError(`export schema-version must be 12, got ${values['schema-version']}`);
+  if (values.help) { process.stdout.write(`Usage: mail-index export [--db <path>] [--out <file>] [--account <label>] [--schema-version ${SCHEMA_VERSION}]\n`); return 0; }
+  if (values['schema-version'] != null && Number(values['schema-version']) !== SCHEMA_VERSION) throw new CliError(`export schema-version must be ${SCHEMA_VERSION}, got ${values['schema-version']}`);
   const db = await openDb(values.db ? { path: values.db } : {}); try { await writeExport(db, values.out, values.account); return 0; } finally { db.close(); }
 }
 

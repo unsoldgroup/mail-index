@@ -3,6 +3,7 @@ import { evaluateTriggerRule, validateTriggerPredicate, type TriggerMatch } from
 import { Repo } from '../src/index/repo.js';
 import type { TriggerAdmin } from '../src/mcp/tools.js';
 import type { Env } from './index.js';
+import { markQueueEnqueueFailed } from './job-state.js';
 
 export interface DeliveryParams { deliveryId: string; rule: { id: string; name: string }; consumerId: string; matches: TriggerMatch[] }
 
@@ -36,7 +37,7 @@ export async function evaluateRules(env: Env, driver: StorageDriver, repo: Repo,
       const jobId = crypto.randomUUID(); const now = new Date().toISOString();
       await driver.prepare(`INSERT INTO jobs(id,kind,account,params_json,status,progress_json,created_at) VALUES(?,?,?,?,?,?,?)`).run(jobId, 'webhook_delivery', account, JSON.stringify(params), 'queued', '{}', now);
       try { await env.SYNC_QUEUE.send({ jobId, kind: 'webhook_delivery', account, params }); queued++; }
-      catch (error) { await driver.prepare(`UPDATE jobs SET status='failed',error=?,finished_at=? WHERE id=?`).run('queue enqueue failed', new Date().toISOString(), jobId); throw error; }
+      catch (error) { await markQueueEnqueueFailed(driver, jobId); throw error; }
     }
   }
   return queued;
