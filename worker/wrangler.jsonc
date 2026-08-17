@@ -9,7 +9,7 @@
   ],
   "queues": {
     "producers": [{ "binding": "SYNC_QUEUE", "queue": "mail-index-jobs" }],
-    "consumers": [{ "queue": "mail-index-jobs" }]
+    "consumers": [{ "queue": "mail-index-jobs", "max_retries": 3 }]
   },
   "kv_namespaces": [
     { "binding": "OAUTH_KV", "id": "replace-with-operator-kv-id" }

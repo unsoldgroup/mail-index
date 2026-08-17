@@ -600,6 +600,30 @@ const m017_terminal_jobs: Migration = {
   },
 };
 
+/**
+ * Migration 18 — per-account auth health on the grant row.
+ *
+ * A refresh token that Google answers with `invalid_grant` is dead, not slow:
+ * every later sync fails identically until an operator re-consents. Without a
+ * durable marker the Deployment retried such an Account hourly forever and no
+ * reader could tell a stale index from a healthy one. `auth_error` is set ONLY
+ * for that terminal state — transient 5xx/rate-limit failures must leave it
+ * null, or one blip would disable a working mailbox.
+ */
+const m018_auth_health: Migration = {
+  version: 18,
+  name: 'per-account Google auth health',
+  up: async (db) => {
+    // Same replay-safety reasoning as migration 17: probe before ALTER.
+    const columns = (await db.prepare('PRAGMA table_info(google_tokens)').all()) as { name: string }[];
+    if (columns.some((column) => column.name === 'auth_error')) return;
+    await db.exec(`
+      ALTER TABLE google_tokens ADD COLUMN auth_error TEXT;
+      ALTER TABLE google_tokens ADD COLUMN auth_failed_at TEXT;
+    `);
+  },
+};
+
 /** All migrations, in ascending version order. Append-only. */
 export const MIGRATIONS: readonly Migration[] = [
   m001_initial,
@@ -619,6 +643,7 @@ export const MIGRATIONS: readonly Migration[] = [
   m015_rfc_message_identity,
   m016_crm_feed_repair,
   m017_terminal_jobs,
+  m018_auth_health,
 ];
 
 /**

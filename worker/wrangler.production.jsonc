@@ -9,7 +9,10 @@
   ],
   "queues": {
     "producers": [{ "binding": "SYNC_QUEUE", "queue": "mail-index-jobs" }],
-    "consumers": [{ "queue": "mail-index-jobs" }]
+    // max_retries is bounded so a Job that kills its isolate (CPU/subrequest
+    // limit) stops being redelivered forever; the Job row's lease is what
+    // reclaims it after that.
+    "consumers": [{ "queue": "mail-index-jobs", "max_retries": 3 }]
   },
   "kv_namespaces": [
     { "binding": "OAUTH_KV", "id": "3a709f7cc8884412aacb9347345a90ad" }

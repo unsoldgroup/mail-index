@@ -31,7 +31,17 @@ function configuredLookbackSince(env: Pick<Env, 'SYNC_LOOKBACK_MONTHS'>): string
   return lookbackSince(months);
 }
 
-const JOB_STALE_AFTER_MS = 6 * 60 * 60_000;
+/**
+ * How long a non-terminal Job may sit before the next enqueue treats it as a
+ * corpse and replaces it.
+ *
+ * This is a LEASE, not a timeout: a Job killed mid-flight by a Worker CPU or
+ * subrequest limit never reaches `failed`, and the de-dupe below would hand its
+ * id back to every later cron tick forever. The lease must therefore be shorter
+ * than the cron period (hourly), or one wedged Job silently costs a whole cycle
+ * of syncs — which is exactly how an Account went five days without indexing.
+ */
+const JOB_STALE_AFTER_MS = 15 * 60_000;
 
 export async function enqueueJob(env: Env, kind: JobKind, account: string, params: Record<string, unknown> = {}): Promise<string> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
@@ -40,7 +50,7 @@ export async function enqueueJob(env: Env, kind: JobKind, account: string, param
   await driver.prepare(`UPDATE jobs SET status='failed',terminal=1,error=?,finished_at=?
     WHERE kind=? AND account=? AND status IN ('queued','running')
       AND COALESCE(started_at,created_at) < ?`)
-    .run('stale Job lock expired after 6 hours', nowIso, kind, account, staleBefore);
+    .run(`stale Job lock expired after ${Math.round(JOB_STALE_AFTER_MS / 60_000)} minutes`, nowIso, kind, account, staleBefore);
   const existing = await driver.prepare(`SELECT id FROM jobs WHERE kind=? AND account=? AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1`).get(kind, account) as { id: string } | undefined;
   if (existing) return existing.id;
   const id = crypto.randomUUID();
@@ -60,7 +70,12 @@ export function enqueueSyncJob(env: Env, account: string, since?: string): Promi
 
 export async function enqueueScheduledSyncs(env: Env): Promise<string[]> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
-  const rows = await driver.prepare('SELECT account FROM google_tokens ORDER BY account').all() as { account: string }[];
+  // An Account whose grant Google has already rejected as `invalid_grant` cannot
+  // sync until someone re-consents, and its doomed retry is also the MOST
+  // expensive one: with no successful watermark the `since` below falls back to
+  // the full lookback window, so every hour would replay a 12-month sweep that
+  // can only fail. Skip it until the grant is repaired (see markAuthFailed).
+  const rows = await driver.prepare('SELECT account FROM google_tokens WHERE auth_error IS NULL ORDER BY account').all() as { account: string }[];
   return Promise.all(rows.map(async (row) => {
     const watermark = await driver.prepare(`SELECT finished_at FROM sync_runs WHERE account=? AND phase='sync' AND finished_at IS NOT NULL AND error IS NULL ORDER BY finished_at DESC LIMIT 1`).get(row.account) as { finished_at: string } | undefined;
     const minimumSince = configuredLookbackSince(env);
@@ -117,9 +132,17 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
         payload: { account: job.account, terminalCursor: terminalCursor ?? null, jobId: job.jobId },
         fetchImpl,
       });
+      // startSyncRun is the non-atomic open, so this row IS the Account's sync
+      // lock until it closes. Without the finally a throwing buildGraph leaves it
+      // open, and activeSyncRun then reports the Account busy for the full
+      // STALE_LOCK_MS window — blocking every later sync behind a failure.
       const graphRun = await repo.startSyncRun({ account: job.account, phase: 'graph', selector: null });
-      const graph = await buildGraph(repo, job.account);
-      await repo.finishSyncRun(graphRun, { fetched: 0, indexed: graph.nodes });
+      let graph;
+      try {
+        graph = await buildGraph(repo, job.account);
+      } finally {
+        await repo.finishSyncRun(graphRun, { fetched: 0, indexed: graph?.nodes ?? 0 });
+      }
       progress['graph'] = graph; await update('running', progress);
     } else {
       const enriched = await enrich({ account: job.account, source, repo, selector: { profile: true, ...(job.params['limit'] ? { limit: Number(job.params['limit']) } : {}) } });
@@ -129,9 +152,25 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
     console.log(JSON.stringify({ event: 'job_finish', job_id: job.jobId, kind: job.kind, counts: logCounts(progress) }));
   } catch (error) {
     await update('failed', progress, error instanceof Error ? error.message : String(error));
-    console.log(JSON.stringify({ event: 'job_fail', job_id: job.jobId, kind: job.kind, error_name: error instanceof Error ? error.name : 'Error' }));
+    // error_code is the first token of the message — enough to see `invalid_grant`
+    // in Workers logs without ever emitting Message content (see the log-leak test).
+    console.log(JSON.stringify({ event: 'job_fail', job_id: job.jobId, kind: job.kind, error_name: error instanceof Error ? error.name : 'Error', error_code: errorCode(error) }));
     throw error;
   }
+}
+
+/**
+ * A machine-readable code for a failure, or null when the message has none.
+ *
+ * Only a bare lower_snake_case trailing segment qualifies — the shape of an
+ * OAuth/API error code (`invalid_grant`, `rate_limit_exceeded`). Anything with
+ * spaces, capitals or punctuation is prose, which may quote Message content and
+ * must never reach a log line (ADR-0002).
+ */
+function errorCode(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : String(error);
+  const tail = message.split(':').pop()?.trim() ?? '';
+  return /^[a-z][a-z0-9_]{2,40}$/.test(tail) ? tail : null;
 }
 
 function logCounts(progress: Record<string, unknown>): Record<string, number> {

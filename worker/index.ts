@@ -201,6 +201,13 @@ export const defaultHandler = { fetch: (request: Request, env: Env, ctx: WorkerC
 
 export default {
   fetch(request: Request, env: Env, ctx: WorkerContext) { return handlePublicRequest(request, env, ctx); },
-  scheduled(_controller: unknown, env: Env, ctx: WorkerContext) { ctx.waitUntil(enqueueScheduledSyncs(env)); },
+  // An unobserved rejection here loses the whole hour's fan-out for EVERY
+  // Account silently — a single D1 hiccup would look identical to a healthy
+  // quiet tick. Log it so a missed cycle is visible in Workers logs.
+  scheduled(_controller: unknown, env: Env, ctx: WorkerContext) {
+    ctx.waitUntil(enqueueScheduledSyncs(env).catch((error: unknown) => {
+      console.log(JSON.stringify({ event: 'cron_fail', error_name: error instanceof Error ? error.name : 'Error' }));
+    }));
+  },
   async queue(batch: QueueBatch<JobMessage>, env: Env) { for (const message of batch.messages) { try { await runJob(env, message.body); message.ack(); } catch { message.retry(); } } },
 };
