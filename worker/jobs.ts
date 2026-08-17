@@ -2,7 +2,7 @@
 import { D1Driver } from '../src/index/drivers/d1.js';
 import { Repo } from '../src/index/repo.js';
 import { runMigrations } from '../src/index/migrations.js';
-import { windowCutoff } from '../src/index/settings.js';
+import { windowCutoff, nextBackfillSlice, BACKFILL_FLOOR } from '../src/index/settings.js';
 import { syncMetadata } from '../src/ingest/sync.js';
 import { enrich } from '../src/ingest/enrich.js';
 import { buildGraph } from '../src/graph/index.js';
@@ -15,7 +15,7 @@ import { CrmChangeFeed, publishMessageChanges } from './crm-feed.js';
 import { notifyCrmCompletion } from './crm-webhook.js';
 import { storeMessageAttachments } from './attachments.js';
 
-export type JobKind = 'sync' | 'backfill' | 'enrich_bulk' | 'retention' | 'graph' | 'webhook_delivery';
+export type JobKind = 'sync' | 'backfill' | 'backfill_slice' | 'enrich_bulk' | 'retention' | 'graph' | 'webhook_delivery';
 export interface JobMessage { jobId: string; kind: JobKind; account: string; params: Record<string, unknown> }
 
 const DEFAULT_LOOKBACK_MONTHS = 12;
@@ -28,7 +28,10 @@ function lookbackSince(months: number, now = new Date()): string {
 
 function configuredLookbackSince(env: Pick<Env, 'SYNC_LOOKBACK_MONTHS'>): string {
   const parsed = Number(env.SYNC_LOOKBACK_MONTHS ?? DEFAULT_LOOKBACK_MONTHS);
-  const months = Number.isInteger(parsed) && parsed > 0 && parsed <= 120 ? parsed : DEFAULT_LOOKBACK_MONTHS;
+  // Ceiling raised to 50 years: this is only the FLOOR for the incremental
+  // watermark, and a low ceiling silently truncated coverage back to the
+  // default whenever a larger value was configured.
+  const months = Number.isInteger(parsed) && parsed > 0 && parsed <= 600 ? parsed : DEFAULT_LOOKBACK_MONTHS;
   return lookbackSince(months);
 }
 
@@ -55,6 +58,16 @@ const JOB_STALE_AFTER_MS = 15 * 60_000;
  */
 const RETENTION_BATCH = 200;
 const BACKFILL_BATCH = 100;
+
+/**
+ * Correspondent fan-out for a historical slice. The chunk keeps each provider
+ * `from:{…}` query short enough for Gmail to accept, and the cap stops a
+ * mailbox with thousands of Correspondents from turning one slice into
+ * thousands of requests — the strongest ties are swept first (see
+ * `correspondentAddresses`), and the rest are reached on later passes.
+ */
+const CORRESPONDENT_CHUNK = 25;
+const CORRESPONDENT_CAP = 500;
 
 export async function enqueueJob(env: Env, kind: JobKind, account: string, params: Record<string, unknown> = {}): Promise<string> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
@@ -115,6 +128,11 @@ export async function enqueueWorkingSetJobs(env: Env, driver: D1Driver, accounts
     // the defaults apply, which is a 3-month working set.
     if (windowCutoff(settings) != null) queued.push(await enqueueJob(env, 'enrich_bulk', account, { limit: BACKFILL_BATCH }));
     if (settings.retention === 'window') queued.push(await enqueueJob(env, 'retention', account, { limit: RETENTION_BATCH }));
+    // One historical slice per tick, newest-first, until the sweep hits the
+    // floor. Bounded the same way as the other sweeps so deep history can never
+    // become a single unbounded request.
+    const slice = nextBackfillSlice(settings);
+    if (slice) queued.push(await enqueueJob(env, 'backfill_slice', account, slice));
   }
   return queued;
 }
@@ -173,6 +191,47 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       // CPU budget on a large Account — killing the isolate before this Job
       // could mark itself done, which is what left rows stuck at `running`.
       progress['graph'] = { queued_job: await enqueueJob(env, 'graph', job.account, {}) };
+      await update('running', progress);
+    } else if (job.kind === 'backfill_slice') {
+      // One historical slice, swept by CORRESPONDENCE rather than wholesale.
+      //
+      // Deep history is dominated by bulk mail — a decade of newsletters is
+      // volume without recall value, and indexing it wholesale is what turns a
+      // 220k-message mailbox into days of provider calls. What earns its place
+      // is mail you took part in: everything you SENT, plus mail from the people
+      // you sent it to. Two passes give exactly that.
+      const since = String(job.params['since'] ?? '');
+      const until = String(job.params['until'] ?? '');
+      let fetched = 0;
+      let indexed = 0;
+
+      // Pass 1 — everything sent in the slice. Cheap, and it is what discovers
+      // (and scores) the Correspondents pass 2 depends on.
+      const sent = await syncMetadata({ account: job.account, source, repo, scope: { since, until, query: 'in:sent' } });
+      fetched += sent.fetched; indexed += sent.indexed;
+      progress['backfill_sent'] = { fetched: sent.fetched, indexed: sent.indexed, since, until };
+      await update('running', progress);
+
+      // Pass 2 — received mail from known Correspondents, in chunked provider
+      // queries so one `from:(…)` never grows unbounded.
+      const correspondents = await repo.correspondentAddresses(job.account, CORRESPONDENT_CAP);
+      for (let i = 0; i < correspondents.length; i += CORRESPONDENT_CHUNK) {
+        const chunk = correspondents.slice(i, i + CORRESPONDENT_CHUNK);
+        const received = await syncMetadata({
+          account: job.account,
+          source,
+          repo,
+          scope: { since, until, query: `from:{${chunk.join(' ')}}` },
+        });
+        fetched += received.fetched; indexed += received.indexed;
+      }
+      progress['backfill'] = { fetched, indexed, since, until, correspondents: correspondents.length };
+
+      // Advance the cursor even on an empty slice: the sweep walks backwards
+      // through time, and empty years are exactly what it must walk PAST.
+      const done = since <= BACKFILL_FLOOR;
+      await repo.setAccountSettings(job.account, { backfill_cursor: since, backfill_done: done });
+      progress['backfill_cursor'] = { cursor: since, done };
       await update('running', progress);
     } else if (job.kind === 'graph') {
       // startSyncRun is the non-atomic open, so this row IS the Account's sync

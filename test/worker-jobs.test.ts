@@ -8,6 +8,7 @@ import { saveGrant } from '../dist-worker/worker/google-oauth.js';
 import { enqueueJob, enqueueScheduledSyncs, jobStatus, runJob } from '../dist-worker/worker/jobs.js';
 import worker from '../dist-worker/worker/index.js';
 import { evaluateRules, triggerAdmin } from '../dist-worker/worker/triggers.js';
+import { nextBackfillSlice, BACKFILL_FLOOR } from '../dist/index/settings.js';
 
 const key = Buffer.alloc(32, 4).toString('base64');
 
@@ -38,13 +39,73 @@ test('cron enqueues one sync Job per connected Account without Gmail', async () 
     // One tick queues three kinds per Account: the sync, plus the two bounded
     // working-set sweeps (fill bodies inside the window, evict those outside).
     const kinds = sent.map((message) => (message as { kind: string }).kind);
-    assert.deepEqual(kinds, ['sync', 'enrich_bulk', 'retention']);
+    // One tick per Account: the incremental sync, the two working-set sweeps,
+    // and one slice of the historical backfill.
+    assert.deepEqual(kinds, ['sync', 'enrich_bulk', 'retention', 'backfill_slice']);
     const params = (sent[0] as { params: Record<string, unknown> }).params;
     assert.equal(typeof params['since'], 'string');
     const ageDays = (Date.now() - Date.parse(String(params['since']))) / 86_400_000;
     assert.ok(ageDays > 360 && ageDays < 380, `expected a 12-month lookback, got ${ageDays} days`);
   }
   finally { await mf.dispose(); }
+});
+
+test('the historical backfill walks backwards a slice at a time and stops at the floor', async () => {
+  const { mf, driver } = await fixture();
+  try {
+    const repo = new Repo(driver);
+    const first = nextBackfillSlice(await repo.getAccountSettings('acct-a'), new Date('2026-08-17T00:00:00Z'));
+    assert.equal(first?.until, '2026-08-17');
+    assert.equal(first?.since, '2025-08-17', 'one year per slice');
+
+    // Each completed slice moves the cursor earlier.
+    await repo.setAccountSettings('acct-a', { backfill_cursor: first.since });
+    const second = nextBackfillSlice(await repo.getAccountSettings('acct-a'));
+    assert.equal(second?.until, '2025-08-17');
+    assert.equal(second?.since, '2024-08-17');
+
+    // Approaching the floor clamps rather than overshooting into empty years.
+    await repo.setAccountSettings('acct-a', { backfill_cursor: '2004-06-01' });
+    const last = nextBackfillSlice(await repo.getAccountSettings('acct-a'));
+    assert.equal(last?.since, BACKFILL_FLOOR, 'the final slice stops at the floor');
+
+    // At the floor the sweep is over — no more slices, ever.
+    await repo.setAccountSettings('acct-a', { backfill_cursor: BACKFILL_FLOOR, backfill_done: true });
+    assert.equal(nextBackfillSlice(await repo.getAccountSettings('acct-a')), null);
+  } finally { await mf.dispose(); }
+});
+
+test('a backfill slice sweeps sent mail and Correspondents, not the whole year', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    const queries: string[] = [];
+    const recordingFetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/messages?')) queries.push(decodeURIComponent(new URL(url).searchParams.get('q') ?? ''));
+      return gmailFetch(input as never);
+    }) as typeof fetch;
+
+    const repo = new Repo(driver);
+    // A Correspondent has to be DERIVED, not asserted: aggregation rebuilds
+    // contacts from the indexed messages, so a hand-inserted contact row with no
+    // mail behind it is (correctly) discarded. Seed the sent message instead —
+    // which is exactly how pass 1 creates the Correspondents pass 2 then sweeps.
+    await repo.upsertMessage({
+      account: 'acct-a', gmailMessageId: 'sent-1', threadId: 'ts', internalDate: Date.parse('2024-06-01T00:00:00Z'),
+      fromAddr: 'a@example.com', toAddr: 'friend@example.com', subject: 'hello', direction: 'sent',
+      isList: false, unread: false, starred: false, important: false, snippet: 'hi', bodyText: null, bodyState: 'meta',
+    });
+    const jobId = await enqueueJob(env, 'backfill_slice', 'acct-a', { since: '2024-01-01', until: '2025-01-01' });
+    await runJob(env, sent.find((m) => (m as { jobId: string }).jobId === jobId) as never, recordingFetch);
+
+    assert.ok(queries.some((q) => q.includes('in:sent')), 'pass 1 sweeps everything sent');
+    assert.ok(queries.some((q) => q.includes('from:{friend@example.com}')), 'pass 2 sweeps Correspondents');
+    assert.ok(queries.every((q) => q.includes('after:2024/01/01') && q.includes('before:2025/01/01')), 'every pass stays inside the slice');
+
+    const settings = await repo.getAccountSettings('acct-a');
+    assert.equal(settings.backfill_cursor, '2024-01-01', 'the cursor advances even when a slice is thin');
+    assert.equal(settings.backfill_done, false);
+  } finally { await mf.dispose(); }
 });
 
 test('the Queue consumer takes one Job per invocation', async () => {

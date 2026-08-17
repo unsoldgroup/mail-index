@@ -22,7 +22,7 @@
   // 30s gives 2.69× headroom over the 11.15s 1,000-Message measurement in bench/RESULTS-WORKER.md.
   ,"limits": { "cpu_ms": 30000 }
   ,"triggers": { "crons": ["0 * * * *"] }
-  ,"vars": { "SYNC_INTERVAL": "1h", "SYNC_LOOKBACK_MONTHS": "12", "OPERATOR_EMAILS": "operator@example.com" }
+  ,"vars": { "SYNC_INTERVAL": "1h", "SYNC_LOOKBACK_MONTHS": "240", "OPERATOR_EMAILS": "operator@example.com" }
 
   // Secrets (set with `wrangler secret put`):
   // TOKEN_ENC_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, CRM_WEBHOOK_SECRET.

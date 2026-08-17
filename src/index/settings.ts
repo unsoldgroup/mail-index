@@ -27,12 +27,55 @@ export interface AccountSettings {
   retention: 'window' | 'off';
   /** Set once the guided first run has completed for this Account. */
   onboarding_completed_at: string | null;
+  /**
+   * How far back the historical backfill has swept, as `YYYY-MM-DD`. Each slice
+   * moves it earlier; `null` means it has not started, and it stops at
+   * {@link BACKFILL_FLOOR}. Persisted so the sweep resumes where it stopped
+   * rather than restarting after every Worker restart.
+   */
+  backfill_cursor: string | null;
+  /** Set when the sweep has reached the floor; no further slices are queued. */
+  backfill_done: boolean;
+}
+
+/**
+ * The earliest date a backfill will reach. Gmail launched in 2004, so nothing
+ * older exists to find, and an unbounded floor would sweep empty years forever.
+ */
+export const BACKFILL_FLOOR = '2004-01-01';
+
+/** How much history one backfill slice covers. */
+export const BACKFILL_SLICE_MONTHS = 12;
+
+/**
+ * The [since, until) bounds of the next backfill slice, or null when the sweep
+ * is finished. Slices run NEWEST-first: the mail just outside the synced window
+ * is the most likely to be asked about, so coverage becomes useful immediately
+ * instead of after the whole history lands.
+ */
+export function nextBackfillSlice(
+  settings: AccountSettings,
+  now: Date = new Date(),
+): { since: string; until: string } | null {
+  if (settings.backfill_done) return null;
+  const until = settings.backfill_cursor ?? isoDay(now);
+  if (until <= BACKFILL_FLOOR) return null;
+  const since = new Date(`${until}T00:00:00.000Z`);
+  since.setUTCMonth(since.getUTCMonth() - BACKFILL_SLICE_MONTHS);
+  const sinceDay = isoDay(since);
+  return { since: sinceDay < BACKFILL_FLOOR ? BACKFILL_FLOOR : sinceDay, until };
+}
+
+function isoDay(date: Date): string {
+  return date.toISOString().slice(0, 10);
 }
 
 export const DEFAULT_ACCOUNT_SETTINGS: AccountSettings = {
   body_window_months: 3,
   retention: 'window',
   onboarding_completed_at: null,
+  backfill_cursor: null,
+  backfill_done: false,
 };
 
 /** The largest window we accept, so a typo cannot turn into a full-mailbox body fetch. */
@@ -54,6 +97,11 @@ export function normalizeSettings(input: unknown): AccountSettings {
     retention: raw.retention === 'off' ? 'off' : DEFAULT_ACCOUNT_SETTINGS.retention,
     onboarding_completed_at:
       typeof raw.onboarding_completed_at === 'string' ? raw.onboarding_completed_at : null,
+    backfill_cursor:
+      typeof raw.backfill_cursor === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.backfill_cursor)
+        ? raw.backfill_cursor
+        : null,
+    backfill_done: raw.backfill_done === true,
   };
 }
 

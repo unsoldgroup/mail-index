@@ -5,7 +5,7 @@ import { GmailRestAdapter } from '../dist/source/adapters/gmail-rest/index.js';
 import { InsufficientScopeError } from '../dist/source/index.js';
 import { runMailSourceContract } from '../dist/source/contract.js';
 import { DEFAULT_FIXTURES } from '../dist/source/fixtures/index.js';
-import { extractAttachments, extractInlineAttachment } from '../dist/source/adapters/gmail-shared.js';
+import { extractAttachments, extractInlineAttachment, buildGmailQuery } from '../dist/source/adapters/gmail-shared.js';
 
 function gmailMessage(message: (typeof DEFAULT_FIXTURES.messages)[number]) {
   const encode = (text: string) => Buffer.from(text).toString('base64url');
@@ -163,6 +163,21 @@ test('extractAttachments preserves provider ids and inline metadata', () => {
     // extractInlineAttachment walks back to find the bytes again.
     { attachmentId: 'inline:1', filename: 'logo.png', mimeType: 'image/png', sizeBytes: 2, inline: true, inlineDataBase64: 'aGk=' },
   ]);
+});
+
+test('buildGmailQuery uses absolute date operators, not newer_than, for timestamps', () => {
+  // Gmail's newer_than: takes a RELATIVE token only. Passing an ISO string
+  // produces a term it does not honour, which silently unbounds the sweep.
+  const absolute = buildGmailQuery({ since: '2025-08-17T00:00:00.000Z', until: '2026-08-17' });
+  assert.match(absolute, /after:2025\/08\/17/);
+  assert.match(absolute, /before:2026\/08\/17/);
+  assert.ok(!absolute.includes('newer_than'), 'an absolute bound never becomes newer_than');
+
+  const relative = buildGmailQuery({ since: '30d' });
+  assert.match(relative, /newer_than:30d/, 'relative tokens still use newer_than');
+
+  const scoped = buildGmailQuery({ since: '2025-01-01', until: '2026-01-01', query: 'in:sent' });
+  assert.match(scoped, /^in:sent /, 'the caller query leads');
 });
 
 test('an inline attachment id round-trips back to its bytes', () => {
