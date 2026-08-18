@@ -137,9 +137,10 @@ export async function enqueueScheduledSyncs(env: Env): Promise<string[]> {
   // runJob), which both shrinks this invocation and moves the enqueue inside a
   // Job that has already proven it can reach the provider.
   //
-  // ponytail: still one Promise.all over Accounts, and a failed send rethrows —
-  // one bad Account can still strand the others. Per-account allSettled is the
-  // upgrade path if that ever bites; at three enqueues the window is small.
+  // NOTE: this is still one Promise.all over Accounts, and a failed send
+  // rethrows — one bad Account can strand the ones not yet reached. Per-account
+  // allSettled is the upgrade path if that ever bites; at one enqueue per
+  // Account the window is small enough to leave alone.
   return ids;
 }
 
@@ -148,9 +149,12 @@ export async function enqueueScheduledSyncs(env: Env): Promise<string[]> {
  * the retention window, evict the ones that fell out of it.
  *
  * These are chained off each Account's completed sync rather than queued by the
- * cron, one bounded batch per Account per tick, so the window converges over a
- * few cycles instead of one enormous run. The Job-level de-dupe means a batch
- * still draining is never doubled up.
+ * cron, one bounded batch per Account per successful sync, so the window
+ * converges over a few cycles instead of one enormous run. The Job-level
+ * de-dupe means a batch still draining is never doubled up.
+ *
+ * The cadence is therefore "per sync that reached the provider", not "per cron
+ * tick" as ADR-0010 originally stated — see the amendment there for why.
  */
 export async function enqueueWorkingSetJobs(env: Env, driver: D1Driver, accounts: readonly string[]): Promise<string[]> {
   const repo = new Repo(driver);
@@ -233,10 +237,9 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       const slice = nextBackfillSlice(backfillSettings);
       if (slice) progress['backfill_next'] = { queued_job: await enqueueJob(env, 'backfill_slice', job.account, slice), ...slice };
 
-      // Same reason as the two handoffs above, plus one of its own: enrich_bulk
-      // takes the Account lock this Job still holds, so queued from the cron it
-      // would find the Account busy and yield every tick. Chained, it runs once
-      // this Job releases the lock.
+      // Chained for the reasons above, plus one of its own: enrich_bulk takes
+      // the Account lock this Job still holds, so queued from the cron it found
+      // the Account busy and yielded every tick.
       progress['working_set'] = { queued_jobs: await enqueueWorkingSetJobs(env, driver, [job.account]) };
       await update('running', progress);
     } else if (job.kind === 'backfill_slice') {

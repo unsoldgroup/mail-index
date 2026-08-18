@@ -50,3 +50,26 @@ single most important thing to preserve when changing any of it.
   be re-measured rather than left to imply the old number.
 - The window is per-Account by design: a business archive and a personal mailbox
   do not want the same answer, and the setting is asked once during onboarding.
+
+## Amendment — 2026-08-18, UNS-1335
+
+"One batch per Account per cron tick" above is now **one batch per Account per
+successful sync**. The cron used to enqueue both sweeps directly, which meant one
+`scheduled()` invocation carried three enqueues per Account under a 30s CPU cap.
+Queue producer sends are buffered until the invocation ends, so an isolate killed
+late committed the `jobs` rows and lost the messages — rows sat `queued` with
+`started_at IS NULL` until the lease reaped them. The cron now enqueues only the
+sync, and the completed sync chains both sweeps for its own Account, next to the
+`graph` and `backfill_slice` handoffs.
+
+The cadence is unchanged in the healthy case: one sync per Account per tick, so
+one batch of each sweep per Account per tick. What changes is the failure case —
+an Account whose sync throws gets no sweeps that tick. That is deliberate. A
+sweep needs the provider (`enrich_bulk` fetches bodies), so an Account that could
+not sync has nothing useful to sweep, and `retention` eviction is pure catch-up
+that loses nothing by waiting an hour. Accounts with a rejected grant were
+already skipped by the cron for the same reason.
+
+Chaining also removed a starvation bug: `enrich_bulk` takes the Account lock the
+sync holds, so queued from the cron it found the Account busy and yielded on
+every tick.

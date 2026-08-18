@@ -212,8 +212,8 @@ export default {
   scheduled(_controller: unknown, env: Env, ctx: WorkerContext) {
     ctx.waitUntil(enqueueScheduledSyncs(env).then((ids) => {
       // The count is what distinguishes a fan-out that finished from one whose
-      // isolate died partway: a tick that logs fewer enqueues than there are
-      // connected Accounts stranded the rest.
+      // isolate died partway. A tick with no cron_ok at all, or one whose count
+      // is below the number of `jobs` rows that tick created, stranded the rest.
       console.log(JSON.stringify({ event: 'cron_ok', enqueued: ids.length }));
     }).catch((error: unknown) => {
       console.log(JSON.stringify({ event: 'cron_fail', error_name: error instanceof Error ? error.name : 'Error' }));
