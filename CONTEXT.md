@@ -61,6 +61,13 @@ The remote Deployment's replacement for a Command handback: O(N) work
 a job id, and progress is readable via `sync_status`. Inline stays O(1)
 (ADR-0001) in both Deployments.
 
+**Sweep**:
+A bounded, resumable Job that walks the mailbox a batch at a time rather than
+trying to finish in one invocation: `enrich_bulk`, `retention`,
+`backfill_slice`, `graph`. Sweeps ride their own Queue (`mail-index-sweeps`) so
+a long-running sync cannot starve them (ADR-0009 amendment).
+_Avoid_: sweeper, background pass
+
 **Trigger rule**:
 An operator-defined predicate over *index* intelligence — category, `is_list`,
 Correspondent status, Interest profile membership, label, sender/domain,

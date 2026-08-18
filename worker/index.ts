@@ -26,6 +26,13 @@ interface WorkerContext { waitUntil(promise: Promise<unknown>): void; passThroug
 export interface Env {
   DB: D1DatabaseBinding;
   SYNC_QUEUE: QueueBinding;
+  // The sweeps ride their OWN Queue so a sync can never starve them. A sync Job
+  // holds its consumer slot for 8-15 minutes (it is O(mailbox)), and with one
+  // slot per connected mailbox that meant every slot was a sync for most of the
+  // hour: the sweeps sat queued until their 50-minute lease expired and were
+  // reaped as "queued Job was never delivered" (UNS-1335). Two Queues means two
+  // concurrency budgets. Routing lives in `queueFor` (job-state.ts).
+  SWEEP_QUEUE: QueueBinding;
   OAUTH_KV: unknown;
   OAUTH_PROVIDER?: OAuthHelpers;
   TOKEN_ENC_KEY: string;
@@ -40,7 +47,7 @@ export interface Env {
 }
 
 function assertBindings(env: Partial<Env>): asserts env is Env {
-  for (const name of ['DB', 'SYNC_QUEUE', 'OAUTH_KV', 'TOKEN_ENC_KEY', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'OPERATOR_EMAILS', 'SYNC_INTERVAL'] as const) {
+  for (const name of ['DB', 'SYNC_QUEUE', 'SWEEP_QUEUE', 'OAUTH_KV', 'TOKEN_ENC_KEY', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'OPERATOR_EMAILS', 'SYNC_INTERVAL'] as const) {
     if (!env[name]) throw new Error(`Missing required Worker binding: ${name}`);
   }
 }

@@ -20,6 +20,7 @@ async function fixture() {
     DB: await mf.getD1Database('DB'),
     OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'),
     SYNC_QUEUE: { send: async (message: unknown) => { queued.push(message); } },
+    SWEEP_QUEUE: { send: async (message: unknown) => { queued.push(message); } },
     ...oauthSecrets,
     OPERATOR_EMAILS: 'operator@example.com',
     SYNC_INTERVAL: '15m',

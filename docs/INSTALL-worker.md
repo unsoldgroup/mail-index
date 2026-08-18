@@ -27,6 +27,10 @@ verification/CASA obligations belong to the operator’s app.
 ```sh
 npx wrangler d1 create mail-index
 npx wrangler queues create mail-index-jobs
+# The sweeps ride a SECOND Queue with its own concurrency budget, so a slow sync
+# cannot starve them (ADR-0009 amendment, UNS-1335). Both wranglers declare a
+# consumer for it, so `wrangler deploy` FAILS if this Queue does not exist.
+npx wrangler queues create mail-index-sweeps
 npx wrangler kv namespace create OAUTH_KV
 ```
 
@@ -91,8 +95,8 @@ Credentials, Jobs, Trigger rules, and webhook consumers are deliberately absent.
       show an error in `sync_status` without Message content in logs.
 - [ ] Search returns seeded or newly synced Messages; local CLI/stdio behavior
       is unchanged.
-- [ ] Cloudflare dashboard confirms D1, KV, Queue, cron, and observability with
-      head sampling 1.
+- [ ] Cloudflare dashboard confirms D1, KV, BOTH Queues (`mail-index-jobs` and
+      `mail-index-sweeps`), cron, and observability with head sampling 1.
 
 ## Scripted dry-run record — 2026-07-19
 

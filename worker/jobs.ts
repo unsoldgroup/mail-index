@@ -8,7 +8,7 @@ import { enrich } from '../src/ingest/enrich.js';
 import { buildGraph } from '../src/graph/index.js';
 import { GmailRestAdapter } from '../src/source/adapters/gmail-rest/index.js';
 import { accessTokenProvider } from './google-oauth.js';
-import { markQueueEnqueueFailed } from './job-state.js';
+import { markQueueEnqueueFailed, queueFor } from './job-state.js';
 import type { Env } from './index.js';
 import { deliverWebhook, evaluateRules, type DeliveryParams } from './triggers.js';
 import { CrmChangeFeed, publishMessageChanges } from './crm-feed.js';
@@ -17,6 +17,7 @@ import { storeMessageAttachments } from './attachments.js';
 
 export type JobKind = 'sync' | 'backfill' | 'backfill_slice' | 'enrich_bulk' | 'retention' | 'graph' | 'webhook_delivery';
 export interface JobMessage { jobId: string; kind: JobKind; account: string; params: Record<string, unknown> }
+
 
 const DEFAULT_LOOKBACK_MONTHS = 12;
 
@@ -103,7 +104,7 @@ export async function enqueueJob(env: Env, kind: JobKind, account: string, param
   const id = crypto.randomUUID();
   await driver.prepare(`INSERT INTO jobs(id,kind,account,params_json,status,progress_json,created_at) VALUES(?,?,?,?,?,?,?)`)
     .run(id, kind, account, JSON.stringify(params), 'queued', '{}', nowIso);
-  try { await env.SYNC_QUEUE.send({ jobId: id, kind, account, params }); }
+  try { await queueFor(env, kind).send({ jobId: id, kind, account, params }); }
   catch (error) {
     await markQueueEnqueueFailed(driver, id);
     throw error;

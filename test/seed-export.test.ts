@@ -37,7 +37,7 @@ test('portable seed round-trips earned state and FTS, resumes, and filters Accou
     assert.ok(await driver.prepare(`SELECT finished_at FROM sync_runs WHERE account='acct-a' AND finished_at IS NOT NULL`).get());
     const queued: unknown[] = []; const key = Buffer.alloc(32, 2).toString('base64');
     await saveGrant(driver, { account: 'acct-a', address: 'a@example.com', scopes: ['https://www.googleapis.com/auth/gmail.readonly'], refreshToken: 'refresh', key });
-    await enqueueScheduledSyncs({ DB: await mf.getD1Database('DB'), SYNC_QUEUE: { send: async (m: unknown) => { queued.push(m); } }, TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m', OAUTH_KV: {} } as never);
+    await enqueueScheduledSyncs({ DB: await mf.getD1Database('DB'), SYNC_QUEUE: { send: async (m: unknown) => { queued.push(m); } }, SWEEP_QUEUE: { send: async (m: unknown) => { queued.push(m); } }, TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m', OAUTH_KV: {} } as never);
     assert.match(String((queued[0] as { params: { since?: string } }).params.since), /^20/);
   } finally { source.close(); await mf.dispose(); }
 });
