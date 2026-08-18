@@ -149,11 +149,10 @@ export async function enqueueWorkingSetJobs(env: Env, driver: D1Driver, accounts
     // the defaults apply, which is a 3-month working set.
     if (windowCutoff(settings) != null) queued.push(await enqueueJob(env, 'enrich_bulk', account, { limit: BACKFILL_BATCH }));
     if (settings.retention === 'window') queued.push(await enqueueJob(env, 'retention', account, { limit: RETENTION_BATCH }));
-    // One historical slice per tick, newest-first, until the sweep hits the
-    // floor. Bounded the same way as the other sweeps so deep history can never
-    // become a single unbounded request.
-    const slice = nextBackfillSlice(settings);
-    if (slice) queued.push(await enqueueJob(env, 'backfill_slice', account, slice));
+    // NOTE: the historical slice is deliberately NOT queued here. It contends
+    // with the sync for the Account lock, and the cron enqueues sync first, so a
+    // slice queued now would find the Account busy and yield — every tick,
+    // forever. The sync hands it off on completion instead (see runJob).
   }
   return queued;
 }
@@ -212,6 +211,15 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       // CPU budget on a large Account — killing the isolate before this Job
       // could mark itself done, which is what left rows stuck at `running`.
       progress['graph'] = { queued_job: await enqueueJob(env, 'graph', job.account, {}) };
+
+      // Hand off the next historical slice HERE rather than from the cron. Both
+      // take the Account lock this sync is still holding, so queueing them
+      // together means the slice always loses the race and yields. Chained, it
+      // runs once this Job releases the lock — the same shape as the graph
+      // handoff above.
+      const backfillSettings = await repo.getAccountSettings(job.account);
+      const slice = nextBackfillSlice(backfillSettings);
+      if (slice) progress['backfill_next'] = { queued_job: await enqueueJob(env, 'backfill_slice', job.account, slice), ...slice };
       await update('running', progress);
     } else if (job.kind === 'backfill_slice') {
       // One historical slice, swept by CORRESPONDENCE rather than wholesale.

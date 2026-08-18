@@ -39,9 +39,10 @@ test('cron enqueues one sync Job per connected Account without Gmail', async () 
     // One tick queues three kinds per Account: the sync, plus the two bounded
     // working-set sweeps (fill bodies inside the window, evict those outside).
     const kinds = sent.map((message) => (message as { kind: string }).kind);
-    // One tick per Account: the incremental sync, the two working-set sweeps,
-    // and one slice of the historical backfill.
-    assert.deepEqual(kinds, ['sync', 'enrich_bulk', 'retention', 'backfill_slice']);
+    // One tick per Account: the incremental sync and the two working-set
+    // sweeps. The historical slice is NOT here — it contends with the sync for
+    // the Account lock, so the sync hands it off on completion instead.
+    assert.deepEqual(kinds, ['sync', 'enrich_bulk', 'retention']);
     const params = (sent[0] as { params: Record<string, unknown> }).params;
     assert.equal(typeof params['since'], 'string');
     const ageDays = (Date.now() - Date.parse(String(params['since']))) / 86_400_000;
@@ -72,6 +73,25 @@ test('the historical backfill walks backwards a slice at a time and stops at the
     // At the floor the sweep is over — no more slices, ever.
     await repo.setAccountSettings('acct-a', { backfill_cursor: BACKFILL_FLOOR, backfill_done: true });
     assert.equal(nextBackfillSlice(await repo.getAccountSettings('acct-a')), null);
+  } finally { await mf.dispose(); }
+});
+
+test('a completed sync hands off the next historical slice', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    await enqueueScheduledSyncs(env);
+    const syncMessage = sent.find((m) => (m as { kind: string }).kind === 'sync') as never;
+    await runJob(env, syncMessage, gmailFetch);
+
+    // Queued by the sync itself, so it starts only once the Account lock is
+    // free. Queued by the cron instead, it would find the Account busy and
+    // yield on every tick — which is exactly what starved it in production.
+    const slice = sent.find((m) => (m as { kind: string }).kind === 'backfill_slice') as { params: Record<string, unknown> } | undefined;
+    assert.ok(slice, 'the sync hands off a historical slice');
+    assert.ok(typeof slice.params['since'] === 'string' && typeof slice.params['until'] === 'string');
+
+    const repo = new Repo(driver);
+    assert.equal((await repo.getAccountSettings('acct-a')).backfill_done, false);
   } finally { await mf.dispose(); }
 });
 
