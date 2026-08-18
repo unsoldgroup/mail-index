@@ -8,7 +8,10 @@
     { "binding": "DB", "database_name": "mail-index", "database_id": "14c712df-bc59-4f97-aeda-d304c97ddb4c" }
   ],
   "queues": {
-    "producers": [{ "binding": "SYNC_QUEUE", "queue": "mail-index-jobs" }],
+    "producers": [
+      { "binding": "SYNC_QUEUE", "queue": "mail-index-jobs" },
+      { "binding": "SWEEP_QUEUE", "queue": "mail-index-sweeps" }
+    ],
     // max_batch_size MUST stay 1. The consumer runs a batch SERIALLY in one
     // invocation, so any larger batch makes several whole sync pipelines share
     // a single 30s CPU budget. When that budget runs out the isolate is killed
@@ -26,7 +29,22 @@
     //
     // max_retries is bounded so a Job that kills its isolate stops being
     // redelivered forever; the Job row's lease is what reclaims it after that.
-    "consumers": [{ "queue": "mail-index-jobs", "max_batch_size": 1, "max_concurrency": 3, "max_retries": 3 }]
+    // Two Queues, two concurrency budgets. A `sync` is unbounded O(mailbox)
+    // work: one holds its slot for 8-15 minutes and sometimes dies at the
+    // Workers 15-minute WALL limit (observed: a single invocation at 899,982ms,
+    // outcome exceededWallTime). With one slot per connected mailbox on a single
+    // Queue, syncs held every slot for most of the hour and the bounded sweeps
+    // sat queued until their 50-minute lease expired — reaped as "queued Job was
+    // never delivered" while the cron itself reported outcome ok. Giving the
+    // sweeps their own Queue means a slow sync can no longer starve them.
+    //
+    // Both stay at max_batch_size 1 for the reason above, and both cap
+    // concurrency at the connected-mailbox count because the sync lock is per
+    // Account — more invocations than mailboxes just yield.
+    "consumers": [
+      { "queue": "mail-index-jobs", "max_batch_size": 1, "max_concurrency": 3, "max_retries": 3 },
+      { "queue": "mail-index-sweeps", "max_batch_size": 1, "max_concurrency": 3, "max_retries": 3 }
+    ]
   },
   "kv_namespaces": [
     { "binding": "OAUTH_KV", "id": "3a709f7cc8884412aacb9347345a90ad" }

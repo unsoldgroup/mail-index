@@ -26,6 +26,16 @@ interface WorkerContext { waitUntil(promise: Promise<unknown>): void; passThroug
 export interface Env {
   DB: D1DatabaseBinding;
   SYNC_QUEUE: QueueBinding;
+  // The sweeps ride their OWN Queue so a sync can never starve them. A sync Job
+  // holds its consumer slot for 8-15 minutes (it is O(mailbox)), and with one
+  // slot per connected mailbox that meant every slot was a sync for most of the
+  // hour: the sweeps sat queued until their 50-minute lease expired and were
+  // reaped as "queued Job was never delivered" (UNS-1335). Two Queues means two
+  // concurrency budgets.
+  //
+  // Optional so a Worker deployed before the Queue exists still runs — the
+  // fallback in `queueFor` is exactly the old single-Queue behaviour.
+  SWEEP_QUEUE?: QueueBinding;
   OAUTH_KV: unknown;
   OAUTH_PROVIDER?: OAuthHelpers;
   TOKEN_ENC_KEY: string;

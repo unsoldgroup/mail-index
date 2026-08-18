@@ -8,9 +8,15 @@
     { "binding": "DB", "database_name": "mail-index", "database_id": "replace-with-operator-d1-id" }
   ],
   "queues": {
-    "producers": [{ "binding": "SYNC_QUEUE", "queue": "mail-index-jobs" }],
-    // One Job per invocation — see the note in wrangler.production.jsonc.
-    "consumers": [{ "queue": "mail-index-jobs", "max_batch_size": 1, "max_concurrency": 3, "max_retries": 3 }]
+    "producers": [
+      { "binding": "SYNC_QUEUE", "queue": "mail-index-jobs" },
+      { "binding": "SWEEP_QUEUE", "queue": "mail-index-sweeps" }
+    ],
+    // One Job per invocation, two Queues — see the notes in wrangler.production.jsonc.
+    "consumers": [
+      { "queue": "mail-index-jobs", "max_batch_size": 1, "max_concurrency": 3, "max_retries": 3 },
+      { "queue": "mail-index-sweeps", "max_batch_size": 1, "max_concurrency": 3, "max_retries": 3 }
+    ]
   },
   "kv_namespaces": [
     { "binding": "OAUTH_KV", "id": "replace-with-operator-kv-id" }

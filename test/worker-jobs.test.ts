@@ -14,11 +14,16 @@ const key = Buffer.alloc(32, 4).toString('base64');
 
 async function fixture() {
   const mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok") } }', d1Databases: ['DB'], kvNamespaces: ['OAUTH_KV'] });
+  // `sent` is every Job message regardless of Queue, so routing changes never
+  // silently rewrite what an unrelated test observes. `jobsQueue` and `sweeps`
+  // record the split, for the tests that assert on it.
   const sent: unknown[] = [];
-  const env = { DB: await mf.getD1Database('DB'), OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async (m: unknown) => { sent.push(m); } }, TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m' };
+  const jobsQueue: unknown[] = [];
+  const sweeps: unknown[] = [];
+  const env = { DB: await mf.getD1Database('DB'), OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async (m: unknown) => { sent.push(m); jobsQueue.push(m); } }, SWEEP_QUEUE: { send: async (m: unknown) => { sent.push(m); sweeps.push(m); } }, TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m' };
   const driver = new D1Driver(env.DB); await runMigrations(driver);
   await saveGrant(driver, { account: 'acct-a', address: 'a@example.com', scopes: ['https://www.googleapis.com/auth/gmail.readonly'], refreshToken: 'refresh', key });
-  return { mf, env, driver, sent };
+  return { mf, env, driver, sent, jobsQueue, sweeps };
 }
 
 const gmailFetch = (async (input: RequestInfo | URL) => {
@@ -173,13 +178,51 @@ test('the Queue consumer takes one Job per invocation', async () => {
   const { readFileSync } = await import('node:fs');
   for (const path of ['worker/wrangler.jsonc', 'worker/wrangler.production.jsonc']) {
     const config = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
-    const consumer = /"consumers"\s*:\s*\[\{([^}]*)\}/.exec(config)?.[1] ?? '';
-    assert.match(consumer, /"max_batch_size"\s*:\s*1\b/, `${path} must take one Job per invocation`);
-    // Capped, but NOT to 1: the sync lock is per Account, so one invocation per
-    // mailbox is the useful ceiling. Serialising globally made a tick drain
-    // slower than the hour that queues it and starved the last-enqueued kind.
-    assert.match(consumer, /"max_concurrency"\s*:\s*[1-9]\d*\b/, `${path} must cap concurrency to the Account count`);
+    const consumers = [...config.matchAll(/\{[^{}]*"queue"\s*:\s*"([^"]+)"[^{}]*\}/g)]
+      .filter(([body]) => body.includes('max_batch_size'));
+    // Both Queues, not just the first: a sweeps consumer that batched or ran
+    // unbounded would reintroduce the problem on the other side of the split.
+    const queues = consumers.map(([, queue]) => queue);
+    assert.deepEqual(queues, ['mail-index-jobs', 'mail-index-sweeps'], `${path} must consume both Queues`);
+    for (const [body, queue] of consumers) {
+      assert.match(body, /"max_batch_size"\s*:\s*1\b/, `${path} ${queue} must take one Job per invocation`);
+      // Capped, but NOT to 1: the sync lock is per Account, so one invocation per
+      // mailbox is the useful ceiling. Serialising globally made a tick drain
+      // slower than the hour that queues it and starved the last-enqueued kind.
+      assert.match(body, /"max_concurrency"\s*:\s*[1-9]\d*\b/, `${path} ${queue} must cap concurrency to the Account count`);
+    }
+    // The producer binding the code falls back FROM must exist, or every sweep
+    // would silently ride the jobs Queue again.
+    assert.match(config, /"binding"\s*:\s*"SWEEP_QUEUE"\s*,\s*"queue"\s*:\s*"mail-index-sweeps"/, `${path} must bind SWEEP_QUEUE`);
   }
+});
+
+test('sweeps ride their own Queue so a slow sync cannot starve them', async () => {
+  // A sync holds its consumer slot for 8-15 minutes (it is O(mailbox)), so on a
+  // single Queue with one slot per mailbox the bounded sweeps sat queued until
+  // their 50-minute lease expired and were reaped as never delivered. Two Queues
+  // means the sweeps drain on their own budget.
+  const { mf, env, jobsQueue, sweeps } = await fixture();
+  try {
+    await enqueueScheduledSyncs(env);
+    await runJob(env, jobsQueue.find((m) => (m as { kind: string }).kind === 'sync') as never, gmailFetch);
+    await enqueueJob(env, 'webhook_delivery', 'acct-a', { deliveryId: 'd1' });
+
+    const kindsOf = (queue: unknown[]) => [...new Set(queue.map((m) => (m as { kind: string }).kind))].sort();
+    assert.deepEqual(kindsOf(jobsQueue), ['sync', 'webhook_delivery'], 'the jobs Queue carries only syncs and deliveries');
+    assert.deepEqual(kindsOf(sweeps), ['backfill_slice', 'enrich_bulk', 'graph', 'retention'], 'every sweep rides the sweeps Queue');
+  } finally { await mf.dispose(); }
+});
+
+test('an unbound SWEEP_QUEUE falls back to the jobs Queue rather than dropping a Job', async () => {
+  // A Worker deployed before `wrangler queues create mail-index-sweeps` must
+  // still run, degraded to the old single-Queue behaviour.
+  const { mf, env, jobsQueue } = await fixture();
+  try {
+    const withoutSweeps = { ...env, SWEEP_QUEUE: undefined };
+    const jobId = await enqueueJob(withoutSweeps, 'retention', 'acct-a', { limit: 10 });
+    assert.ok(jobsQueue.some((m) => (m as { jobId: string }).jobId === jobId), 'the sweep fell back to the jobs Queue');
+  } finally { await mf.dispose(); }
 });
 
 test('the scheduler skips an Account whose grant Google already rejected', async () => {
