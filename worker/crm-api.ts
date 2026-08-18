@@ -1,7 +1,7 @@
 import { D1Driver } from '../src/index/drivers/d1.js';
 import { runMigrations } from '../src/index/migrations.js';
-import { CrmChangeFeed } from './crm-feed.js';
-import { enqueueSyncJob, jobStatus } from './jobs.js';
+import { CrmChangeFeed, crmAccountAllowed } from './crm-feed.js';
+import { enqueueCrmBackfillJob, enqueueSyncJob, jobStatus } from './jobs.js';
 import type { Env } from './index.js';
 
 function jsonError(error: string, status: number): Response {
@@ -31,7 +31,7 @@ export async function handleCrmRequest(request: Request, env: Env): Promise<Resp
       'SELECT account,address,scopes FROM google_tokens ORDER BY account',
     ).all() as Array<{ account: string; address: string; scopes: string }>;
     return Response.json({
-      sources: rows.map((row) => ({
+      sources: rows.filter((row) => crmAccountAllowed(env, row.account)).map((row) => ({
         key: row.account,
         address: row.address,
         scopes: row.scopes.split(/\s+/).filter(Boolean),
@@ -47,6 +47,7 @@ export async function handleCrmRequest(request: Request, env: Env): Promise<Resp
       return Response.json(await new CrmChangeFeed(driver).read({
         ...(url.searchParams.get('after') ? { after: url.searchParams.get('after')! } : {}),
         ...(limit == null ? {} : { limit }),
+        accounts: (env.CRM_ACCOUNTS ?? '').split(',').map((entry) => entry.trim()).filter(Boolean),
       }));
     } catch (error) {
       if (error instanceof Error && error.message === 'invalid CRM cursor') {
@@ -60,8 +61,17 @@ export async function handleCrmRequest(request: Request, env: Env): Promise<Resp
   if (request.method === 'POST' && refresh) {
     const account = decodeURIComponent(refresh[1]!);
     const source = await driver.prepare('SELECT account FROM google_tokens WHERE account=?').get(account);
-    if (!source) return jsonError('source_not_found', 404);
+    if (!source || !crmAccountAllowed(env, account)) return jsonError('source_not_found', 404);
     const jobId = await enqueueSyncJob(env, account);
+    return Response.json({ jobId, account, status: 'queued' }, { status: 202 });
+  }
+
+  const backfill = /^\/crm\/v1\/sources\/([^/]+)\/backfill$/.exec(url.pathname);
+  if (request.method === 'POST' && backfill) {
+    const account = decodeURIComponent(backfill[1]!);
+    const source = await driver.prepare('SELECT account FROM google_tokens WHERE account=?').get(account);
+    if (!source || !crmAccountAllowed(env, account)) return jsonError('source_not_found', 404);
+    const jobId = await enqueueCrmBackfillJob(env, account);
     return Response.json({ jobId, account, status: 'queued' }, { status: 202 });
   }
 
