@@ -36,13 +36,11 @@ test('cron enqueues one sync Job per connected Account without Gmail', async () 
     let pending: Promise<unknown> | undefined;
     worker.scheduled({}, env, { waitUntil(promise: Promise<unknown>) { pending = promise; }, passThroughOnException() {} });
     await pending;
-    // One tick queues three kinds per Account: the sync, plus the two bounded
-    // working-set sweeps (fill bodies inside the window, evict those outside).
     const kinds = sent.map((message) => (message as { kind: string }).kind);
-    // One tick per Account: the incremental sync and the two working-set
-    // sweeps. The historical slice is NOT here — it contends with the sync for
-    // the Account lock, so the sync hands it off on completion instead.
-    assert.deepEqual(kinds, ['sync', 'enrich_bulk', 'retention']);
+    // The cron queues the sync and NOTHING else. Every other kind is chained off
+    // the completed sync, so a cron invocation that dies part-way can strand at
+    // most the Accounts it had not reached — never a whole tick's sweeps.
+    assert.deepEqual(kinds, ['sync']);
     const params = (sent[0] as { params: Record<string, unknown> }).params;
     assert.equal(typeof params['since'], 'string');
     const ageDays = (Date.now() - Date.parse(String(params['since']))) / 86_400_000;
@@ -92,6 +90,25 @@ test('a completed sync hands off the next historical slice', async () => {
 
     const repo = new Repo(driver);
     assert.equal((await repo.getAccountSettings('acct-a')).backfill_done, false);
+  } finally { await mf.dispose(); }
+});
+
+test('a completed sync chains every follow-up Job the cron used to queue', async () => {
+  const { mf, env, sent } = await fixture();
+  try {
+    await enqueueScheduledSyncs(env);
+    assert.deepEqual(sent.map((m) => (m as { kind: string }).kind), ['sync'], 'the cron queues the sync alone');
+
+    const syncMessage = sent.find((m) => (m as { kind: string }).kind === 'sync') as never;
+    await runJob(env, syncMessage, gmailFetch);
+
+    // Everything the cron used to fan out now rides the tail of a Job that has
+    // already reached the provider, so a cron invocation dying part-way can no
+    // longer leave `queued` rows with no Queue message behind them.
+    const kinds = sent.map((m) => (m as { kind: string }).kind);
+    for (const kind of ['enrich_bulk', 'retention', 'graph', 'backfill_slice']) {
+      assert.ok(kinds.includes(kind), `the sync hands off ${kind}, got ${kinds.join(',')}`);
+    }
   } finally { await mf.dispose(); }
 });
 
