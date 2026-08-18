@@ -210,7 +210,12 @@ export default {
   // Account silently — a single D1 hiccup would look identical to a healthy
   // quiet tick. Log it so a missed cycle is visible in Workers logs.
   scheduled(_controller: unknown, env: Env, ctx: WorkerContext) {
-    ctx.waitUntil(enqueueScheduledSyncs(env).catch((error: unknown) => {
+    ctx.waitUntil(enqueueScheduledSyncs(env).then((ids) => {
+      // The count is what distinguishes a fan-out that finished from one whose
+      // isolate died partway. A tick with no cron_ok at all, or one whose count
+      // is below the number of `jobs` rows that tick created, stranded the rest.
+      console.log(JSON.stringify({ event: 'cron_ok', enqueued: ids.length }));
+    }).catch((error: unknown) => {
       console.log(JSON.stringify({ event: 'cron_fail', error_name: error instanceof Error ? error.name : 'Error' }));
     }));
   },

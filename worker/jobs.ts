@@ -129,16 +129,32 @@ export async function enqueueScheduledSyncs(env: Env): Promise<string[]> {
     const since = watermark?.finished_at && watermark.finished_at > minimumSince ? watermark.finished_at : minimumSince;
     return enqueueSyncJob(env, row.account, since);
   }));
-  return [...ids, ...await enqueueWorkingSetJobs(env, driver, rows.map((row) => row.account))];
+  // The working-set sweeps are deliberately NOT queued here. Every enqueue is an
+  // INSERT followed by a SYNC_QUEUE.send, and the sends are buffered until the
+  // invocation ends — so a cron that runs out of CPU part-way leaves committed
+  // `queued` rows with no message behind them, which is exactly the "Job never
+  // delivered" reap we were seeing hourly. The sync hands them off instead (see
+  // runJob), which both shrinks this invocation and moves the enqueue inside a
+  // Job that has already proven it can reach the provider.
+  //
+  // NOTE: this is still one Promise.all over Accounts, and a failed send
+  // rethrows — one bad Account can strand the ones not yet reached. Per-account
+  // allSettled is the upgrade path if that ever bites; at one enqueue per
+  // Account the window is small enough to leave alone.
+  return ids;
 }
 
 /**
  * Keep each Account's working set at its configured shape: fill in bodies inside
  * the retention window, evict the ones that fell out of it.
  *
- * These ride the same cron as the sync, one bounded batch per Account per tick,
- * so the window converges over a few cycles instead of one enormous run. The
- * Job-level de-dupe means a batch still draining is never doubled up.
+ * These are chained off each Account's completed sync rather than queued by the
+ * cron, one bounded batch per Account per successful sync, so the window
+ * converges over a few cycles instead of one enormous run. The Job-level
+ * de-dupe means a batch still draining is never doubled up.
+ *
+ * The cadence is therefore "per sync that reached the provider", not "per cron
+ * tick" as ADR-0010 originally stated — see the amendment there for why.
  */
 export async function enqueueWorkingSetJobs(env: Env, driver: D1Driver, accounts: readonly string[]): Promise<string[]> {
   const repo = new Repo(driver);
@@ -220,6 +236,11 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       const backfillSettings = await repo.getAccountSettings(job.account);
       const slice = nextBackfillSlice(backfillSettings);
       if (slice) progress['backfill_next'] = { queued_job: await enqueueJob(env, 'backfill_slice', job.account, slice), ...slice };
+
+      // Chained for the reasons above, plus one of its own: enrich_bulk takes
+      // the Account lock this Job still holds, so queued from the cron it found
+      // the Account busy and yielded every tick.
+      progress['working_set'] = { queued_jobs: await enqueueWorkingSetJobs(env, driver, [job.account]) };
       await update('running', progress);
     } else if (job.kind === 'backfill_slice') {
       // One historical slice, swept by CORRESPONDENCE rather than wholesale.
