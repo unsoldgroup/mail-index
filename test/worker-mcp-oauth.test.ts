@@ -11,13 +11,13 @@ const key = Buffer.alloc(32, 6).toString('base64');
 
 async function fixture() {
   const mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok") } }', d1Databases: ['DB'], kvNamespaces: ['OAUTH_KV'] });
-  const env = { DB: await mf.getD1Database('DB'), OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async () => undefined }, TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m' };
+  const env = { DB: await mf.getD1Database('DB'), OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async () => undefined }, SWEEP_QUEUE: { send: async () => undefined }, TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m' };
   const ctx = { waitUntil() {}, passThroughOnException() {} };
   return { mf, env, ctx };
 }
 
 test('OAuth provider challenges MCP, exposes health, protects setup, and supports dynamic registration', async () => {
-  const mf = new Miniflare({ modules: true, scriptPath: 'dist-worker-bundle/index.js', modulesRoot: '.', compatibilityFlags: ['nodejs_compat'], compatibilityDate: '2026-07-18', d1Databases: ['DB'], kvNamespaces: ['OAUTH_KV'], queueProducers: { SYNC_QUEUE: 'mail-index-jobs' }, bindings: { TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m' } });
+  const mf = new Miniflare({ modules: true, scriptPath: 'dist-worker-bundle/index.js', modulesRoot: '.', compatibilityFlags: ['nodejs_compat'], compatibilityDate: '2026-07-18', d1Databases: ['DB'], kvNamespaces: ['OAUTH_KV'], queueProducers: { SYNC_QUEUE: 'mail-index-jobs', SWEEP_QUEUE: 'mail-index-sweeps' }, bindings: { TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m' } });
   try {
     const health = await mf.dispatchFetch('https://worker.example/healthz');
     assert.equal(health.status, 200);

@@ -7,7 +7,7 @@ import { toolList } from '../dist/mcp/server.js';
 
 async function fixture() {
   const queued: unknown[] = []; const mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok") } }', d1Databases: ['DB'], kvNamespaces: ['OAUTH_KV'] });
-  const env = { DB: await mf.getD1Database('DB'), OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async (m: unknown) => { queued.push(m); } }, TOKEN_ENC_KEY: Buffer.alloc(32, 5).toString('base64'), GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m' };
+  const env = { DB: await mf.getD1Database('DB'), OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async (m: unknown) => { queued.push(m); } }, SWEEP_QUEUE: { send: async (m: unknown) => { queued.push(m); } }, TOKEN_ENC_KEY: Buffer.alloc(32, 5).toString('base64'), GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m' };
   return { mf, env, queued };
 }
 function rpc(method: string, data?: unknown) { return new Request('https://worker.example/a2a', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: data }) }); }

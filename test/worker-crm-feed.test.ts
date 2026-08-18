@@ -66,6 +66,7 @@ test('authorized CRM API exposes source discovery, change pages, and coalesced r
     DB: await mf.getD1Database('DB'),
     OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'),
     SYNC_QUEUE: { send: async (message: unknown) => { queued.push(message); } },
+    SWEEP_QUEUE: { send: async (message: unknown) => { queued.push(message); } },
     TOKEN_ENC_KEY: Buffer.alloc(32, 9).toString('base64'),
     GOOGLE_CLIENT_ID: 'client',
     GOOGLE_CLIENT_SECRET: 'secret',

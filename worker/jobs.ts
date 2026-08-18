@@ -8,7 +8,7 @@ import { enrich } from '../src/ingest/enrich.js';
 import { buildGraph } from '../src/graph/index.js';
 import { GmailRestAdapter } from '../src/source/adapters/gmail-rest/index.js';
 import { accessTokenProvider } from './google-oauth.js';
-import { markQueueEnqueueFailed } from './job-state.js';
+import { markQueueEnqueueFailed, queueFor } from './job-state.js';
 import type { Env } from './index.js';
 import { deliverWebhook, evaluateRules, type DeliveryParams } from './triggers.js';
 import { CrmChangeFeed, publishMessageChanges } from './crm-feed.js';
@@ -18,30 +18,6 @@ import { storeMessageAttachments } from './attachments.js';
 export type JobKind = 'sync' | 'backfill' | 'backfill_slice' | 'enrich_bulk' | 'retention' | 'graph' | 'webhook_delivery';
 export interface JobMessage { jobId: string; kind: JobKind; account: string; params: Record<string, unknown> }
 
-/**
- * The kinds that ride the SWEEP Queue rather than the jobs Queue.
- *
- * A `sync` is unbounded O(mailbox) work: in production one holds its consumer
- * slot for 8-15 minutes and sometimes dies at the Workers 15-minute wall limit.
- * With one slot per connected mailbox, syncs held EVERY slot for most of the
- * hour, so these four sat queued until their 50-minute lease expired and were
- * reaped as "queued Job was never delivered" — the UNS-1335 starvation.
- *
- * Splitting by "does this contend with a sync" rather than by cost: all four are
- * already bounded and resumable (ADR-0009/ADR-0010), so their own Queue drains
- * on its own budget no matter how long a sync runs. `webhook_delivery` stays on
- * the jobs Queue — it is small and latency-sensitive, not a sweep.
- */
-const SWEEP_KINDS: ReadonlySet<JobKind> = new Set<JobKind>(['enrich_bulk', 'retention', 'backfill_slice', 'graph']);
-
-/**
- * Fall back to SYNC_QUEUE when SWEEP_QUEUE is unbound, so a Worker deployed
- * before `wrangler queues create mail-index-sweeps` still works — degraded to
- * the old single-Queue behaviour rather than dropping the Job.
- */
-function queueFor(env: Env, kind: JobKind) {
-  return SWEEP_KINDS.has(kind) ? env.SWEEP_QUEUE ?? env.SYNC_QUEUE : env.SYNC_QUEUE;
-}
 
 const DEFAULT_LOOKBACK_MONTHS = 12;
 

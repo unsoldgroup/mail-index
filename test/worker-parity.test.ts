@@ -11,7 +11,7 @@ import { buildWorkerToolContext } from '../dist-worker/worker/index.js';
 test('Worker context exposes the complete registry and gates mailbox writes by stored scope', async () => {
   const mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok") } }', d1Databases: ['DB'], kvNamespaces: ['OAUTH_KV'] });
   const key = Buffer.alloc(32, 9).toString('base64');
-  const env = { DB: await mf.getD1Database('DB'), OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async () => undefined }, TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m' };
+  const env = { DB: await mf.getD1Database('DB'), OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async () => undefined }, SWEEP_QUEUE: { send: async () => undefined }, TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m' };
   const driver = new D1Driver(env.DB); await runMigrations(driver); const repo = new Repo(driver);
   await saveGrant(driver, { account: 'acct-write', address: 'user@example.com', scopes: [GMAIL_READONLY], refreshToken: 'refresh', key });
   await repo.upsertMessage({ account: 'acct-write', gmailMessageId: 'm1', labels: ['INBOX'], bodyState: 'meta' });
@@ -51,7 +51,7 @@ test('Worker context exposes the complete registry and gates mailbox writes by s
 test('Worker context downloads an attachment through the shared MCP tool', async () => {
   const mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok") } }', d1Databases: ['DB'], kvNamespaces: ['OAUTH_KV'] });
   const key = Buffer.alloc(32, 9).toString('base64');
-  const env = { DB: await mf.getD1Database('DB'), OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async () => undefined }, TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m' };
+  const env = { DB: await mf.getD1Database('DB'), OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async () => undefined }, SWEEP_QUEUE: { send: async () => undefined }, TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m' };
   const driver = new D1Driver(env.DB); await runMigrations(driver); const repo = new Repo(driver);
   await saveGrant(driver, { account: 'personal', address: 'user@example.com', scopes: [GMAIL_READONLY], refreshToken: 'refresh', key });
   await repo.upsertMessage({ account: 'personal', gmailMessageId: 'm1', labels: ['INBOX'], bodyState: 'meta' });

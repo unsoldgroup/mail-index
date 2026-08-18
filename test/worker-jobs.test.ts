@@ -214,17 +214,6 @@ test('sweeps ride their own Queue so a slow sync cannot starve them', async () =
   } finally { await mf.dispose(); }
 });
 
-test('an unbound SWEEP_QUEUE falls back to the jobs Queue rather than dropping a Job', async () => {
-  // A Worker deployed before `wrangler queues create mail-index-sweeps` must
-  // still run, degraded to the old single-Queue behaviour.
-  const { mf, env, jobsQueue } = await fixture();
-  try {
-    const withoutSweeps = { ...env, SWEEP_QUEUE: undefined };
-    const jobId = await enqueueJob(withoutSweeps, 'retention', 'acct-a', { limit: 10 });
-    assert.ok(jobsQueue.some((m) => (m as { jobId: string }).jobId === jobId), 'the sweep fell back to the jobs Queue');
-  } finally { await mf.dispose(); }
-});
-
 test('the scheduler skips an Account whose grant Google already rejected', async () => {
   const { mf, env, driver, sent } = await fixture();
   try {
