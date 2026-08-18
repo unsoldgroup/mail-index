@@ -181,6 +181,41 @@ test('a Job past its lease is reclaimed within one cron period, not six hours', 
   } finally { await mf.dispose(); }
 });
 
+test('a QUEUED Job is left alone while it waits its turn', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    // Queued 20 minutes ago and never started: past the RUNNING lease, but this
+    // Job has not died — it is behind an 8-minute sync. Measured in production,
+    // sweeps routinely wait ~17 minutes, and reaping them killed two thirds of
+    // every tick's work.
+    const waiting = new Date(Date.now() - 20 * 60_000).toISOString();
+    await driver.prepare(`INSERT INTO jobs(id,kind,account,params_json,status,progress_json,created_at,started_at)
+      VALUES(?,?,?,?,?,?,?,?)`).run('waiting', 'sync', 'acct-a', '{}', 'queued', '{}', waiting, null);
+
+    assert.equal(await enqueueJob(env, 'sync', 'acct-a'), 'waiting', 'the waiting Job is still the answer');
+    assert.equal(sent.length, 0, 'no duplicate work queued');
+    const row = await driver.prepare('SELECT status FROM jobs WHERE id=?').get('waiting') as { status: string };
+    assert.equal(row.status, 'queued', 'waiting is not wedged');
+  } finally { await mf.dispose(); }
+});
+
+test('a QUEUED Job that was never delivered is eventually reclaimed', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    // An hour old with no start: the message is gone (a deploy or a purge ate
+    // it), so the row would otherwise block this Account forever.
+    const lost = new Date(Date.now() - 60 * 60_000).toISOString();
+    await driver.prepare(`INSERT INTO jobs(id,kind,account,params_json,status,progress_json,created_at,started_at)
+      VALUES(?,?,?,?,?,?,?,?)`).run('lost', 'sync', 'acct-a', '{}', 'queued', '{}', lost, null);
+
+    assert.notEqual(await enqueueJob(env, 'sync', 'acct-a'), 'lost');
+    assert.equal(sent.length, 1, 'a replacement reached the Queue');
+    const row = await driver.prepare('SELECT status,error FROM jobs WHERE id=?').get('lost') as { status: string; error: string };
+    assert.equal(row.status, 'failed');
+    assert.match(row.error, /never delivered/);
+  } finally { await mf.dispose(); }
+});
+
 test('a Job inside its lease still de-duplicates', async () => {
   const { mf, env, driver, sent } = await fixture();
   try {

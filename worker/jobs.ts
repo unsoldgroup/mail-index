@@ -36,8 +36,7 @@ function configuredLookbackSince(env: Pick<Env, 'SYNC_LOOKBACK_MONTHS'>): string
 }
 
 /**
- * How long a non-terminal Job may sit before the next enqueue treats it as a
- * corpse and replaces it.
+ * How long a RUNNING Job may sit before the next enqueue treats it as a corpse.
  *
  * This is a LEASE, not a timeout: a Job killed mid-flight by a Worker CPU or
  * subrequest limit never reaches `failed`, and the de-dupe below would hand its
@@ -45,7 +44,22 @@ function configuredLookbackSince(env: Pick<Env, 'SYNC_LOOKBACK_MONTHS'>): string
  * than the cron period (hourly), or one wedged Job silently costs a whole cycle
  * of syncs — which is exactly how an Account went five days without indexing.
  */
-const JOB_STALE_AFTER_MS = 15 * 60_000;
+const JOB_RUNNING_LEASE_MS = 15 * 60_000;
+
+/**
+ * How long a QUEUED Job may wait before it is presumed undeliverable.
+ *
+ * A Job that has never STARTED cannot have died mid-flight — it is simply
+ * waiting its turn behind the other sweeps, and reaping it destroys work that
+ * was about to happen. Measured in production: syncs run ~8 minutes, so a Job
+ * queued behind two of them routinely waits ~17 minutes. Sharing the running
+ * lease killed two thirds of every tick's work.
+ *
+ * This bound therefore exists only for the genuine case — a message lost to a
+ * deploy or a purge, where the row would otherwise block its Account forever.
+ * It sits just under the cron period, so a lost Job costs one cycle and no more.
+ */
+const JOB_QUEUED_LEASE_MS = 50 * 60_000;
 
 /**
  * How many Messages one working-set Job touches per run.
@@ -72,11 +86,18 @@ const CORRESPONDENT_CAP = 500;
 export async function enqueueJob(env: Env, kind: JobKind, account: string, params: Record<string, unknown> = {}): Promise<string> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
   const now = new Date(); const nowIso = now.toISOString();
-  const staleBefore = new Date(now.getTime() - JOB_STALE_AFTER_MS).toISOString();
+  // Two leases, because "wedged" and "waiting" are different conditions. A
+  // RUNNING Job that stopped reporting is a corpse holding a lock. A QUEUED Job
+  // has not started at all — it is behind the other sweeps, and reaping it
+  // throws away work that was about to happen.
+  const runningBefore = new Date(now.getTime() - JOB_RUNNING_LEASE_MS).toISOString();
+  const queuedBefore = new Date(now.getTime() - JOB_QUEUED_LEASE_MS).toISOString();
   await driver.prepare(`UPDATE jobs SET status='failed',terminal=1,error=?,finished_at=?
-    WHERE kind=? AND account=? AND status IN ('queued','running')
-      AND COALESCE(started_at,created_at) < ?`)
-    .run(`stale Job lock expired after ${Math.round(JOB_STALE_AFTER_MS / 60_000)} minutes`, nowIso, kind, account, staleBefore);
+    WHERE kind=? AND account=? AND status='running' AND started_at < ?`)
+    .run(`stale Job lock expired after ${Math.round(JOB_RUNNING_LEASE_MS / 60_000)} minutes`, nowIso, kind, account, runningBefore);
+  await driver.prepare(`UPDATE jobs SET status='failed',terminal=1,error=?,finished_at=?
+    WHERE kind=? AND account=? AND status='queued' AND created_at < ?`)
+    .run('queued Job was never delivered', nowIso, kind, account, queuedBefore);
   const existing = await driver.prepare(`SELECT id FROM jobs WHERE kind=? AND account=? AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1`).get(kind, account) as { id: string } | undefined;
   if (existing) return existing.id;
   const id = crypto.randomUUID();
