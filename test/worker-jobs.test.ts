@@ -113,7 +113,9 @@ test('the inline enrich is bounded, so a big mailbox cannot blow the wall limit'
     for (let i = 0; i < backlog; i += 1) {
       await repo.upsertMessage({
         account: 'acct-a', gmailMessageId: `old-${i}`, threadId: `t-${i}`,
-        internalDate: Date.parse('2026-01-01T00:00:00Z') + i,
+        // Inside the working-set window, or the inline enrich correctly skips
+        // them and the cap is never exercised.
+        internalDate: Date.now() - (i * 60_000),
         fromAddr: 'person@example.com', toAddr: 'a@example.com', subject: `backlog ${i}`,
         direction: 'received', isList: false, unread: false, starred: false, important: false,
         snippet: 'x', bodyText: null, bodyState: 'meta',
