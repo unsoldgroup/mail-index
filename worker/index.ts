@@ -155,7 +155,11 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
     const token = await exchangeToken(fetchImpl, { code, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, redirect_uri: state.redirectUri, grant_type: 'authorization_code' });
     const email = await operatorIdentity(fetchImpl, String(token['access_token'] ?? ''), env);
     if (!email) return new Response('<h1>Access denied</h1>', { status: 403, headers: { 'content-type': 'text/html' } });
-    const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: state.auth, userId: email.toLowerCase(), metadata: { email }, scope: state.auth.scope, props: { email } });
+    // `revokeExistingGrants` defaults to TRUE, which assumes one grant per
+    // operator per client. Several CRM workspaces share this client, so the
+    // default made the newest connection silently kill every earlier one: the
+    // workspace connected two minutes ago starts answering 401 invalid_token.
+    const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: state.auth, userId: email.toLowerCase(), metadata: { email }, scope: state.auth.scope, props: { email }, revokeExistingGrants: false });
     return new Response(null, { status: 302, headers: { location: redirectTo, 'set-cookie': await sessionCookie(email, env) } });
   }
   if (url.pathname === '/setup/google/callback') {
