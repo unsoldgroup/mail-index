@@ -75,6 +75,27 @@ const RETENTION_BATCH = 200;
 const BACKFILL_BATCH = 100;
 
 /**
+ * How many Messages the sync enriches INLINE before handing the rest off.
+ *
+ * This call used to be unbounded — no `limit`, no `since` — so
+ * `selectMetaMessages` returned every meta-state direct Message in the whole
+ * mailbox and the loop did one provider fetch per Message. That is O(mailbox)
+ * work inside the sync, violating both ADR-0001 (inline stays O(1)) and
+ * ADR-0009. It scaled straight into the Workers 15-minute wall limit: `fora`
+ * (1.7k Messages) finished, `personal` (11k) and `unsold-group` (13.7k) never
+ * did — so their syncs never marked done, never chained their sweeps, and were
+ * reaped hourly as "stale Job lock expired" (UNS-1410).
+ *
+ * Kept deliberately small: this batch shares one invocation with the metadata
+ * sweep, the Trigger rules, the CRM publish and the attachment store. Candidates
+ * come back newest-first, so the cap spends it where it is worth most — mail
+ * that just arrived gets its body now. The backlog is not this Job's problem:
+ * `enrich_bulk` is the bounded, resumable sweep for exactly that and chains off
+ * every completed sync.
+ */
+const INLINE_ENRICH_BATCH = 50;
+
+/**
  * Correspondent fan-out for a historical slice. The chunk keeps each provider
  * `from:{…}` query short enough for Gmail to accept, and the cap stops a
  * mailbox with thousands of Correspondents from turning one slice into
@@ -176,7 +197,12 @@ export async function enqueueWorkingSetJobs(env: Env, driver: D1Driver, accounts
     const settings = await repo.getAccountSettings(account);
     // An unconfigured window means the operator has not chosen a policy yet;
     // the defaults apply, which is a 3-month working set.
-    if (windowCutoff(settings) != null) queued.push(await enqueueJob(env, 'enrich_bulk', account, { limit: BACKFILL_BATCH }));
+    // Queued unconditionally. Gating this on a configured window meant an
+    // Account with the window disabled got no bulk sweep at all — harmless while
+    // the sync enriched the whole mailbox inline, a hole once that became
+    // bounded. The Job itself already picks the right selector for either case
+    // (window -> `rule: 'all'` inside it, no window -> the interest profile).
+    queued.push(await enqueueJob(env, 'enrich_bulk', account, { limit: BACKFILL_BATCH }));
     if (settings.retention === 'window') queued.push(await enqueueJob(env, 'retention', account, { limit: RETENTION_BATCH }));
     // NOTE: the historical slice is deliberately NOT queued here. It contends
     // with the sync for the Account lock, and the cron enqueues sync first, so a
@@ -245,7 +271,27 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       });
       progress['sync'] = { fetched: sync.fetched, indexed: sync.indexed }; await update('running', progress);
       progress['triggers'] = { deliveries: await evaluateRules(env, driver, repo, job.account, sync.messageIds) }; await update('running', progress);
-      const enriched = await enrich({ account: job.account, source, repo, selector: { rule: 'direct' } });
+      // `since` matters as much as `limit`. Without it the hourly sync could
+      // spend its budget on mail OUTSIDE the working set, which `retention`
+      // evicts the same cycle — fetch, evict, refetch, forever (see
+      // windowCutoff's docstring).
+      //
+      // Only for the scheduled `sync`. An explicit `backfill` is someone asking
+      // for a specific stretch of history on purpose; clamping that to the
+      // retention window would quietly refuse the thing they asked for.
+      const syncSettings = await repo.getAccountSettings(job.account);
+      const syncCutoff = job.kind === 'sync' ? windowCutoff(syncSettings) : null;
+      const enriched = await enrich({
+        account: job.account,
+        source,
+        repo,
+        selector: { rule: 'direct', limit: INLINE_ENRICH_BATCH, ...(syncCutoff != null ? { since: syncCutoff } : {}) },
+      });
+      // NOTE: past INLINE_ENRICH_BATCH direct Messages in one tick, the CRM
+      // publish below sends bodyMarkdown: null for the overflow, and the later
+      // enrich_bulk promotion does not re-publish it. Incremental ticks are far
+      // under the cap so this bites only a burst; tracked separately rather than
+      // widened here, because the fix belongs in the CRM feed.
       progress['enrich'] = { fetched: enriched.fetched, enriched: enriched.enriched }; await update('running', progress);
       const crmIds = crmAccountAllowed(env, job.account) ? sync.messageIds : [];
       let terminalCursor = await publishMessageChanges(
@@ -277,8 +323,7 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       // together means the slice always loses the race and yields. Chained, it
       // runs once this Job releases the lock — the same shape as the graph
       // handoff above.
-      const backfillSettings = await repo.getAccountSettings(job.account);
-      const slice = nextBackfillSlice(backfillSettings);
+      const slice = nextBackfillSlice(syncSettings);
       if (slice) progress['backfill_next'] = { queued_job: await enqueueJob(env, 'backfill_slice', job.account, slice), ...slice };
 
       // Chained for the reasons above, plus one of its own: enrich_bulk takes
