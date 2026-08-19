@@ -98,6 +98,55 @@ test('a completed sync hands off the next historical slice', async () => {
   } finally { await mf.dispose(); }
 });
 
+test('the inline enrich is bounded, so a big mailbox cannot blow the wall limit', async () => {
+  // Unbounded, this call resolved EVERY meta-state direct Message in the mailbox
+  // and did one provider fetch each. `fora` (1.7k Messages) finished; `personal`
+  // (11k) and `unsold-group` (13.7k) never did — their syncs died at the Workers
+  // 15-minute wall limit, so they never marked done and never chained their
+  // sweeps (UNS-1410).
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    const repo = new Repo(driver);
+    // A backlog several times the cap. Direct (not list, no promo/social
+    // category) is what the `rule: 'direct'` selector matches.
+    const backlog = 70;
+    for (let i = 0; i < backlog; i += 1) {
+      await repo.upsertMessage({
+        account: 'acct-a', gmailMessageId: `old-${i}`, threadId: `t-${i}`,
+        internalDate: Date.parse('2026-01-01T00:00:00Z') + i,
+        fromAddr: 'person@example.com', toAddr: 'a@example.com', subject: `backlog ${i}`,
+        direction: 'received', isList: false, unread: false, starred: false, important: false,
+        snippet: 'x', bodyText: null, bodyState: 'meta',
+      });
+    }
+
+    let fetches = 0;
+    const countingFetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/messages/old-')) {
+        fetches += 1;
+        const id = url.split('/messages/')[1]?.split('?')[0] ?? 'old-0';
+        return Response.json({ id, threadId: 't', internalDate: '1767225600000', labelIds: ['INBOX'], snippet: 'x', payload: { mimeType: 'text/plain', headers: [{ name: 'From', value: 'person@example.com' }, { name: 'To', value: 'a@example.com' }, { name: 'Subject', value: 'backlog' }], body: { data: Buffer.from('body').toString('base64url') } } });
+      }
+      return gmailFetch(input as never);
+    }) as typeof fetch;
+
+    await enqueueScheduledSyncs(env);
+    const syncMessage = sent.find((m) => (m as { kind: string }).kind === 'sync') as never;
+    await runJob(env, syncMessage, countingFetch);
+
+    assert.ok(fetches > 0, 'the sync still enriches fresh mail inline');
+    assert.ok(fetches <= 50, `inline enrich must stay bounded, fetched ${fetches} of ${backlog}`);
+
+    // The point of the bound: the Job still finishes, so the chain runs and the
+    // remaining backlog is drained by enrich_bulk over later ticks.
+    const kinds = sent.map((m) => (m as { kind: string }).kind);
+    assert.ok(kinds.includes('enrich_bulk'), 'a bounded sync still hands the backlog to enrich_bulk');
+    const left = await driver.prepare("SELECT count(*) n FROM messages WHERE account='acct-a' AND body_state='meta'").get() as { n: number };
+    assert.ok(left.n > 0, 'the remainder is left for the resumable sweep, not dropped');
+  } finally { await mf.dispose(); }
+});
+
 test('a completed sync chains every follow-up Job the cron used to queue', async () => {
   const { mf, env, sent } = await fixture();
   try {

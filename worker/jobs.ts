@@ -75,6 +75,27 @@ const RETENTION_BATCH = 200;
 const BACKFILL_BATCH = 100;
 
 /**
+ * How many Messages the sync enriches INLINE before handing the rest off.
+ *
+ * This call used to be unbounded — no `limit`, no `since` — so
+ * `selectMetaMessages` returned every meta-state direct Message in the whole
+ * mailbox and the loop did one provider fetch per Message. That is O(mailbox)
+ * work inside the sync, violating both ADR-0001 (inline stays O(1)) and
+ * ADR-0009. It scaled straight into the Workers 15-minute wall limit: `fora`
+ * (1.7k Messages) finished, `personal` (11k) and `unsold-group` (13.7k) never
+ * did — so their syncs never marked done, never chained their sweeps, and were
+ * reaped hourly as "stale Job lock expired" (UNS-1410).
+ *
+ * Kept deliberately small: this batch shares one invocation with the metadata
+ * sweep, the Trigger rules, the CRM publish and the attachment store. Candidates
+ * come back newest-first, so the cap spends it where it is worth most — mail
+ * that just arrived gets its body now. The backlog is not this Job's problem:
+ * `enrich_bulk` is the bounded, resumable sweep for exactly that and chains off
+ * every completed sync.
+ */
+const INLINE_ENRICH_BATCH = 50;
+
+/**
  * Correspondent fan-out for a historical slice. The chunk keeps each provider
  * `from:{…}` query short enough for Gmail to accept, and the cap stops a
  * mailbox with thousands of Correspondents from turning one slice into
@@ -245,7 +266,7 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       });
       progress['sync'] = { fetched: sync.fetched, indexed: sync.indexed }; await update('running', progress);
       progress['triggers'] = { deliveries: await evaluateRules(env, driver, repo, job.account, sync.messageIds) }; await update('running', progress);
-      const enriched = await enrich({ account: job.account, source, repo, selector: { rule: 'direct' } });
+      const enriched = await enrich({ account: job.account, source, repo, selector: { rule: 'direct', limit: INLINE_ENRICH_BATCH } });
       progress['enrich'] = { fetched: enriched.fetched, enriched: enriched.enriched }; await update('running', progress);
       const crmIds = crmAccountAllowed(env, job.account) ? sync.messageIds : [];
       let terminalCursor = await publishMessageChanges(
