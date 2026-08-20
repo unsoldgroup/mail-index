@@ -28,6 +28,8 @@ function toMetadata(m: MessageFull): MessageMetadata {
     from: m.from,
     to: m.to,
     cc: m.cc,
+    ...(m.replyTo == null ? {} : { replyTo: m.replyTo }),
+    ...(m.originFrom == null ? {} : { originFrom: m.originFrom }),
     subject: m.subject,
     labels: m.labels,
     snippet: m.snippet,
