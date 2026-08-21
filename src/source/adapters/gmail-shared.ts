@@ -185,6 +185,8 @@ export function toMetadata(msg: GmailMessage): MessageMetadata {
     from: header(msg.payload, 'From'),
     to: header(msg.payload, 'To'),
     cc: header(msg.payload, 'Cc'),
+    replyTo: header(msg.payload, 'Reply-To'),
+    originFrom: header(msg.payload, 'X-Original-From'),
     subject: header(msg.payload, 'Subject'),
     labels: msg.labelIds ?? [],
     snippet: msg.snippet ?? null,

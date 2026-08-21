@@ -99,6 +99,20 @@ export interface MessageMetadata {
   to: string | null;
   /** `Cc:` header. */
   cc: string | null;
+  /**
+   * `Reply-To:` header, raw and unresolved. On mail a relay sends *as* the
+   * operator (contact-form notifications from a `noreply@` address) this is the
+   * only header naming the actual human. Consumers decide whether it points
+   * outside the operator's own identities — that needs the identity list, which
+   * does not live here.
+   */
+  replyTo?: string | null;
+  /**
+   * `X-Original-From:` header, raw. Relays that forward as the operator set
+   * `Reply-To` to an opaque per-thread alias inside the operator's own domain;
+   * this header is then the only one naming the original sender.
+   */
+  originFrom?: string | null;
   /** `Subject:` header. */
   subject: string | null;
   /**

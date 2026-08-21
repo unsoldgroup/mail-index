@@ -230,6 +230,8 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
           fromAddr: meta.from,
           toAddr: meta.to,
           ccAddr: meta.cc,
+          replyTo: meta.replyTo,
+          originFrom: meta.originFrom,
           subject: meta.subject,
           labels,
           category,

@@ -146,13 +146,23 @@ export async function publishMessageChanges(
       entityType: 'message',
       entityKey: id,
       operation: 'upsert',
-      dedupeKey: `message:${account}:${id}:${row.body_fetched_at ?? ''}:${row.body_state}`,
+      // The recovered-correspondent headers are part of the key: they arrive on
+      // a metadata re-sync that moves neither body_state nor body_fetched_at, and
+      // without them that re-sync would dedupe away and leave the CRM still
+      // showing the operator's own role address as the correspondent.
+      dedupeKey:
+        `message:${account}:${id}:${row.body_fetched_at ?? ''}:${row.body_state}` +
+        `:${row.reply_to ?? ''}:${row.origin_from ?? ''}`,
       payload: {
         providerMessageKey: id,
         rfcMessageId: row.rfc_message_id,
         threadKey: row.thread_id,
         subject: row.subject,
         from: row.from_addr,
+        // Raw and unresolved: whether either points outside the operator's own
+        // identities is a workspace question, answered in the CRM.
+        replyTo: row.reply_to,
+        originFrom: row.origin_from,
         to: splitAddresses(row.to_addr),
         cc: splitAddresses(row.cc_addr),
         occurredAt: row.internal_date,

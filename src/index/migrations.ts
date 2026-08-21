@@ -647,6 +647,31 @@ const m019_account_settings: Migration = {
   },
 };
 
+/**
+ * Migration 20 — capture the headers that name the real correspondent behind a
+ * relayed message. An operator's own role address (`noreply@`, `agents@`) is
+ * the visible `From:` on contact-form notifications and `[FWD]` relays, which
+ * makes every such thread look like the operator talking to itself. `Reply-To`
+ * carries the customer on contact-form mail; on relayed forwards `Reply-To` is
+ * an opaque per-thread alias inside the operator's own domain and only
+ * `X-Original-From` names the human. Both are stored raw — deciding which one
+ * points outside needs the workspace identities, which live in the CRM, not
+ * here.
+ */
+const m020_relayed_correspondent_headers: Migration = {
+  version: 20,
+  name: 'reply-to and x-original-from headers',
+  up: async (db) => {
+    // Same replay-safety reasoning as migrations 17 and 18: probe before ALTER.
+    const columns = (await db.prepare('PRAGMA table_info(messages)').all()) as { name: string }[];
+    if (columns.some((column) => column.name === 'reply_to')) return;
+    await db.exec(`
+      ALTER TABLE messages ADD COLUMN reply_to TEXT;
+      ALTER TABLE messages ADD COLUMN origin_from TEXT;
+    `);
+  },
+};
+
 /** All migrations, in ascending version order. Append-only. */
 export const MIGRATIONS: readonly Migration[] = [
   m001_initial,
@@ -668,6 +693,7 @@ export const MIGRATIONS: readonly Migration[] = [
   m017_terminal_jobs,
   m018_auth_health,
   m019_account_settings,
+  m020_relayed_correspondent_headers,
 ];
 
 /**

@@ -53,6 +53,10 @@ export interface MessageInput {
   account: string;
   gmailMessageId: string;
   rfcMessageId?: string | null;
+  /** `Reply-To:` header, raw. Names the customer on contact-form relays. */
+  replyTo?: string | null;
+  /** `X-Original-From:` header, raw. Names the human behind a `[FWD]` relay. */
+  originFrom?: string | null;
   threadId?: string | null;
   internalDate?: number | null;
   dateHeader?: string | null;
@@ -88,6 +92,8 @@ export interface MessageRow {
   account: string;
   gmail_message_id: string;
   rfc_message_id: string | null;
+  reply_to: string | null;
+  origin_from: string | null;
   thread_id: string | null;
   subject: string | null;
   from_addr: string | null;
@@ -620,16 +626,20 @@ export class Repo {
     // from the already-resolved (no-downgrade) values.
     await this.#prepare(
       `INSERT INTO messages (
-         account, gmail_message_id, rfc_message_id, thread_id, internal_date, date_header,
+         account, gmail_message_id, rfc_message_id, reply_to, origin_from, thread_id, internal_date, date_header,
          from_addr, to_addr, cc_addr, subject, labels_json, category,
          is_list, direction, unread, starred, important, size_estimate,
          snippet, body_state, body_text, gmail_url, indexed_at, body_fetched_at,
          ocr_images_json
        ) VALUES (
-         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        )
        ON CONFLICT(account, gmail_message_id) DO UPDATE SET
          rfc_message_id  = COALESCE(excluded.rfc_message_id, messages.rfc_message_id),
+         -- COALESCE: an enrich-phase upsert carries no headers, and clobbering
+         -- these with NULL would re-orphan the thread it just recovered.
+         reply_to        = COALESCE(excluded.reply_to, messages.reply_to),
+         origin_from     = COALESCE(excluded.origin_from, messages.origin_from),
          thread_id       = excluded.thread_id,
          internal_date   = excluded.internal_date,
          date_header     = excluded.date_header,
@@ -657,6 +667,8 @@ export class Repo {
       input.account,
       input.gmailMessageId,
       input.rfcMessageId ?? null,
+      input.replyTo ?? null,
+      input.originFrom ?? null,
       input.threadId ?? null,
       input.internalDate ?? null,
       input.dateHeader ?? null,
@@ -717,7 +729,7 @@ export class Repo {
   /** Fetch one message row by id (or undefined). */
   async getMessage(account: string, gmailMessageId: string): Promise<MessageRow | undefined> {
     return await this.#prepare(
-      `SELECT account, gmail_message_id, rfc_message_id, thread_id, subject, from_addr, to_addr,
+      `SELECT account, gmail_message_id, rfc_message_id, reply_to, origin_from, thread_id, subject, from_addr, to_addr,
               cc_addr, snippet, body_state, body_text, summary_text,
               summary_is_model, summarized_at, is_list, direction,
               unread, starred, important, category, internal_date, indexed_at,
