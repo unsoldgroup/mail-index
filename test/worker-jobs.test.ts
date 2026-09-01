@@ -5,7 +5,7 @@ import { D1Driver } from '../dist/index/drivers/d1.js';
 import { Repo } from '../dist/index/repo.js';
 import { runMigrations } from '../dist/index/migrations.js';
 import { saveGrant } from '../dist-worker/worker/google-oauth.js';
-import { enqueueCrmBackfillJob, enqueueJob, enqueueScheduledSyncs, jobStatus, runJob } from '../dist-worker/worker/jobs.js';
+import { CRM_TICK_BATCH, enqueueCrmBackfillJob, enqueueJob, enqueueScheduledSyncs, jobStatus, runJob } from '../dist-worker/worker/jobs.js';
 import worker from '../dist-worker/worker/index.js';
 import { evaluateRules, triggerAdmin } from '../dist-worker/worker/triggers.js';
 import { nextBackfillSlice, BACKFILL_FLOOR } from '../dist/index/settings.js';
@@ -540,6 +540,41 @@ test('sync Job evaluates Trigger rules and signed webhook retries until 2xx', as
     const expected = await crypto.subtle.sign('HMAC', await crypto.subtle.importKey('raw', new TextEncoder().encode('shared-secret'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']), new TextEncoder().encode(body));
     assert.equal(new Headers(captured?.headers).get('x-mailindex-signature'), `sha256=${Buffer.from(expected).toString('hex')}`);
     assert.ok(new Headers(captured?.headers).get('x-mailindex-timestamp'));
+  } finally { await mf.dispose(); }
+});
+
+/** A mailbox with more Messages than one tick may publish. */
+const bulkGmailFetch = (count: number) => (async (input: RequestInfo | URL) => {
+  const url = String(input);
+  if (url.includes('oauth2.googleapis.com/token')) return Response.json({ access_token: 'access', expires_in: 3600 });
+  if (url.endsWith('/profile')) return Response.json({ emailAddress: 'a@example.com' });
+  if (url.includes('/messages?')) return Response.json({ messages: Array.from({ length: count }, (_, i) => ({ id: `b${String(i).padStart(4, '0')}` })) });
+  const hit = url.match(/\/messages\/(b\d{4})/);
+  if (hit) return Response.json({ id: hit[1], threadId: 't1', internalDate: '1717000000000', labelIds: ['INBOX'], snippet: 'hello', payload: { mimeType: 'text/plain', headers: [{ name: 'From', value: 'person@example.com' }, { name: 'To', value: 'a@example.com' }, { name: 'Subject', value: 'Hello' }], body: { data: Buffer.from('Hello body').toString('base64url') } } });
+  throw new Error(`unexpected fetch ${url}`);
+}) as typeof fetch;
+
+test('a sync tick publishes a bounded batch and hands the overflow to crm_backfill', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    const total = CRM_TICK_BATCH + 12;
+    const jobId = await enqueueJob(env, 'sync', 'acct-a', {});
+    sent.length = 0;
+    await runJob(env, { jobId, kind: 'sync', account: 'acct-a', params: {} }, bulkGmailFetch(total));
+
+    const job = await driver.prepare('SELECT status,progress_json FROM jobs WHERE id=?').get(jobId) as { status: string; progress_json: string } | undefined;
+    const progress = JSON.parse(job?.progress_json ?? '{}') as { crm?: { published: number; overflow: number } };
+
+    // Unbounded, this phase called the provider and wrote R2 once per Message,
+    // exhausting the CPU budget and killing the isolate before the Job could
+    // finish -- which is why two Accounts published nothing after August.
+    assert.equal(progress.crm?.published, CRM_TICK_BATCH);
+    assert.equal(progress.crm?.overflow, 12);
+
+    // The overflow is handed on, not dropped. Events carry a dedupeKey, so the
+    // backfill re-publishing what this tick already sent is a no-op.
+    const kinds = sent.map((m) => (m as { kind: string }).kind);
+    assert.ok(kinds.includes('crm_backfill'), `expected a chained crm_backfill, got ${kinds.join(',')}`);
   } finally { await mf.dispose(); }
 });
 
