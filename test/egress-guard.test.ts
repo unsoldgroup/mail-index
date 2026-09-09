@@ -93,6 +93,17 @@ function load(dir: string, ext: string) {
 const srcFiles = load(SRC, '.ts');
 const binFiles = load(BIN, '.mjs');
 const workerFiles = load(WORKER, '.ts');
+const benchFiles = load(join(ROOT, 'bench'), '.mjs');
+
+test('benchmarks never send content directly to a token-count or model provider', () => {
+  const hits: string[] = [];
+  for (const { rel, code } of benchFiles) {
+    // Miniflare's fixture defines a request handler; it does not dispatch fetch.
+    const dispatchCode = code.replace(/\bfetch\s*\(\s*\)\s*\{/g, 'handler() {');
+    for (const { re, what } of NETWORK) if (re.test(dispatchCode)) hits.push(`${rel} → ${what}`);
+  }
+  assert.deepEqual(hits, [], 'benchmark network requests must go through the existing mailbox/MCP boundaries');
+});
 
 test('no direct network primitives anywhere in src/ (core is egress-free)', () => {
   const hits: string[] = [];

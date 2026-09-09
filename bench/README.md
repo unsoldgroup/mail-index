@@ -21,9 +21,9 @@ MCP server imposes on an agent's context window:
   guess the query several times and fetch more, so the true gap is larger.
 - mail-index is charged for its real MCP calls: one `search` (ranked snippets),
   plus one `get_message` for a read.
-- Token counting uses the **Anthropic `count_tokens` API** when
-  `ANTHROPIC_API_KEY` is set (Claude-exact); otherwise a `chars/4` approximation.
-  The headline is the **ratio**, which is stable across tokenizers.
+- Token counting uses a **local `chars/4` approximation** for both sides.
+  Counts and ratios are estimates, not model-specific tokenizer measurements.
+  Provider credentials do not change this behavior or transmit text for counting.
 
 ## Run it
 
@@ -31,8 +31,6 @@ MCP server imposes on an agent's context window:
 pnpm run build                      # ensure dist/ is current
 node bench/run.mjs                  # defaults: --account personal
 node bench/run.mjs --account unsold-group
-# exact Claude token counts:
-ANTHROPIC_API_KEY=YOUR_KEY node bench/run.mjs
 # point at a LIVE Gmail MCP's tools/list for an exact schema-tax line:
 node bench/run.mjs --gmail-tools /path/to/that-servers-tools.json
 # the 100 inbox-question suite (8 research-backed categories):
