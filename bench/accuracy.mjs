@@ -29,6 +29,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { countTokens as tok, COUNT_MODE } from './token-count.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -67,25 +68,6 @@ const TXN_GLOBS = [
   '%paypal%', '%amazon%', '%aliexpress%', '%wealthsimple%', '%klarna%',
   '%@email.apple.com%', '%stripe%', '%shopify%', '%@uber%', '%booking.com%',
 ];
-
-const APX = (s) => Math.ceil((s ?? '').length / 4);
-let COUNT_MODE = 'chars/4 (approx)';
-async function tok(text) {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return APX(text);
-  try {
-    const r = await fetch('https://api.anthropic.com/v1/messages/count_tokens', {
-      method: 'POST',
-      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: text || ' ' }] }),
-    });
-    if (!r.ok) return APX(text);
-    COUNT_MODE = 'Anthropic count_tokens API';
-    return (await r.json()).input_tokens ?? APX(text);
-  } catch {
-    return APX(text);
-  }
-}
 
 function gws(params) {
   return new Promise((resolve, reject) => {

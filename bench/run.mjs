@@ -12,9 +12,8 @@
  * faithful comparison, not a strawman. We model the Gmail "find then read" path
  * honestly (see GMAIL MODEL below) and document every assumption.
  *
- * Token counting: uses the Anthropic count_tokens API when ANTHROPIC_API_KEY is
- * set (Claude-accurate); otherwise a chars/4 approximation. The HEADLINE is the
- * ratio, which is stable across tokenizers.
+ * Token counts are local chars/4 approximations, not model-specific tokenizer
+ * counts. No benchmark text is sent to a model provider for counting.
  *
  * Usage:
  *   node bench/run.mjs [--account personal] [--gmail-tools bench/gmail-mcp-tools.json]
@@ -32,6 +31,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { countTokens, COUNT_MODE } from './token-count.mjs';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -45,36 +45,6 @@ const args = parseFlags(process.argv.slice(2));
 const ACCOUNT = args.account ?? 'personal';
 const GMAIL_TOOLS_PATH = args['gmail-tools'] ?? join(HERE, 'gmail-mcp-tools.json');
 const CONFIG_DIR = resolveConfigDir(ACCOUNT);
-
-// ---- token counting -------------------------------------------------------
-
-const APX = (s) => Math.ceil((s ?? '').length / 4);
-let COUNT_MODE = 'chars/4 (approx — set ANTHROPIC_API_KEY for exact Claude counts)';
-
-async function countTokens(text) {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return APX(text);
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages/count_tokens', {
-      method: 'POST',
-      headers: {
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        messages: [{ role: 'user', content: text || ' ' }],
-      }),
-    });
-    if (!res.ok) return APX(text);
-    const j = await res.json();
-    COUNT_MODE = 'Anthropic count_tokens API (claude-sonnet-4-6)';
-    return j.input_tokens ?? APX(text);
-  } catch {
-    return APX(text);
-  }
-}
 
 // ---- mail-index MCP stdio client ------------------------------------------
 
