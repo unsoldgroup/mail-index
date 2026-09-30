@@ -39,6 +39,11 @@ a sync rides `mail-index-sweeps` with its own concurrency budget, and
 `mail-index-jobs` carries `sync`, `backfill` and `webhook_delivery`. Both stay at
 `max_batch_size: 1`.
 
+UNS-1554 moves all CRM publication and attachment storage out of `sync` and
+`backfill`. Their `crm_backfill` handoff also rides `mail-index-sweeps`, in
+cursor-based batches of at most 200 Messages. CRM completion notifications
+come from those batches, after their events and attachments are persisted.
+
 This bounds the blast radius rather than removing the cause. A `sync` that runs
 for 15 minutes still dies at the wall limit and still leaves its row `running`
 until the next tick's lease reaps it — it just no longer takes the sweeps down
