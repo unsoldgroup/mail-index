@@ -149,26 +149,7 @@ export function enqueueCrmBackfillJob(env: Env, account: string, after = ''): Pr
 /** One invocation's worth of history; the job re-enqueues itself until drained. */
 export const CRM_BACKFILL_BATCH = 200;
 
-/**
- * How many Messages one sync tick may publish to the CRM feed inline.
- *
- * Publishing is not cheap work: `storeMessageAttachments` calls the provider and
- * writes R2 per Message. Unbounded, a first sync of a large Account tried to
- * publish everything it had just indexed and exhausted the invocation's CPU
- * budget before the `crm` phase completed — the isolate died with no catch, so
- * the Job row was left `running` with `error` NULL and nothing reported a
- * failure. Measured 2026-09-01: `personal` (11.5k Messages) had ZERO successful
- * syncs across 460 attempts, `unsold-group` (14.4k) none since 2026-08-08, while
- * `fora` (1.8k) succeeded throughout. The split is Account size, which is the
- * signature of a budget overrun rather than a logic error, and both Twenty
- * workspaces were starved by it.
- *
- * An incremental tick sits far below this, so the common path still publishes
- * immediately. Anything above hands the remainder to `crm_backfill`, which is
- * already cursor-based, batched and self-chaining — the same shape as the
- * `graph` and `backfill_slice` handoffs, for the same reason.
- */
-export const CRM_TICK_BATCH = 50;
+/** CRM publication and attachment work run only in bounded crm_backfill jobs. */
 
 export async function enqueueScheduledSyncs(env: Env): Promise<string[]> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
@@ -315,34 +296,11 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       // widened here, because the fix belongs in the CRM feed.
       progress['enrich'] = { fetched: enriched.fetched, enriched: enriched.enriched }; await update('running', progress);
       const eligible = crmAccountAllowed(env, job.account) ? sync.messageIds : [];
-      // Bounded: see CRM_TICK_BATCH. Publishing every Message a first sync just
-      // indexed is what killed the isolate before this phase could finish.
-      const crmIds = eligible.slice(0, CRM_TICK_BATCH);
-      const crmOverflow = eligible.length - crmIds.length;
-      let terminalCursor = await publishMessageChanges(
-        new CrmChangeFeed(driver),
-        repo,
-        job.account,
-        crmIds,
-        job.jobId,
-      );
-      const attachments = await storeMessageAttachments({ source, feed: new CrmChangeFeed(driver), bucket: env.ATTACHMENTS, account: job.account, messageIds: crmIds, jobId: job.jobId });
-      terminalCursor = attachments.lastCursor ?? terminalCursor;
-      progress['crm'] = { published: crmIds.length, overflow: crmOverflow, attachments, terminal_cursor: terminalCursor ?? null };
-      await update('running', progress);
-      // The overflow is not dropped: crm_backfill walks the Account from its own
-      // cursor and republishes. Events carry a dedupeKey, so re-publishing what
-      // this tick already sent is a no-op rather than a duplicate.
-      if (crmOverflow > 0) {
-        progress['crm_overflow'] = { queued_job: await enqueueCrmBackfillJob(env, job.account) };
-        await update('running', progress);
+      progress['crm'] = { published: 0, deferred: eligible.length };
+      if (eligible.length > 0) {
+        progress['crm_backfill'] = { queued_job: await enqueueCrmBackfillJob(env, job.account) };
       }
-      await notifyCrmCompletion({
-        url: env.CRM_WEBHOOK_URL,
-        secret: env.CRM_WEBHOOK_SECRET,
-        payload: { account: job.account, terminalCursor: terminalCursor ?? null, jobId: job.jobId },
-        fetchImpl,
-      });
+      await update('running', progress);
       // The graph is rebuilt over the WHOLE mailbox, so it is O(N) work and
       // belongs in its own Job (ADR-0009) rather than the tail of every sync
       // tick. Inline, it was the phase most likely to exhaust the invocation's
