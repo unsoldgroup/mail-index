@@ -64,7 +64,7 @@ a job id, and progress is readable via `sync_status`. Inline stays O(1)
 **Sweep**:
 A bounded, resumable Job that walks the mailbox a batch at a time rather than
 trying to finish in one invocation: `enrich_bulk`, `retention`,
-`backfill_slice`, `graph`. Sweeps ride their own Queue (`mail-index-sweeps`) so
+`backfill_slice`, `graph`, `crm_backfill`. Sweeps ride their own Queue (`mail-index-sweeps`) so
 a long-running sync cannot starve them (ADR-0009 amendment).
 _Avoid_: sweeper, background pass
 
