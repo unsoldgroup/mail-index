@@ -5,7 +5,7 @@ import { D1Driver } from '../dist/index/drivers/d1.js';
 import { Repo } from '../dist/index/repo.js';
 import { runMigrations } from '../dist/index/migrations.js';
 import { saveGrant } from '../dist-worker/worker/google-oauth.js';
-import { CRM_TICK_BATCH, enqueueCrmBackfillJob, enqueueJob, enqueueScheduledSyncs, jobStatus, runJob } from '../dist-worker/worker/jobs.js';
+import { CRM_BACKFILL_BATCH, enqueueCrmBackfillJob, enqueueJob, enqueueScheduledSyncs, jobStatus, runJob } from '../dist-worker/worker/jobs.js';
 import worker from '../dist-worker/worker/index.js';
 import { evaluateRules, triggerAdmin } from '../dist-worker/worker/triggers.js';
 import { nextBackfillSlice, BACKFILL_FLOOR } from '../dist/index/settings.js';
@@ -261,7 +261,7 @@ test('sweeps ride their own Queue so a slow sync cannot starve them', async () =
 
     const kindsOf = (queue: unknown[]) => [...new Set(queue.map((m) => (m as { kind: string }).kind))].sort();
     assert.deepEqual(kindsOf(jobsQueue), ['sync', 'webhook_delivery'], 'the jobs Queue carries only syncs and deliveries');
-    assert.deepEqual(kindsOf(sweeps), ['backfill_slice', 'enrich_bulk', 'graph', 'retention'], 'every sweep rides the sweeps Queue');
+    assert.deepEqual(kindsOf(sweeps), ['backfill_slice', 'crm_backfill', 'enrich_bulk', 'graph', 'retention'], 'every sweep rides the sweeps Queue');
   } finally { await mf.dispose(); }
 });
 
@@ -452,6 +452,11 @@ test('explicit backfill Job retains the full enrichment and graph pipeline', asy
     assert.ok((progress['graph'] as { queued_job?: string })?.queued_job, 'backfill hands the graph off too');
     const runs = await driver.prepare('SELECT phase FROM sync_runs ORDER BY id').all() as { phase: string }[];
     assert.deepEqual(runs.map((r) => r.phase), ['sync', 'enrich']);
+    const beforePublication = await driver.prepare('SELECT count(*) n FROM crm_change_events').get() as { n: number };
+    assert.equal(beforePublication.n, 0, 'explicit backfill also defers CRM work');
+    const crmJob = sent.find((message) => (message as { kind: string }).kind === 'crm_backfill');
+    assert.ok(crmJob, 'backfill queues bounded CRM publication');
+    await runJob(env, crmJob as never, gmailFetch);
     const changes = await driver.prepare(
       'SELECT account,entity_type,entity_key,operation,payload_json FROM crm_change_events ORDER BY sequence',
     ).all() as Array<Record<string, unknown>>;
@@ -554,27 +559,36 @@ const bulkGmailFetch = (count: number) => (async (input: RequestInfo | URL) => {
   throw new Error(`unexpected fetch ${url}`);
 }) as typeof fetch;
 
-test('a sync tick publishes a bounded batch and hands the overflow to crm_backfill', async () => {
+test('a sync tick defers all CRM publication to bounded crm_backfill jobs', async () => {
   const { mf, env, driver, sent } = await fixture();
   try {
-    const total = CRM_TICK_BATCH + 12;
+    const total = CRM_BACKFILL_BATCH + 12;
     const jobId = await enqueueJob(env, 'sync', 'acct-a', {});
     sent.length = 0;
     await runJob(env, { jobId, kind: 'sync', account: 'acct-a', params: {} }, bulkGmailFetch(total));
 
     const job = await driver.prepare('SELECT status,progress_json FROM jobs WHERE id=?').get(jobId) as { status: string; progress_json: string } | undefined;
-    const progress = JSON.parse(job?.progress_json ?? '{}') as { crm?: { published: number; overflow: number } };
+    const progress = JSON.parse(job?.progress_json ?? '{}') as { crm?: { published: number; deferred: number } };
 
     // Unbounded, this phase called the provider and wrote R2 once per Message,
     // exhausting the CPU budget and killing the isolate before the Job could
     // finish -- which is why two Accounts published nothing after August.
-    assert.equal(progress.crm?.published, CRM_TICK_BATCH);
-    assert.equal(progress.crm?.overflow, 12);
+    assert.equal(job?.status, 'done');
+    assert.equal(progress.crm?.published, 0);
+    const before = await driver.prepare('SELECT count(*) AS n FROM crm_change_events').get() as { n: number };
+    assert.equal(before.n, 0, 'the sync tick must not publish CRM events inline');
 
-    // The overflow is handed on, not dropped. Events carry a dedupeKey, so the
-    // backfill re-publishing what this tick already sent is a no-op.
-    const kinds = sent.map((m) => (m as { kind: string }).kind);
-    assert.ok(kinds.includes('crm_backfill'), `expected a chained crm_backfill, got ${kinds.join(',')}`);
+    // The separate jobs drain every message without repeating the sync work.
+    const publish = sent.find((m) => (m as { kind: string }).kind === 'crm_backfill');
+    assert.ok(publish, 'publication is queued separately from sync');
+    await runJob(env, publish as never, bulkGmailFetch(total));
+    const first = await driver.prepare('SELECT count(*) AS n FROM crm_change_events').get() as { n: number };
+    assert.equal(first.n, CRM_BACKFILL_BATCH);
+    const next = sent.filter((m) => (m as { kind: string }).kind === 'crm_backfill').at(-1);
+    assert.notEqual(next, publish, 'a full batch must enqueue its remaining cursor');
+    await runJob(env, next as never, bulkGmailFetch(total));
+    const complete = await driver.prepare('SELECT count(*) AS n FROM crm_change_events').get() as { n: number };
+    assert.equal(complete.n, total, 'the separate jobs drain every message');
   } finally { await mf.dispose(); }
 });
 
