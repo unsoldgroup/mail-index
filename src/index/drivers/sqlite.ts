@@ -63,11 +63,14 @@ export class SqliteDriver implements StorageDriver {
 
   /**
    * Apply `statements` atomically. node:sqlite has interactive transactions, so
-   * the D1 `batch()` contract is honoured here with an IMMEDIATE transaction:
-   * all statements commit together or none do.
+   * the D1 `batch()` contract is honoured here with an IMMEDIATE transaction,
+   * or a savepoint when a Repo transaction already owns the connection.
    */
   async batch(statements: readonly BatchStatement[]): Promise<void> {
-    this.db.exec('BEGIN IMMEDIATE');
+    // SAVEPOINT also works inside a Repo transaction; releasing it preserves
+    // the outer transaction's rollback of every bounded write chunk.
+    const nested = this.db.isTransaction;
+    this.db.exec(nested ? 'SAVEPOINT mail_index_batch' : 'BEGIN IMMEDIATE');
     try {
       for (const s of statements) {
         let st = this.#batchStmts.get(s.sql);
@@ -77,9 +80,10 @@ export class SqliteDriver implements StorageDriver {
         }
         st.run(...((s.params ?? []) as never[]));
       }
-      this.db.exec('COMMIT');
+      this.db.exec(nested ? 'RELEASE mail_index_batch' : 'COMMIT');
     } catch (err) {
-      this.db.exec('ROLLBACK');
+      this.db.exec(nested ? 'ROLLBACK TO mail_index_batch' : 'ROLLBACK');
+      if (nested) this.db.exec('RELEASE mail_index_batch');
       throw err;
     }
   }

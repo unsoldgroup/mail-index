@@ -270,6 +270,7 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
         source,
         repo,
         scope: typeof job.params['since'] === 'string' ? { since: job.params['since'] } : undefined,
+        onProgress: async phase => { progress['sync'] = phase; await update('running', progress); },
       });
       progress['sync'] = { fetched: sync.fetched, indexed: sync.indexed }; await update('running', progress);
       progress['triggers'] = { deliveries: await evaluateRules(env, driver, repo, job.account, sync.messageIds) }; await update('running', progress);
@@ -341,7 +342,10 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
 
       // Pass 1 — everything sent in the slice. Cheap, and it is what discovers
       // (and scores) the Correspondents pass 2 depends on.
-      const sent = await syncMetadata({ account: job.account, source, repo, scope: { since, until, query: 'in:sent' } });
+      const sent = await syncMetadata({
+        account: job.account, source, repo, scope: { since, until, query: 'in:sent' },
+        onProgress: async phase => { progress['backfill_sent'] = { ...phase, since, until }; await update('running', progress); },
+      });
       fetched += sent.fetched; indexed += sent.indexed;
       progress['backfill_sent'] = { fetched: sent.fetched, indexed: sent.indexed, since, until };
       await update('running', progress);
@@ -356,6 +360,7 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
           source,
           repo,
           scope: { since, until, query: `from:{${chunk.join(' ')}}` },
+          onProgress: async phase => { progress['backfill_received'] = { ...phase, since, until, offset: i }; await update('running', progress); },
         });
         fetched += received.fetched; indexed += received.indexed;
       }

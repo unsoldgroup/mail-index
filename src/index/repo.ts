@@ -19,7 +19,7 @@
  * boundary as JS `boolean` and are stored as 0/1 internally.
  */
 
-import type { StorageDriver, PreparedStatement } from './driver.js';
+import type { StorageDriver, PreparedStatement, BatchStatement } from './driver.js';
 import { IndexError } from './db.js';
 import { bm25Expr, projectBody, projectRecipients } from './fts.js';
 import { DEFAULT_ACCOUNT_SETTINGS, normalizeSettings, type AccountSettings } from './settings.js';
@@ -499,6 +499,19 @@ export class Repo {
       this.#stmt.set(sql, s);
     }
     return s;
+  }
+
+  /** Bound each D1 round trip; preserve statement order and the local outer transaction. */
+  async #writeBatches(writes: Iterable<BatchStatement>): Promise<void> {
+    let chunk: BatchStatement[] = [];
+    for (const statement of writes) {
+      chunk.push(statement);
+      if (chunk.length === 50) {
+        await this.driver.batch(chunk);
+        chunk = [];
+      }
+    }
+    if (chunk.length) await this.driver.batch(chunk);
   }
 
   /**
@@ -1589,8 +1602,8 @@ export class Repo {
   }
 
   /**
-   * Replace the derived contact/domain/thread rows for `account` in one
-   * transaction, so aggregation is idempotent and re-runnable: a re-run produces
+   * Replace the derived contact/domain/thread rows for `account`, preserving
+   * the local transaction and using atomic D1 write chunks. A re-run produces
    * the same tables with no stale rows and no duplicates. Identity/curation
    * columns the aggregation does not own — `person_id`, `curation`,
    * `centrality`, `community_id` (contacts); `curation`, `category`,
@@ -1620,47 +1633,48 @@ export class Repo {
     const existing = await this.#prepare(
       `SELECT address FROM contacts WHERE account = ?`,
     ).all(account) as { address: string }[];
-    const del = this.#prepare(`DELETE FROM contacts WHERE account = ? AND address = ?`);
-    for (const row of existing) {
-      if (!keep.has(row.address)) await del.run(account, row.address);
-    }
+    const del = `DELETE FROM contacts WHERE account = ? AND address = ?`;
+    function* writes(): Generator<BatchStatement> {
+      for (const row of existing) {
+        if (!keep.has(row.address)) yield { sql: del, params: [account, row.address] };
+      }
 
-    const up = this.#prepare(
-      `INSERT INTO contacts (
-         account, address, display_name, domain,
-         msgs_received, msgs_sent, read_count, replied_count, initiated_count,
-         starred_count, important_count, first_seen, last_seen
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(account, address) DO UPDATE SET
-         display_name    = COALESCE(excluded.display_name, contacts.display_name),
-         domain          = COALESCE(excluded.domain, contacts.domain),
-         msgs_received   = excluded.msgs_received,
-         msgs_sent       = excluded.msgs_sent,
-         read_count      = excluded.read_count,
-         replied_count   = excluded.replied_count,
-         initiated_count = excluded.initiated_count,
-         starred_count   = excluded.starred_count,
-         important_count = excluded.important_count,
-         first_seen      = excluded.first_seen,
-         last_seen       = excluded.last_seen`,
-    );
-    for (const c of contacts) {
-      await up.run(
-        account,
-        c.address,
-        c.displayName ?? null,
-        c.domain ?? null,
-        c.msgsReceived,
-        c.msgsSent,
-        c.readCount,
-        c.repliedCount,
-        c.initiatedCount,
-        c.starredCount,
-        c.importantCount,
-        c.firstSeen ?? null,
-        c.lastSeen ?? null,
-      );
+      const up = `INSERT INTO contacts (
+           account, address, display_name, domain,
+           msgs_received, msgs_sent, read_count, replied_count, initiated_count,
+           starred_count, important_count, first_seen, last_seen
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(account, address) DO UPDATE SET
+           display_name    = COALESCE(excluded.display_name, contacts.display_name),
+           domain          = COALESCE(excluded.domain, contacts.domain),
+           msgs_received   = excluded.msgs_received,
+           msgs_sent       = excluded.msgs_sent,
+           read_count      = excluded.read_count,
+           replied_count   = excluded.replied_count,
+           initiated_count = excluded.initiated_count,
+           starred_count   = excluded.starred_count,
+           important_count = excluded.important_count,
+           first_seen      = excluded.first_seen,
+           last_seen       = excluded.last_seen`;
+      for (const c of contacts) {
+        yield { sql: up, params: [
+          account,
+          c.address,
+          c.displayName ?? null,
+          c.domain ?? null,
+          c.msgsReceived,
+          c.msgsSent,
+          c.readCount,
+          c.repliedCount,
+          c.initiatedCount,
+          c.starredCount,
+          c.importantCount,
+          c.firstSeen ?? null,
+          c.lastSeen ?? null,
+        ] };
+      }
     }
+    await this.#writeBatches(writes());
   }
 
   async #replaceDomains(account: string, domains: readonly DomainAggregate[]): Promise<void> {
@@ -1668,22 +1682,23 @@ export class Repo {
     const existing = await this.#prepare(
       `SELECT domain FROM domains WHERE account = ?`,
     ).all(account) as { domain: string }[];
-    const del = this.#prepare(`DELETE FROM domains WHERE account = ? AND domain = ?`);
-    for (const row of existing) {
-      if (!keep.has(row.domain)) await del.run(account, row.domain);
-    }
+    const del = `DELETE FROM domains WHERE account = ? AND domain = ?`;
+    function* writes(): Generator<BatchStatement> {
+      for (const row of existing) {
+        if (!keep.has(row.domain)) yield { sql: del, params: [account, row.domain] };
+      }
 
-    const up = this.#prepare(
-      `INSERT INTO domains (account, domain, msgs, distinct_contacts, registrable_domain)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(account, domain) DO UPDATE SET
-         msgs               = excluded.msgs,
-         distinct_contacts  = excluded.distinct_contacts,
-         registrable_domain = excluded.registrable_domain`,
-    );
-    for (const d of domains) {
-      await up.run(account, d.domain, d.msgs, d.distinctContacts, d.registrableDomain ?? null);
+      const up = `INSERT INTO domains (account, domain, msgs, distinct_contacts, registrable_domain)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(account, domain) DO UPDATE SET
+           msgs               = excluded.msgs,
+           distinct_contacts  = excluded.distinct_contacts,
+           registrable_domain = excluded.registrable_domain`;
+      for (const d of domains) {
+        yield { sql: up, params: [account, d.domain, d.msgs, d.distinctContacts, d.registrableDomain ?? null] };
+      }
     }
+    await this.#writeBatches(writes());
   }
 
   async #replaceThreads(account: string, threads: readonly ThreadAggregate[]): Promise<void> {
@@ -1695,38 +1710,39 @@ export class Repo {
     const existing = await this.#prepare(
       `SELECT thread_id FROM threads WHERE account = ?`,
     ).all(account) as { thread_id: string }[];
-    const del = this.#prepare(`DELETE FROM threads WHERE account = ? AND thread_id = ?`);
-    for (const row of existing) {
-      if (!keep.has(row.thread_id)) await del.run(account, row.thread_id);
-    }
+    const del = `DELETE FROM threads WHERE account = ? AND thread_id = ?`;
+    function* writes(): Generator<BatchStatement> {
+      for (const row of existing) {
+        if (!keep.has(row.thread_id)) yield { sql: del, params: [account, row.thread_id] };
+      }
 
-    const up = this.#prepare(
-      `INSERT INTO threads (
-         account, thread_id, subject, participants_json,
-         msg_count, unread_count, user_participated, first_at, last_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(account, thread_id) DO UPDATE SET
-         subject           = excluded.subject,
-         participants_json = excluded.participants_json,
-         msg_count         = excluded.msg_count,
-         unread_count      = excluded.unread_count,
-         user_participated = excluded.user_participated,
-         first_at          = excluded.first_at,
-         last_at           = excluded.last_at`,
-    );
-    for (const t of threads) {
-      await up.run(
-        account,
-        t.threadId,
-        t.subject ?? null,
-        JSON.stringify(t.participants),
-        t.msgCount,
-        t.unreadCount,
-        bool(t.userParticipated),
-        t.firstAt ?? null,
-        t.lastAt ?? null,
-      );
+      const up = `INSERT INTO threads (
+           account, thread_id, subject, participants_json,
+           msg_count, unread_count, user_participated, first_at, last_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(account, thread_id) DO UPDATE SET
+           subject           = excluded.subject,
+           participants_json = excluded.participants_json,
+           msg_count         = excluded.msg_count,
+           unread_count      = excluded.unread_count,
+           user_participated = excluded.user_participated,
+           first_at          = excluded.first_at,
+           last_at           = excluded.last_at`;
+      for (const t of threads) {
+        yield { sql: up, params: [
+          account,
+          t.threadId,
+          t.subject ?? null,
+          JSON.stringify(t.participants),
+          t.msgCount,
+          t.unreadCount,
+          bool(t.userParticipated),
+          t.firstAt ?? null,
+          t.lastAt ?? null,
+        ] };
+      }
     }
+    await this.#writeBatches(writes());
   }
 
   /**
@@ -2176,11 +2192,8 @@ export class Repo {
     scored: readonly ScoredContactInput[],
     takenAt: string,
   ): Promise<void> {
-    const setScore = this.#prepare(
-      `UPDATE contacts SET engagement_score = ? WHERE account = ? AND address = ?`,
-    );
-    const snapshot = this.#prepare(
-      `INSERT INTO contact_stats_snapshot (
+    const setScore = `UPDATE contacts SET engagement_score = ? WHERE account = ? AND address = ?`;
+    const snapshot = `INSERT INTO contact_stats_snapshot (
          account, address, taken_at,
          msgs_received, read_count, replied_count, engagement_score
        )
@@ -2190,13 +2203,15 @@ export class Repo {
          msgs_received    = excluded.msgs_received,
          read_count       = excluded.read_count,
          replied_count    = excluded.replied_count,
-         engagement_score = excluded.engagement_score`,
-    );
+         engagement_score = excluded.engagement_score`;
     await this.transaction(async () => {
-      for (const s of scored) {
-        await setScore.run(s.engagementScore, account, s.address);
-        await snapshot.run(takenAt, s.engagementScore, account, s.address);
+      function* writes(): Generator<BatchStatement> {
+        for (const s of scored) {
+          yield { sql: setScore, params: [s.engagementScore, account, s.address] };
+          yield { sql: snapshot, params: [takenAt, s.engagementScore, account, s.address] };
+        }
       }
+      await this.#writeBatches(writes());
     });
   }
 

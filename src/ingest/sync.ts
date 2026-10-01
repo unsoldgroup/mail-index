@@ -40,6 +40,8 @@ export class SyncError extends Error {
 
 /** Options for {@link syncMetadata}. */
 export interface SyncOptions {
+  /** Awaited phase boundary after metadata is durable; optional for local callers. */
+  onProgress?: (progress: { phase: 'metadata' | 'aggregate' | 'interest' | 'compact'; fetched: number; indexed: number }) => void | Promise<void>;
   /** The account label this run indexes under (the index partition key). */
   account: string;
   /** The provider adapter to sweep. */
@@ -271,18 +273,22 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
     throw new SyncError(`sync failed for account "${account}": ${message}`);
   }
 
+  await options.onProgress?.({ phase: 'metadata', fetched, indexed });
+
   // Derived, INDEX-ONLY aggregation (M2.1, PLAN §4): roll the now-current
   // messages up into contacts/domains/threads. Runs after the audit row is
   // closed (lock released) since it touches only the derived tables. Idempotent
   // — safe on every sync. The probed own-address(es) keep the user out of their
   // own contact list and feed Correspondent detection on Sent mail (D11).
   if (options.aggregate !== false) {
+    await options.onProgress?.({ phase: 'aggregate', fetched, indexed });
     await aggregateAccount(repo, account, knownAddresses);
     // Interest engine (M2.2, D12): recompute every contact's engagement_score
     // from the now-current aggregates and append a per-contact snapshot. Still
     // INDEX-ONLY and idempotent; the score is a curation SEED, never a fetch
     // trigger (D13), so this never enriches. Gated on the same `aggregate` flag
     // since it consumes the aggregates this run just rebuilt.
+    await options.onProgress?.({ phase: 'interest', fetched, indexed });
     await interestPass(repo, account);
 
     // Demotion (ADR-0003): once a bulk body has a summary older than the grace
@@ -292,6 +298,7 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
     // no-op. Gated on the same aggregate flag since eligibility reads the
     // curation + thread-participation state the aggregation just rebuilt.
     if (options.compact !== false) {
+      await options.onProgress?.({ phase: 'compact', fetched, indexed });
       await compact(repo, account);
     }
   }
