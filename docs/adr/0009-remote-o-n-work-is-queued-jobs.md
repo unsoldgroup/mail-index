@@ -44,6 +44,16 @@ UNS-1554 moves all CRM publication and attachment storage out of `sync` and
 cursor-based batches of at most 200 Messages. CRM completion notifications
 come from those batches, after their events and attachments are persisted.
 
+The same ticket batches derived contact/domain/thread replacements and engagement
+score/snapshot writes through `StorageDriver.batch`, at most 50 ordered statements
+per round trip. It retains the existing aggregation, Correspondent, curation and
+compaction semantics. Sync Jobs report durable metadata counts and the next
+derived phase before awaiting that phase; an empty Job progress row no longer
+hides completed indexing behind aggregation. Each D1 chunk is atomic, while the
+local SQLite outer transaction still rolls back the complete pass on error.
+Mailbox reads and aggregation remain whole-account work; this reduces serial D1
+round trips without claiming to slice the entire sync or guarantee its runtime.
+
 This bounds the blast radius rather than removing the cause. A `sync` that runs
 for 15 minutes still dies at the wall limit and still leaves its row `running`
 until the next tick's lease reaps it — it just no longer takes the sweeps down
