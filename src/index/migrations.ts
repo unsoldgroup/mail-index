@@ -673,6 +673,36 @@ const m020_relayed_correspondent_headers: Migration = {
 };
 
 /** All migrations, in ascending version order. Append-only. */
+/** Existing grants stay unlinked: identity must be proven by their own scope. */
+const m021_staff_sent_evidence: Migration = {
+  version: 21, name: 'grant generations and single-use staff evidence challenges',
+  up: async db => {
+    await db.exec(`
+      ALTER TABLE google_tokens ADD COLUMN grant_generation INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE google_tokens ADD COLUMN locally_disabled INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE google_tokens ADD COLUMN provider_subject TEXT;
+      ALTER TABLE google_tokens ADD COLUMN effective_scopes TEXT;
+      ALTER TABLE google_tokens ADD COLUMN identity_verified_generation INTEGER;
+      CREATE TABLE staff_evidence_links (
+        client_id TEXT NOT NULL, environment TEXT NOT NULL, enrollment_handle TEXT NOT NULL,
+        enrollment_generation INTEGER NOT NULL, policy_digest TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(client_id,environment,enrollment_handle)
+      );
+      CREATE TABLE staff_evidence_challenges (
+        client_id TEXT NOT NULL, environment TEXT NOT NULL, enrollment_handle TEXT NOT NULL,
+        challenge TEXT NOT NULL, operation TEXT NOT NULL, request_digest TEXT NOT NULL,
+        account TEXT NOT NULL, enrollment_generation INTEGER NOT NULL, grant_generation INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'claimed',
+        item_id TEXT, item_version TEXT, raw_sha256 TEXT, sent_at INTEGER,
+        original_message_id TEXT NOT NULL, forward_message_id TEXT NOT NULL, observation_id TEXT NOT NULL,
+        PRIMARY KEY(client_id, environment, enrollment_handle, challenge)
+      );
+      CREATE INDEX idx_staff_evidence_expiry ON staff_evidence_challenges(expires_at);
+    `);
+  },
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   m001_initial,
   m002_thread_summary,
@@ -694,6 +724,7 @@ export const MIGRATIONS: readonly Migration[] = [
   m018_auth_health,
   m019_account_settings,
   m020_relayed_correspondent_headers,
+  m021_staff_sent_evidence,
 ];
 
 /**

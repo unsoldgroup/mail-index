@@ -2,7 +2,7 @@
   "name": "mail-index",
   "version": "1.5.1",
   "mcpName": "io.github.unsoldgroup/mail-index",
-  "description": "A local, agent-queryable mail intelligence layer — progressive mailbox index + MCP server for AI agents.",
+  "description": "A local, agent-queryable mail intelligence layer \u2014 progressive mailbox index + MCP server for AI agents.",
   "type": "module",
   "packageManager": "pnpm@10.28.2",
   "license": "MIT",
@@ -75,7 +75,8 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "graphology": "^0.26.0",
     "graphology-communities-louvain": "^2.0.2",
-    "graphology-metrics": "^2.4.0"
+    "graphology-metrics": "^2.4.0",
+    "zod": "4.4.3"
   },
   "pnpm": {
     "overrides": {
