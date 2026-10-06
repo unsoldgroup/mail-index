@@ -175,3 +175,19 @@ test('re-consent under a used label with a different mailbox is refused, not sil
     assert.deepEqual(both.results.map((r) => r.account), ['personal', 'work']);
   } finally { await mf.dispose(); }
 });
+
+test('mailbox consent requests openid and email so staff identity can be verified', async () => {
+  const mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok") } }', d1Databases: ['DB'], kvNamespaces: ['OAUTH_KV'] });
+  try {
+    const key = Buffer.alloc(32, 9).toString('base64');
+    const env = { DB: await mf.getD1Database('DB'), OAUTH_KV: await mf.getKVNamespace('OAUTH_KV'), SYNC_QUEUE: { send: async () => undefined }, SWEEP_QUEUE: { send: async () => undefined },
+      TOKEN_ENC_KEY: key, GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', OPERATOR_EMAILS: 'operator@example.com', SYNC_INTERVAL: '15m' } as never;
+    const session = await signPayload({ email: 'operator@example.com', expiresAt: Date.now() + 60_000 }, key);
+    for (const writes of ['0', '1']) {
+      const start = await handlePublicRequest(new Request(`https://worker.example/setup/google/start?account=one&writes=${writes}`, { headers: { cookie: `mail_index_operator=${session}` } }), env, {} as never);
+      assert.equal(start.status, 302);
+      const scopes = new URL(start.headers.get('location')!).searchParams.get('scope')!.split(' ');
+      assert.ok(scopes.includes('openid') && scopes.includes('email'), scopes.join(' '));
+    }
+  } finally { await mf.dispose(); }
+});
