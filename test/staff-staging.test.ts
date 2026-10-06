@@ -47,6 +47,9 @@ test('digests are identical to vectors captured from the Expedition contract', a
   assert.equal(await identityProbeRequestDigest(probeRequest), '0c097f08ae78b2d1e63c7aae498e3d600dc4d4f3e5279e73aab86a806db6bf4d');
   assert.equal(await stagingDescriptorDigest(base), 'ce702622fb96b531e5abcdf4e366842eb25c005d07071cf28c1b85467ad4a7e4');
   assert.equal(await evidencePolicyDigest(base as never), 'ccf95b15f7c4537db86279b491f52a11d3c3a9db2d7e4a182bdc322c5c438f96');
+  // EI scripts/__tests__/fixtures/staff-link-policy-vector.json (shared with convex/__tests__/staffMailboxLinkStaging.test.ts).
+  assert.equal(await evidencePolicyDigest({ clientId: 'fixture-client', environment: 'development', enrollmentHandle: 'fixture-handle', enrollmentGeneration: 3, grantGeneration: 7, account: 'fixture-account', accountSubject: 'fixture-subject', mailboxAddress: 'staff@example.test' }),
+    'f400845d708246a143a7ad0c0827c334694132cb97ee263d789b5c9b5d0fe439');
 });
 
 test('ships disabled: no candidates means no probe, no stage, no provider read, no row', async () => {
@@ -156,5 +159,30 @@ test('rotated grant generation cannot stage', async () => {
     await f.driver.prepare('UPDATE google_tokens SET grant_generation=8').run();
     await assert.rejects(() => f.provision(staging('stage', op(1))));
     assert.equal((await f.rows('staff_staging_operations')).length, 0);
+  } finally { await f.mf.dispose(); }
+});
+
+test('a failed CAS leaves the grant identity untouched', async () => {
+  const f = await fixture(); try {
+    await f.driver.prepare(`INSERT INTO staff_evidence_links(client_id,environment,enrollment_handle,enrollment_generation,policy_digest,enabled,updated_at) VALUES(?,?,?,5,?,0,0)`).run(base.clientId, base.environment, base.enrollmentHandle, 'c'.repeat(64));
+    await assert.rejects(() => f.provision(staging('stage', op(1))));
+    const grant = (await f.rows('google_tokens'))[0];
+    assert.equal(grant.provider_subject, null); assert.equal(grant.identity_verified_generation, null);
+    assert.equal((await f.rows('staff_staging_operations')).length, 0);
+  } finally { await f.mf.dispose(); }
+});
+
+test('revoked link rows are distinguishable, can never be enabled, and remain a valid CAS prior', async () => {
+  const f = await fixture(); try {
+    const first = await f.provision(staging('stage', op(1)));
+    assert.equal((await f.rows('staff_evidence_links'))[0].revoked_at, null);
+    await f.provision(staging('revoke', op(1)), []);
+    const link = (await f.rows('staff_evidence_links'))[0];
+    assert.equal(link.revoked_at, now); assert.equal(link.enabled, 0);
+    await assert.rejects(() => f.driver.prepare('UPDATE staff_evidence_links SET enabled=1').run(), /CHECK constraint/);
+    const next = { ...base, enrollmentGeneration: 2, priorLocalGeneration: 1, priorRemoteGeneration: 1, priorRemoteDigest: first.policyDigest };
+    assert.equal((await f.provision(staging('stage', op(2), next))).state, 'staged');
+    const staged = (await f.rows('staff_evidence_links'))[0];
+    assert.equal(staged.enrollment_generation, 2); assert.equal(staged.revoked_at, null); assert.equal(staged.enabled, 0);
   } finally { await f.mf.dispose(); }
 });

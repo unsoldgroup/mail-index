@@ -32,7 +32,7 @@ export async function completeEvidence(driver: D1Driver, link: EvidenceLink, req
   const result = await driver.prepare(`UPDATE staff_evidence_challenges SET state='complete',item_id=?,item_version=?,raw_sha256=?,sent_at=?
     WHERE client_id=? AND environment=? AND enrollment_handle=? AND challenge=? AND request_digest=? AND state='claimed'
     AND EXISTS(SELECT 1 FROM google_tokens WHERE account=? AND grant_generation=? AND locally_disabled=0 AND auth_error IS NULL)
-    AND EXISTS(SELECT 1 FROM staff_evidence_links WHERE client_id=? AND environment=? AND enrollment_handle=? AND enrollment_generation=? AND policy_digest=? AND enabled=1)`)
+    AND EXISTS(SELECT 1 FROM staff_evidence_links WHERE client_id=? AND environment=? AND enrollment_handle=? AND enrollment_generation=? AND policy_digest=? AND enabled=1 AND revoked_at IS NULL)`)
     .run(item.id, item.version, hash, item.sentAt, link.clientId, request.environment, request.enrollmentHandle, request.challenge, digest, link.account, request.expectedGrantGeneration, link.clientId, link.environment, link.enrollmentHandle, link.enrollmentGeneration, await evidencePolicyDigest(link));
   if (result.changes !== 1) throw new EvidenceFailure('grant_revoked');
 }
@@ -41,7 +41,7 @@ export async function completeEvidence(driver: D1Driver, link: EvidenceLink, req
  * old Worker isolates cannot recreate it or adopt a different generation. */
 export async function assertEvidenceLink(driver: D1Driver, link: EvidenceLink) {
   const row = await driver.prepare(`SELECT 1 AS valid FROM staff_evidence_links WHERE client_id=? AND environment=?
-    AND enrollment_handle=? AND enrollment_generation=? AND policy_digest=? AND enabled=1`)
+    AND enrollment_handle=? AND enrollment_generation=? AND policy_digest=? AND enabled=1 AND revoked_at IS NULL`)
     .get(link.clientId, link.environment, link.enrollmentHandle, link.enrollmentGeneration, await evidencePolicyDigest(link));
   if (!row) throw new EvidenceFailure('grant_revoked');
 }

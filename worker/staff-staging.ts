@@ -93,10 +93,6 @@ export async function provisionStaffLink(env: Env, props: unknown, input: unknow
       const identity = await observeIdentity(env, driver, d.account, r.expiresAt, options);
       if (identity.accountSubject !== d.accountSubject || identity.mailboxAddress !== d.mailboxAddress || identity.grantGeneration !== d.grantGeneration
         || !identityScopesSufficient(identity.scopes) || await linkIdentityDigest(d, identity) !== d.identityDigest) throw Error('Staging identity mismatch');
-      const recorded = await driver.prepare(`UPDATE google_tokens SET provider_subject=?,identity_verified_generation=grant_generation
-        WHERE account=? AND grant_generation=? AND locally_disabled=0 AND auth_error IS NULL AND (provider_subject IS NULL OR provider_subject=?)`)
-        .run(d.accountSubject, d.account, d.grantGeneration, d.accountSubject);
-      if (recorded.changes !== 1) throw Error('Staging grant changed');
       checkTime(r, now());
       result = await stageLink(driver.db, d, r.operationId, digest, now());
     }
