@@ -31,6 +31,7 @@ import {
   refreshInbox,
   getMessage,
   getMessageAttachment,
+  getAttachmentText,
   getThread,
   listContacts,
   getContact,
@@ -154,6 +155,14 @@ export const TOOLS: ToolDef[] = [
       ref: String(a['ref']),
       ...optStr(a, 'attachment'),
     }),
+  },
+  {
+    name: 'get_attachment_text',
+    description:
+      'Extract the text layer from a message\'s PDF attachments, deterministically (no OCR, no LLM). Pass ref only — the tool lists the message\'s attachments itself and parses every application/pdf one. Returns per-attachment { filename, mimetype, text, hasText } plus a `text` field concatenating all PDF text. A scanned/image-only PDF returns hasText:false with empty text (never an error). Read-only; bytes are fetched once and never persisted.',
+    inputSchema: obj({ ref: str }, ['ref']),
+    annotations: { readOnlyHint: true },
+    run: (ctx, a) => getAttachmentText(ctx, { ref: String(a['ref']) }),
   },
   {
     name: 'get_thread',

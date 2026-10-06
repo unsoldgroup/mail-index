@@ -52,6 +52,7 @@ import type {
 } from '../index/index.js';
 import { MAX_ATTACHMENT_BYTES, type LabelChange, type MailSource } from '../source/index.js';
 import { InsufficientScopeError } from '../source/index.js';
+import { extractText, getDocumentProxy } from 'unpdf';
 import {
   applyLabelChange as applyMailboxLabelChange,
   archiveChange,
@@ -765,6 +766,92 @@ export async function getMessageAttachment(
       data: downloaded.data,
     },
   });
+}
+
+/** Arguments for `get_attachment_text`. */
+export interface GetAttachmentTextArgs {
+  ref: string;
+}
+
+/** Deterministic extracted text for one PDF attachment. */
+export interface AttachmentText {
+  filename: string;
+  mimetype: string;
+  /** Extracted text-layer content (empty for an image-only / no-text-layer PDF). */
+  text: string;
+  /** False when the PDF has no extractable text layer (scanned/image-only). */
+  hasText: boolean;
+}
+
+/**
+ * Decode standard base64 to bytes without Node's Buffer, so the same path runs
+ * on the Worker (no `Buffer`) and locally.
+ */
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+/**
+ * Deterministic text extraction from a message's PDF attachments (no LLM, no OCR
+ * — ADR-0004). Lists the message's attachments itself, fetches only the
+ * `application/pdf` ones through the bounded provider seam, and pulls their text
+ * layer with unpdf's pdf.js build. An image-only / no-text-layer PDF comes back
+ * with `hasText:false` and empty text rather than an error. Bytes are fetched on
+ * demand and never persisted, mirroring get_message_attachment.
+ */
+export async function getAttachmentText(
+  ctx: ToolContext,
+  args: GetAttachmentTextArgs,
+): Promise<WithMeta & { ref: string; attachments: AttachmentText[]; text: string }> {
+  const { account, id } = parseToolRef(args.ref);
+  if (!(await ctx.repo.getMessage(account, id))) {
+    throw new McpToolError(`message ${account}:${id} is not in the index`);
+  }
+  const accountConfig = ctx.config.accounts[account];
+  if (!accountConfig) throw new McpToolError(`unknown account "${account}"`);
+  if (!ctx.buildSource) {
+    throw new McpToolError('attachment access is not available in this server context');
+  }
+  const source = ctx.buildSource(accountConfig);
+  if (!source.listAttachments) {
+    throw new McpToolError(`${source.provider}: attachment listing is not supported`);
+  }
+  if (!source.getAttachment) {
+    throw new McpToolError(`${source.provider}: attachment download is not supported`);
+  }
+  const getAttachment = source.getAttachment.bind(source);
+  const pdfs = (await source.listAttachments(id)).filter(
+    (a) => a.mimeType.toLowerCase() === 'application/pdf',
+  );
+  const attachments: AttachmentText[] = [];
+  for (const meta of pdfs) {
+    const empty: AttachmentText = { filename: meta.filename, mimetype: meta.mimeType, text: '', hasText: false };
+    // Skip fetching bytes we would refuse to hold inline anyway.
+    if (meta.size != null && meta.size > MAX_ATTACHMENT_BYTES) {
+      attachments.push(empty);
+      continue;
+    }
+    const downloaded = await getAttachment(id, meta.id);
+    if (!downloaded || downloaded.size > MAX_ATTACHMENT_BYTES) {
+      attachments.push(empty);
+      continue;
+    }
+    let text = '';
+    try {
+      const pdf = await getDocumentProxy(base64ToBytes(downloaded.data));
+      const extracted = await extractText(pdf, { mergePages: true });
+      text = extracted.text.trim();
+    } catch {
+      // A corrupt or unparseable PDF is not an error for this tool — no text.
+      text = '';
+    }
+    attachments.push({ filename: meta.filename, mimetype: meta.mimeType, text, hasText: text.length > 0 });
+  }
+  const text = attachments.map((a) => a.text).filter((t) => t.length > 0).join('\n\n');
+  return withMeta(ctx, account, { ref: `${account}:${id}`, attachments, text });
 }
 
 /** Arguments for `archive_message`. */

@@ -55,6 +55,7 @@ const SRC_NETWORK_ALLOW = new Set([
 ]);
 const WORKER_NETWORK_ALLOW = new Set([
   'google-oauth.ts', // Google OAuth/token exchange
+  'staff-evidence-reader.ts', // reviewed disabled private SENT-evidence seam: exact Google identity/Gmail reads only
   'index.ts', // public/API route handler and injected OAuth/Gmail seams
   'oauth.ts', // OAuth provider serving entrypoint
   'import-seed-entry.ts', // one-shot local Wrangler import endpoint
