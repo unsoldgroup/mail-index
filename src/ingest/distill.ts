@@ -66,7 +66,7 @@ export function decodeQuotedPrintable(s: string): string {
   // Soft line breaks: an `=` immediately before CRLF/LF is a wrap artefact.
   const t = s.replace(/=\r?\n/g, '');
 
-  const decoder = new TextDecoder('utf-8', { fatal: false });
+  const decoder = new TextDecoder('utf-8', { fatal: false, ignoreBOM: false });
   // Match one or more consecutive =XX escapes and decode them together.
   return t.replace(/(?:=[0-9A-Fa-f]{2})+/g, (run) => {
     const bytes = new Uint8Array(run.length / 3);

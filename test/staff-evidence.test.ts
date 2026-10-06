@@ -135,3 +135,33 @@ test('link revocation during provider read cannot complete or return evidence', 
     assert.deepEqual(await f.driver.prepare('SELECT state FROM staff_evidence_challenges').all(), [{ state: 'claimed' }]);
   } finally { await f.mf.dispose(); }
 });
+
+for (const emailScope of ['email', 'https://www.googleapis.com/auth/userinfo.email']) test(`accepts exact Google email scope ${emailScope} with fresh immutable identity`, async () => {
+  const f = await fixture(); try {
+    const provider = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/token')) return Response.json({ access_token: 'fixture-access', expires_in: 3600, scope: `openid ${emailScope} ${GMAIL_READONLY}` });
+      return f.fetchImpl(input, init);
+    }) as typeof fetch;
+    const evidence = await f.read(request, [link], props, provider);
+    assert.equal(evidence.status, 'evidence');
+    assert.ok(f.calls.some(url => url.endsWith('/userinfo')));
+    assert.ok(f.calls.some(url => url.endsWith('/profile')));
+  } finally { await f.mf.dispose(); }
+});
+for (const scope of [
+  `openid https://www.googleapis.com/auth/userinfo.profile ${GMAIL_READONLY}`,
+  `https://www.googleapis.com/auth/userinfo.email ${GMAIL_READONLY}`,
+  'openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.modify',
+  `openid https://www.googleapis.com/auth/userinfo.email.attacker ${GMAIL_READONLY}`,
+]) test(`rejects insufficient or lookalike scope set ${scope}`, async () => {
+  const f = await fixture(); try {
+    const provider = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/token')) return Response.json({ access_token: 'fixture-access', expires_in: 3600, scope });
+      return f.fetchImpl(input, init);
+    }) as typeof fetch;
+    const result = await f.read(request, [link], props, provider);
+    assert.equal(result.status, 'held');
+    if (result.status === 'held') assert.equal(result.reason, 'missing_grant');
+    assert.ok(!f.calls.some(url => url.includes('/messages')));
+  } finally { await f.mf.dispose(); }
+});
