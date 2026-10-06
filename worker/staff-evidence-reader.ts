@@ -95,7 +95,9 @@ export async function readStaffSentEvidence(env: Env, props: unknown, input: unk
     const token = await accessTokenProvider(driver, link.account, env, fetchImpl)();
     const grant = await grantFence(driver, link);
     const scopes = grant.effective_scopes?.split(/\s+/).filter(Boolean) ?? [];
-    if (!['openid', 'email', GMAIL_READONLY].every(scope => scopes.includes(scope))) throw new EvidenceFailure('missing_grant');
+    // Google may return the canonical email permission URI for the OIDC email alias.
+    const hasEmailScope = scopes.includes('email') || scopes.includes('https://www.googleapis.com/auth/userinfo.email');
+    if (!scopes.includes('openid') || !hasEmailScope || !scopes.includes(GMAIL_READONLY)) throw new EvidenceFailure('missing_grant');
     const headers = { authorization: `Bearer ${token}` };
     const json = async (url: string, limit = metadataLimit) => readJson(await fetchImpl(url, { headers }), limit, abort.signal);
     const identity = z.object({ sub: z.string().min(1).max(256), email: z.string().email(), email_verified: z.literal(true) }).parse(await json('https://openidconnect.googleapis.com/v1/userinfo'));

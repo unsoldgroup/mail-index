@@ -145,7 +145,7 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
     const state = await signPayload({ auth, redirectUri, expiresAt: Date.now() + 10 * 60_000 }, env.TOKEN_ENC_KEY);
     const google = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     google.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', scope: 'openid email', state, prompt: 'select_account' }).toString();
-    return Response.redirect(google, 302);
+    return Response.redirect(google.toString(), 302);
   }
   if (url.pathname === '/oauth/google/callback') {
     if (!env.OAUTH_PROVIDER) throw new Error('Missing OAuth provider helpers');
@@ -194,7 +194,7 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
     const state = await signState({ account: '', writes: false, login: true, redirectUri, expiresAt: Date.now() + 10 * 60_000 }, env.TOKEN_ENC_KEY);
     const consent = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     consent.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', scope: 'openid email', state, prompt: 'select_account' }).toString();
-    return Response.redirect(consent, 302);
+    return Response.redirect(consent.toString(), 302);
   }
   if (url.pathname.startsWith('/setup')) {
     const email = await operatorEmail(request, env); if (!email || !allowed(email, env)) return new Response(`<h1>mail-index</h1><p><a href="/setup/login">Sign in as an operator</a> to continue.</p>`, { status: 401, headers: { 'content-type': 'text/html; charset=utf-8' } });
@@ -204,7 +204,7 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
       const state = await signState({ account, writes, redirectUri, expiresAt: Date.now() + 10 * 60_000 }, env.TOKEN_ENC_KEY);
       const consent = new URL('https://accounts.google.com/o/oauth2/v2/auth');
       consent.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', access_type: 'offline', prompt: 'consent', scope: (writes ? [GMAIL_READONLY, GMAIL_MODIFY] : [GMAIL_READONLY]).join(' '), state }).toString();
-      return Response.redirect(consent, 302);
+      return Response.redirect(consent.toString(), 302);
     }
     const { driver } = await storage(env); const accounts = await driver.prepare('SELECT account,address,scopes FROM google_tokens ORDER BY account').all() as { account: string; address: string; scopes: string }[];
     return new Response(`<h1>mail-index setup</h1><p>Operator: ${escapeHtml(email)}</p><p>Register callbacks: ${escapeHtml(`${url.origin}/oauth/google/callback`)} and ${escapeHtml(`${url.origin}/setup/google/callback`)}</p><ul>${accounts.map((a) => `<li>${escapeHtml(a.account)} — ${escapeHtml(a.address)} — ${escapeHtml(a.scopes)}</li>`).join('')}</ul>`, { headers: { 'content-type': 'text/html; charset=utf-8' } });
