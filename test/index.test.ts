@@ -279,3 +279,19 @@ test('contact + domain-category write-backs are idempotent', async () => {
   };
   assert.equal(d.category, 'travel operator');
 });
+
+test('staff evidence migration repairs partial DDL and preserves existing grant generations on replay', async () => {
+  const db = await openDb({ path: ':memory:', skipMigrations: true });
+  for (const migration of MIGRATIONS.filter(({ version }) => version <= 20)) await migration.up(db);
+  await db.exec('PRAGMA user_version = 20');
+  await db.exec('ALTER TABLE google_tokens ADD COLUMN grant_generation INTEGER NOT NULL DEFAULT 1');
+  await db.prepare('INSERT INTO google_tokens(account,address,scopes,refresh_token_ciphertext,iv,created_at,updated_at,grant_generation) VALUES(?,?,?,?,?,?,?,?)').run('fixture', 'fixture@example.test', '', new Uint8Array([1,2,3]), new Uint8Array([4,5,6]), '2026-01-01', '2026-01-01', 7);
+  await runMigrations(db);
+  const migration = MIGRATIONS.find(({ version }) => version === 21)!;
+  await migration.up(db);
+  const row = await db.prepare('SELECT grant_generation,hex(refresh_token_ciphertext) AS ciphertext,locally_disabled,provider_subject,effective_scopes,identity_verified_generation FROM google_tokens WHERE account=?').get('fixture');
+  assert.ok(row && typeof row === 'object');
+  assert.deepEqual({ ...row }, { grant_generation: 7, ciphertext: '010203', locally_disabled: 0, provider_subject: null, effective_scopes: null, identity_verified_generation: null });
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM staff_evidence_links').get() as { n: number }).n, 0);
+  assert.equal(await getUserVersion(db), SCHEMA_VERSION);
+});
