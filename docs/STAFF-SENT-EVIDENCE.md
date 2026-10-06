@@ -48,3 +48,26 @@ Source tests use synthetic accounts and Miniflare D1. Runtime verification,
 owner coordination, actual existing grant identity capability, explicit linking,
 service-binding topology and consumer end-to-end proof are separate activation
 gates. This source alone does not establish Gmail/Outlook production continuity.
+
+## Existing-grant link staging (EXP-4599, disabled)
+
+Two private entrypoints, each authorized only by service-binding props:
+`StaffIdentityProbe.probe` (`staff_identity_probe`) reads the identity behind an
+existing grant and writes nothing; `StaffLinkStaging.provision`
+(`staff_link_staging`) runs `stage`, `status` and `revoke` under one EI-minted
+`operationId`. `STAFF_LINK_STAGING_CANDIDATES` ships empty, so probe and stage
+are disabled; `status` and exact-generation `revoke` always work. Staging only
+writes a disabled link, every answer reports `enabled: false`, and a revoked
+link row carries `revoked_at` and can never be enabled (CHECK constraint).
+
+**Re-consent once per staff mailbox.** Identity checks need the OIDC subject,
+so `/setup/google/start` now requests `openid email` alongside Gmail scopes.
+Grants created before this change lack them and fail the probe. Re-run
+`/setup/google/start?account=<label>` once for each staff mailbox; this bumps
+the grant generation, so probe again afterwards.
+
+**Who enforces identity approval.** Expedition Insure enforces that an admin
+approved the exact probed identity (its `staff-identity-v1` digest, owner and
+aliases). The digest check here is consistency only: mail-index recomputes the
+digest from the identity it observes at stage time and refuses on mismatch, so
+the grant cannot have changed since the probe. It does not prove who approved.

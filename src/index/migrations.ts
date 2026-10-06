@@ -720,6 +720,15 @@ const m022_staff_staging: Migration = {
  }
 };
 
+const m023_staff_link_revocation: Migration = {
+  version: 23, name: 'distinguish revoked staff evidence links', up: async db => {
+    const columns = new Set(((await db.prepare('PRAGMA table_info(staff_evidence_links)').all()) as { name: string }[]).map(column => column.name));
+    // A revoked generation can never be enabled again, whatever path writes it.
+    // CHECK, not a trigger: the D1 migration driver splits on ';' and skips BEGIN.
+    if (!columns.has('revoked_at')) await db.exec('ALTER TABLE staff_evidence_links ADD COLUMN revoked_at INTEGER CHECK (revoked_at IS NULL OR enabled = 0);');
+  },
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   m001_initial,
   m002_thread_summary,
@@ -743,6 +752,7 @@ export const MIGRATIONS: readonly Migration[] = [
   m020_relayed_correspondent_headers,
   m021_staff_sent_evidence,
   m022_staff_staging,
+  m023_staff_link_revocation,
 ];
 
 /**

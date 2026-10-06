@@ -180,7 +180,7 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
     if (!accessToken || !refreshToken) throw new Error('Google callback returned incomplete tokens');
     const address = await verifyGoogleIdentity(fetchImpl, accessToken); const { driver } = await storage(env);
     try {
-      await saveGrant(driver, { account: state.account, address, scopes: state.writes ? [GMAIL_READONLY, GMAIL_MODIFY] : [GMAIL_READONLY], refreshToken, key: env.TOKEN_ENC_KEY });
+      await saveGrant(driver, { account: state.account, address, scopes: mailboxScopes(state.writes), refreshToken, key: env.TOKEN_ENC_KEY });
     } catch (err) {
       if (!(err instanceof AccountMismatchError)) throw err;
       return new Response(`<h1>Wrong account label</h1><p>${escapeHtml(err.message)}</p><p><a href="/setup/google/start?account=${encodeURIComponent(address.split('@')[0] ?? 'account')}">Connect ${escapeHtml(address)} under its own label</a></p>`, { status: 409, headers: { 'content-type': 'text/html; charset=utf-8' } });
@@ -203,7 +203,7 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
       const writes = url.searchParams.get('writes') === '1'; const redirectUri = `${url.origin}/setup/google/callback`;
       const state = await signState({ account, writes, redirectUri, expiresAt: Date.now() + 10 * 60_000 }, env.TOKEN_ENC_KEY);
       const consent = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-      consent.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', access_type: 'offline', prompt: 'consent', scope: (writes ? [GMAIL_READONLY, GMAIL_MODIFY] : [GMAIL_READONLY]).join(' '), state }).toString();
+      consent.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', access_type: 'offline', prompt: 'consent', scope: mailboxScopes(writes).join(' '), state }).toString();
       return Response.redirect(consent.toString(), 302);
     }
     const { driver } = await storage(env); const accounts = await driver.prepare('SELECT account,address,scopes FROM google_tokens ORDER BY account').all() as { account: string; address: string; scopes: string }[];
@@ -211,6 +211,9 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
   }
   return Response.json({ error: 'not_found' }, { status: 404 });
 }
+
+/** `openid email` lets staff identity checks read the immutable OIDC subject (EXP-4599). */
+function mailboxScopes(writes: boolean): string[] { return ['openid', 'email', GMAIL_READONLY, ...(writes ? [GMAIL_MODIFY] : [])]; }
 
 function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!); }
 
