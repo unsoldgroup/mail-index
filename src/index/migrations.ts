@@ -677,19 +677,26 @@ const m020_relayed_correspondent_headers: Migration = {
 const m021_staff_sent_evidence: Migration = {
   version: 21, name: 'grant generations and single-use staff evidence challenges',
   up: async db => {
+    // Repair replay may encounter only some columns. Probe individually; never
+    // reset an existing grant generation, ciphertext, or verified identity.
+    const columns = new Set(((await db.prepare('PRAGMA table_info(google_tokens)').all()) as { name: string }[]).map(column => column.name));
+    for (const [name, definition] of [
+      ['grant_generation', 'INTEGER NOT NULL DEFAULT 1'],
+      ['locally_disabled', 'INTEGER NOT NULL DEFAULT 0'],
+      ['provider_subject', 'TEXT'],
+      ['effective_scopes', 'TEXT'],
+      ['identity_verified_generation', 'INTEGER'],
+    ] as const) {
+      if (!columns.has(name)) await db.exec(`ALTER TABLE google_tokens ADD COLUMN ${name} ${definition};`);
+    }
     await db.exec(`
-      ALTER TABLE google_tokens ADD COLUMN grant_generation INTEGER NOT NULL DEFAULT 1;
-      ALTER TABLE google_tokens ADD COLUMN locally_disabled INTEGER NOT NULL DEFAULT 0;
-      ALTER TABLE google_tokens ADD COLUMN provider_subject TEXT;
-      ALTER TABLE google_tokens ADD COLUMN effective_scopes TEXT;
-      ALTER TABLE google_tokens ADD COLUMN identity_verified_generation INTEGER;
-      CREATE TABLE staff_evidence_links (
+      CREATE TABLE IF NOT EXISTS staff_evidence_links (
         client_id TEXT NOT NULL, environment TEXT NOT NULL, enrollment_handle TEXT NOT NULL,
         enrollment_generation INTEGER NOT NULL, policy_digest TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY(client_id,environment,enrollment_handle)
       );
-      CREATE TABLE staff_evidence_challenges (
+      CREATE TABLE IF NOT EXISTS staff_evidence_challenges (
         client_id TEXT NOT NULL, environment TEXT NOT NULL, enrollment_handle TEXT NOT NULL,
         challenge TEXT NOT NULL, operation TEXT NOT NULL, request_digest TEXT NOT NULL,
         account TEXT NOT NULL, enrollment_generation INTEGER NOT NULL, grant_generation INTEGER NOT NULL,
@@ -698,7 +705,7 @@ const m021_staff_sent_evidence: Migration = {
         original_message_id TEXT NOT NULL, forward_message_id TEXT NOT NULL, observation_id TEXT NOT NULL,
         PRIMARY KEY(client_id, environment, enrollment_handle, challenge)
       );
-      CREATE INDEX idx_staff_evidence_expiry ON staff_evidence_challenges(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_staff_evidence_expiry ON staff_evidence_challenges(expires_at);
     `);
   },
 };

@@ -122,6 +122,15 @@ and adapter seams; [`test/egress-guard.test.ts`](../test/egress-guard.test.ts)
 fails when a new primitive appears or a named seam silently moves. This makes
 egress reviewable, not harmless.
 
+`worker/staff-evidence-reader.ts` is a separately pinned private read seam for
+fresh Google SENT evidence. It ships with an empty code policy and no enabled
+durable links; public MCP/A2A routes cannot invoke it. An authorized service
+binding must match its trusted caller properties, durable enrollment and grant
+generations, one-use challenge, and immutable Google subject. Reads are limited
+to Google token/identity/Gmail endpoints and bounded original MIME; no sends,
+mailbox writes, inferred identity, or grant copying are added. See
+[STAFF-SENT-EVIDENCE.md](STAFF-SENT-EVIDENCE.md) before any activation.
+
 MCP and A2A are reachable over the network. The OAuth provider authenticates
 bearer tokens, Google sign-in is restricted to `OPERATOR_EMAILS`, and that
 single-tenant allowlist is the complete authorization model. A mistaken

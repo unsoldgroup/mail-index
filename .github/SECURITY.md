@@ -105,3 +105,13 @@ Please report security issues privately to the maintainer via
 **[unsold.group/al](https://unsold.group/al)** rather than opening a public
 issue. You'll get an acknowledgement and a fix timeline. Thanks for disclosing
 responsibly.
+
+## Optional private SENT-evidence service
+
+The optional remote Worker includes a disabled private Google SENT reader.
+Its empty code policy and durable link registry deny reads until separately
+provisioned. It exposes no public mailbox-read route and adds no send capability.
+The local index is not its evidence source. See the
+[threat model](../docs/THREAT-MODEL.md) and
+[service contract](../docs/STAFF-SENT-EVIDENCE.md) for caller, identity, grant,
+challenge and byte-bound controls; activation requires explicit operator setup.

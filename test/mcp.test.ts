@@ -844,7 +844,7 @@ test('retention exemptions match the right senders and no lookalikes', async () 
 
 test('surface: exactly the PLAN §12 tools are advertised, all with schemas, all dispatch', async () => {
   const expected = [
-    'search', 'list_labeled', 'refresh_inbox', 'get_message', 'get_message_attachment', 'get_thread', 'list_contacts',
+    'search', 'list_labeled', 'refresh_inbox', 'get_message', 'get_message_attachment', 'get_attachment_text', 'get_thread', 'list_contacts',
     'get_contact', 'find_person', 'list_threads', 'graph_neighbors', 'graph_communities',
     'interest_propose', 'interest_set', 'interest_get', 'save_summary',
     'onboarding', 'settings_get', 'settings_set', 'backfill_bodies',
@@ -970,8 +970,8 @@ test('setup mode: with config present the full tool surface is what serve() woul
   // 21 original read tools + the 2 opt-in writers (archive_message,
   // modify_labels) + 2 relay/status quick-action tools + five remote Trigger
   // rule tools + the four working-set tools (onboarding, settings_get,
-  // settings_set, backfill_bodies) + get_message_attachment.
-  assert.equal(TOOLS.length, 35, 'full surface includes the working-set and attachment tools');
+  // settings_set, backfill_bodies) + get_message_attachment + get_attachment_text.
+  assert.equal(TOOLS.length, 36, 'full surface includes the working-set and attachment tools');
 });
 
 test('setup_status reports observation and does not crash with no config', async () => {

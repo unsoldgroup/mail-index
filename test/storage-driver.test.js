@@ -163,3 +163,20 @@ test('D1 porter-FTS migration is atomic on a populated v6 database', async (t) =
     assert.equal((await fixture.driver.prepare(`SELECT count(*) n FROM messages_fts WHERE messages_fts MATCH 'refund'`).get()).n, 1);
   } finally { await fixture.dispose(); }
 });
+
+test('a stale D1 migration commit cannot regress a newer durable checkpoint', async (t) => {
+  const fixture = await d1(t); if (!fixture) return;
+  try {
+    await runMigrations(fixture.driver);
+    const stale = new D1Driver(fixture.driver.db);
+    await stale.beginMigration();
+    await stale.exec('CREATE TABLE IF NOT EXISTS stale_migration_probe (id INTEGER PRIMARY KEY)');
+    await stale.exec(`PRAGMA user_version = ${SCHEMA_VERSION - 1}`);
+    await stale.commitMigration();
+    assert.equal(await getUserVersion(new D1Driver(fixture.driver.db)), SCHEMA_VERSION);
+    await stale.beginMigration();
+    await stale.exec('INSERT INTO definitely_missing_migration_table VALUES (1)');
+    await assert.rejects(() => stale.commitMigration());
+    assert.equal(await getUserVersion(new D1Driver(fixture.driver.db)), SCHEMA_VERSION);
+  } finally { await fixture.dispose(); }
+});

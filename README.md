@@ -236,6 +236,8 @@ Writes are off by default. Enable archive + label edits for an account with
   single-tenant remote Worker to your own Cloudflare account: D1 / Queue / KV
   resources, secrets, the operator allowlist, connecting an agent, and a
   verification checklist.
+- **[docs/STAFF-SENT-EVIDENCE.md](docs/STAFF-SENT-EVIDENCE.md)** — disabled private
+  fresh SENT-evidence service, caller/grant fences, and activation prerequisites.
 - **[docs/WORKER-SEED.md](docs/WORKER-SEED.md)** — seed a fresh Deployment's D1
   from an existing local index (`mail-index export` → import), instead of
   re-syncing the whole mailbox from Gmail.

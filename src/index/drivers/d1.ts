@@ -118,9 +118,12 @@ export class D1Driver implements StorageDriver {
     const version = VERSION_WRITE.exec(sql)?.[1];
     if (version !== undefined) {
       await this.#ensureVersionTable();
+      // Concurrent migration runners may finish older batches after a newer
+      // checkpoint. Migration publication is monotonic; explicit version writes
+      // outside a migration retain their existing repair/fixture semantics.
       const statement = this.db.prepare(
           `INSERT INTO schema_version(singleton, version) VALUES (1, ?)
-           ON CONFLICT(singleton) DO UPDATE SET version = excluded.version`,
+           ON CONFLICT(singleton) DO UPDATE SET version = ${this.#transaction ? "MAX(schema_version.version, excluded.version)" : "excluded.version"}`,
         ).bind(Number(version));
       if (this.#transaction) { this.#transaction.push(statement); this.#pendingVersion = Number(version); }
       else await statement.run();
