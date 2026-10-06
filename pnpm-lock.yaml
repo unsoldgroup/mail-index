@@ -29,6 +29,9 @@ importers:
       graphology-metrics:
         specifier: ^2.4.0
         version: 2.4.0(graphology-types@0.24.8)
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^5.20260719.1

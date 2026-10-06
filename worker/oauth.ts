@@ -30,3 +30,6 @@ export default {
   },
   queue: internalWorker.queue,
 };
+
+// Named RPC only. Existing OAuth/public HTTP routes cannot access this capability.
+export { StaffSentEvidence } from './staff-evidence-entrypoint.js';
