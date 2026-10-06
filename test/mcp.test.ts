@@ -632,6 +632,58 @@ test('sync_now: starts detached sync through the existing background sync hook',
   assert.equal(res.command, handback('sync', '--all-accounts'));
 });
 
+for (const [label, ageMs, expected] of [
+  ['fresh', 5 * 60_000, { since: '2d' }],
+  ['stale', 49 * 3_600_000, { since: '4d' }],
+  ['initial', null, {}],
+]) {
+  test(`sync_now: remote ${label} account uses incremental overlap or initial sweep`, async () => {
+    const repo = await freshRepo();
+    if (ageMs != null) await recordSync(repo, new Date(T - ageMs).toISOString());
+    const calls = [];
+    const result = await syncNow(ctxFor(repo, {
+      enqueueJob: async (kind, account, params) => {
+        calls.push({ kind, account, params });
+        return 'job-sync';
+      },
+    }), { account: ACCOUNT });
+    assert.equal(result.started, true);
+    assert.deepEqual(result.started_accounts, [ACCOUNT]);
+    assert.ok(calls.length > 0);
+    for (const call of calls) assert.deepEqual(call, { kind: 'sync', account: ACCOUNT, params: expected });
+  });
+}
+
+test('sync_now: remote accounts use their own successful watermark', async () => {
+  const repo = await freshRepo();
+  await recordSync(repo, new Date(T - 5 * 60_000).toISOString());
+  const second = 'acct-b';
+  const run = await repo.startSyncRun({ account: second, phase: 'sync' });
+  await repo.driver.prepare('UPDATE sync_runs SET finished_at = ? WHERE id = ?')
+    .run(new Date(T - 49 * 3_600_000).toISOString(), run);
+  const calls = [];
+  await syncNow(ctxFor(repo, {
+    enqueueJob: async (kind, account, params) => { calls.push({ account, params }); return 'job-sync'; },
+  }), {});
+  assert.deepEqual(calls, [
+    { account: ACCOUNT, params: { since: '2d' } },
+    { account: second, params: { since: '4d' } },
+  ]);
+});
+
+for (const reason of ['busy', 'invalid_grant']) {
+  test(`sync_now: remote ${reason} account never queues work`, async () => {
+    const repo = await freshRepo();
+    if (reason === 'busy') await repo.startSyncRun({ account: ACCOUNT, phase: 'sync' });
+    else await recordGrant(repo, 'invalid_grant');
+    const result = await syncNow(ctxFor(repo, {
+      enqueueJob: async () => { assert.fail('blocked account must not queue'); },
+    }), { account: ACCOUNT });
+    assert.equal(result.started, false);
+    assert.deepEqual(result.skipped_accounts, [ACCOUNT]);
+  });
+}
+
 test('catch_up: STALE index returns data + sync_started + eta + handback, spawns detached sync (ADR-0005)', async () => {
   const repo = await freshRepo();
   await seedMailbox(repo);
