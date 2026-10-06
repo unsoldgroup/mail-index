@@ -76,7 +76,8 @@
     "graphology": "^0.26.0",
     "graphology-communities-louvain": "^2.0.2",
     "graphology-metrics": "^2.4.0",
-    "unpdf": "^1.8.1"
+    "unpdf": "^1.8.1",
+    "zod": "4.4.3"
   },
   "pnpm": {
     "overrides": {

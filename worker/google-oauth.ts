@@ -67,16 +67,36 @@ export async function verifyPayload<T>(value: string, encodedKey: string): Promi
   return state;
 }
 
+class GoogleTokenExchangeError extends Error {
+  constructor(readonly status: number, readonly code: string) { super(`Google token exchange failed: ${code}`); }
+}
 export async function exchangeToken(fetchImpl: typeof fetch, params: Record<string, string>): Promise<Record<string, unknown>> {
   const response = await fetchImpl('https://oauth2.googleapis.com/token', {
     method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(params),
   });
   const payload = await response.json() as { error?: string; error_description?: string };
-  if (!response.ok) throw new Error(`Google token exchange failed: ${payload.error ?? response.status}`);
+  if (!response.ok) throw new GoogleTokenExchangeError(response.status, payload.error ?? String(response.status));
   return payload as Record<string, unknown>;
 }
 
-const accessCache = new Map<string, { token: string; expiresAt: number }>();
+// Per database, account, client and generation; never shared across independent DBs.
+const accessCaches = new WeakMap<object, Map<string, { token: string; expiresAt: number; generation: number }>>();
+function accessCache(driver: D1Driver) {
+  let cache = accessCaches.get(driver.db);
+  if (!cache) { cache = new Map(); accessCaches.set(driver.db, cache); }
+  return cache;
+}
+export interface GoogleGrant {
+  address: string; scopes: string; effective_scopes: string | null; provider_subject: string | null;
+  identity_verified_generation: number | null; grant_generation: number; locally_disabled: number;
+  auth_error: string | null; refresh_token_ciphertext: ArrayBuffer; iv: ArrayBuffer;
+}
+/** Direct D1 binding (not Sessions API) routes all reads to primary. Never pass
+ * a replica session here: revocation must see current durable grant state.
+ * https://developers.cloudflare.com/d1/best-practices/read-replication/ */
+export async function readGoogleGrant(driver: D1Driver, account: string): Promise<GoogleGrant | undefined> {
+  return await driver.prepare('SELECT * FROM google_tokens WHERE account=?').get(account) as GoogleGrant | undefined;
+}
 
 /** A consent that would repoint an existing Account label at a different mailbox. */
 export class AccountMismatchError extends Error {
@@ -105,9 +125,11 @@ export async function saveGrant(driver: D1Driver, input: { account: string; addr
   const now = new Date().toISOString();
   await driver.prepare(`INSERT INTO google_tokens(account,address,scopes,refresh_token_ciphertext,iv,created_at,updated_at)
     VALUES(?,?,?,?,?,?,?) ON CONFLICT(account) DO UPDATE SET address=excluded.address,scopes=excluded.scopes,
-    refresh_token_ciphertext=excluded.refresh_token_ciphertext,iv=excluded.iv,updated_at=excluded.updated_at`)
+    refresh_token_ciphertext=excluded.refresh_token_ciphertext,iv=excluded.iv,updated_at=excluded.updated_at,
+    grant_generation=google_tokens.grant_generation+1,locally_disabled=0,auth_error=NULL,auth_failed_at=NULL,
+    provider_subject=NULL,effective_scopes=NULL,identity_verified_generation=NULL`)
     .run(input.account, input.address, input.scopes.join(' '), new Uint8Array(encrypted.ciphertext), encrypted.iv, now, now);
-  accessCache.delete(input.account);
+  accessCache(driver).clear();
 }
 
 /**
@@ -119,9 +141,12 @@ export async function saveGrant(driver: D1Driver, input: { account: string; addr
 export const INVALID_GRANT = 'invalid_grant';
 
 /** Record the Account as needing re-consent. Terminal states only — see {@link INVALID_GRANT}. */
-export async function markAuthFailed(driver: D1Driver, account: string, error: string): Promise<void> {
-  await driver.prepare('UPDATE google_tokens SET auth_error=?,auth_failed_at=? WHERE account=?')
-    .run(error, new Date().toISOString(), account);
+export async function markAuthFailed(driver: D1Driver, account: string, error: string, expectedGeneration?: number): Promise<void> {
+  await driver.prepare(`UPDATE google_tokens SET auth_error=?,auth_failed_at=?,
+    grant_generation=grant_generation+1,locally_disabled=1,provider_subject=NULL,identity_verified_generation=NULL
+    WHERE account=? AND locally_disabled=0 AND (? IS NULL OR grant_generation=?)`)
+    .run(error, new Date().toISOString(), account, expectedGeneration ?? null, expectedGeneration ?? null);
+  accessCache(driver).clear();
 }
 
 /** Clear a previously recorded auth failure. No-op when the Account is already healthy. */
@@ -132,10 +157,12 @@ export async function clearAuthFailure(driver: D1Driver, account: string): Promi
 
 export function accessTokenProvider(driver: D1Driver, account: string, env: { TOKEN_ENC_KEY: string; GOOGLE_CLIENT_ID: string; GOOGLE_CLIENT_SECRET: string }, fetchImpl: typeof fetch): () => Promise<string> {
   return async () => {
-    const cached = accessCache.get(account);
-    if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
-    const row = await driver.prepare('SELECT refresh_token_ciphertext,iv FROM google_tokens WHERE account=?').get(account) as { refresh_token_ciphertext: ArrayBuffer; iv: ArrayBuffer } | undefined;
-    if (!row) throw new Error(`No Google grant for Account "${account}"`);
+    const row = await readGoogleGrant(driver, account);
+    if (!row || row.locally_disabled || row.auth_error) throw new Error('Google grant unavailable');
+    const cache = accessCache(driver); const cacheKey = `${account}\n${env.GOOGLE_CLIENT_ID}`;
+    const cached = cache.get(cacheKey);
+    if (cached && cached.generation === row.grant_generation && cached.expiresAt > Date.now() + 60_000) return cached.token;
+
     const refreshToken = await decryptRefreshToken(row.refresh_token_ciphertext, row.iv, env.TOKEN_ENC_KEY);
     let token: Record<string, unknown>;
     try {
@@ -143,13 +170,17 @@ export function accessTokenProvider(driver: D1Driver, account: string, env: { TO
     } catch (error) {
       // A dead grant is durable state, not a transient job failure: record it so
       // the scheduler stops sweeping this Account and every read can say why.
-      if (error instanceof Error && error.message.includes(INVALID_GRANT)) await markAuthFailed(driver, account, INVALID_GRANT);
+      if (error instanceof GoogleTokenExchangeError && error.status === 400 && error.code === INVALID_GRANT) await markAuthFailed(driver, account, INVALID_GRANT, row.grant_generation);
       throw error;
     }
     const access = String(token['access_token'] ?? '');
     if (!access) throw new Error('Google token exchange returned no access token');
-    await clearAuthFailure(driver, account);
-    accessCache.set(account, { token: access, expiresAt: Date.now() + Number(token['expires_in'] ?? 3600) * 1000 });
+    const latest = await readGoogleGrant(driver, account);
+    if (!latest || latest.grant_generation !== row.grant_generation || latest.locally_disabled || latest.auth_error) throw new Error('Google grant changed during refresh');
+    if (typeof token['scope'] === 'string') await driver.prepare('UPDATE google_tokens SET effective_scopes=? WHERE account=? AND grant_generation=? AND locally_disabled=0').run(token['scope'], account, row.grant_generation);
+    const finalGrant = await readGoogleGrant(driver, account);
+    if (!finalGrant || finalGrant.grant_generation !== row.grant_generation || finalGrant.locally_disabled || finalGrant.auth_error) throw new Error('Google grant changed during refresh');
+    cache.set(cacheKey, { token: access, generation: row.grant_generation, expiresAt: Date.now() + Number(token['expires_in'] ?? 3600) * 1000 });
     return access;
   };
 }

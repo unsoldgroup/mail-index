@@ -32,6 +32,9 @@ importers:
       unpdf:
         specifier: ^1.8.1
         version: 1.8.1
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^5.20260719.1
