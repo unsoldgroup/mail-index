@@ -1664,7 +1664,15 @@ export async function syncNow(ctx: ToolContext, args: SyncNowArgs): Promise<With
     // The remote Deployment has no local process to spawn — it queues a Job.
     // Without this branch `sync_now` was inert on the Worker: it always answered
     // `started: false` and handed back a CLI command the caller cannot run.
-    if (ctx.enqueueJob) { await ctx.enqueueJob('sync', account, {}); started.push(account); }
+    if (ctx.enqueueJob) {
+      // Match automatic refresh: overlap the successful watermark by one day;
+      // only a never-synced account needs an initial unrestricted sweep.
+      const asOf = await indexAsOf(ctx.repo, account);
+      const ageMs = asOf == null ? null : (ctx.now?.() ?? new Date()).getTime() - new Date(asOf).getTime();
+      const since = asOf == null ? undefined : `${Math.ceil(ageMs! / 86_400_000) + 1}d`;
+      await ctx.enqueueJob('sync', account, since ? { since } : {});
+      started.push(account);
+    }
     else if (ctx.backgroundSync?.(account)) started.push(account);
     else skipped.push(account);
   }
