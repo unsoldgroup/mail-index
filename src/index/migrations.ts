@@ -710,6 +710,16 @@ const m021_staff_sent_evidence: Migration = {
   },
 };
 
+const m022_staff_staging: Migration = {
+ version:22,name:'disabled staff link staging journal',up:async db=>{
+  await db.exec(`CREATE TABLE IF NOT EXISTS staff_staging_operations (
+   client_id TEXT NOT NULL,environment TEXT NOT NULL,operation_id TEXT NOT NULL,
+   enrollment_handle TEXT NOT NULL,descriptor_digest TEXT NOT NULL,state TEXT NOT NULL,
+   created_at INTEGER NOT NULL,PRIMARY KEY(client_id,environment,operation_id)
+  );`);
+ }
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   m001_initial,
   m002_thread_summary,
@@ -732,6 +742,7 @@ export const MIGRATIONS: readonly Migration[] = [
   m019_account_settings,
   m020_relayed_correspondent_headers,
   m021_staff_sent_evidence,
+  m022_staff_staging,
 ];
 
 /**
