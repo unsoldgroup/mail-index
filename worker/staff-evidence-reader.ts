@@ -12,7 +12,7 @@ const rawItem = z.object({ id: z.string().min(1).max(256), historyId: z.string()
 const metadataLimit = 64 * 1024;
 
 /** All fetch/body reads share one deadline. Cancel is best-effort, never awaited. */
-function boundedFetch(fetchImpl: typeof fetch, signal: AbortSignal): typeof fetch {
+export function boundedFetch(fetchImpl: typeof fetch, signal: AbortSignal): typeof fetch {
   return async (input, init) => {
     signal.throwIfAborted();
     const response = await fetchImpl(input, { ...init, signal, redirect: 'error' });
@@ -26,7 +26,7 @@ function boundedFetch(fetchImpl: typeof fetch, signal: AbortSignal): typeof fetc
     return response;
   };
 }
-async function readJson(response: Response, limit: number, signal: AbortSignal): Promise<unknown> {
+export async function readJson(response: Response, limit: number, signal: AbortSignal): Promise<unknown> {
   if (!response.ok) {
     void response.body?.cancel().catch(() => undefined);
     throw new EvidenceFailure(response.status === 401 || response.status === 403 ? 'grant_revoked' : 'provider_unavailable');
@@ -58,7 +58,7 @@ function decodeRaw(value: string) {
 function checkTime(request: StaffServiceRequest, now: number) {
   if (request.issuedAt > now + 5000 || request.expiresAt <= now || now - request.issuedAt > 65_000) throw new EvidenceFailure('evidence_expired');
 }
-async function grantFence(driver: D1Driver, link: EvidenceLink) {
+export async function grantFence(driver: D1Driver, link: Pick<EvidenceLink, 'account' | 'grantGeneration' | 'mailboxAddress'>) {
   const grant = await readGoogleGrant(driver, link.account);
   if (!grant || grant.locally_disabled || grant.auth_error || grant.grant_generation !== link.grantGeneration) throw new EvidenceFailure('grant_revoked');
   if (grant.address.toLowerCase() !== link.mailboxAddress.toLowerCase()) throw new EvidenceFailure('account_mismatch');
