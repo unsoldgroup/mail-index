@@ -618,3 +618,39 @@ test('crm_backfill publishes already-indexed Messages and chains until drained',
     assert.equal(sent.length, 0);
   } finally { await mf.dispose(); }
 });
+
+
+test('Worker queue sync recovers a dead 21-minute lock without changing audit rows, other accounts or local locks', async () => {
+  const { mf, env, driver } = await fixture();
+  try {
+    const localRepo = new Repo(driver);
+    await localRepo.setAccountSettings('acct-a', { backfill_cursor: '2024-08-17' });
+    const dead = await localRepo.startSyncRun({ account: 'acct-a', phase: 'sync' });
+    const other = await localRepo.startSyncRun({ account: 'acct-b', phase: 'sync' });
+    await driver.prepare('UPDATE sync_runs SET started_at=? WHERE id=?').run(new Date(Date.now() - 21 * 60_000).toISOString(), dead);
+    assert.equal(await localRepo.activeSyncRun('acct-a'), dead, 'local callers keep the six-hour lock');
+    const jobId = await enqueueJob(env, 'sync', 'acct-a', {});
+    assert.equal(await enqueueJob(env, 'sync', 'acct-a', {}), jobId, 'pending jobs still deduplicate');
+    await runJob(env, { jobId, kind: 'sync', account: 'acct-a', params: {} }, gmailFetch);
+    const job = await driver.prepare('SELECT status FROM jobs WHERE id=?').get(jobId) as { status: string };
+    assert.equal(job.status, 'done');
+    const audits = await driver.prepare('SELECT id,finished_at FROM sync_runs WHERE id IN (?,?) ORDER BY id').all(dead, other) as { id: number; finished_at: string | null }[];
+    assert.deepEqual(audits, [{ id: dead, finished_at: null }, { id: other, finished_at: null }], 'no audit deletion or manual reset');
+    assert.equal((await localRepo.getAccountSettings('acct-a')).backfill_cursor, '2024-08-17', 'recovery does not advance historical cursor');
+  } finally { await mf.dispose(); }
+});
+
+test('Worker queue sync retains an 18-minute lock and performs no provider read or cursor write', async () => {
+  const { mf, env, driver } = await fixture();
+  try {
+    const repo = new Repo(driver);
+    await repo.setAccountSettings('acct-a', { backfill_cursor: '2024-08-17' });
+    const active = await repo.startSyncRun({ account: 'acct-a', phase: 'sync' });
+    await driver.prepare('UPDATE sync_runs SET started_at=? WHERE id=?').run(new Date(Date.now() - 18 * 60_000).toISOString(), active);
+    const jobId = await enqueueJob(env, 'sync', 'acct-a', {});
+    let calls = 0;
+    await assert.rejects(() => runJob(env, { jobId, kind: 'sync', account: 'acct-a', params: {} }, (async () => { calls++; throw Error('unexpected provider call'); }) as typeof fetch), /already in progress/);
+    assert.equal(calls, 0);
+    assert.equal((await repo.getAccountSettings('acct-a')).backfill_cursor, '2024-08-17');
+  } finally { await mf.dispose(); }
+});
