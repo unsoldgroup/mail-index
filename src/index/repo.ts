@@ -482,14 +482,18 @@ export interface AccountIdentityRow {
 
 export class Repo {
   readonly driver: StorageDriver;
+  readonly syncLockMaxAgeMs: number;
 
   // Prepared statements are cached lazily; node:sqlite caches the parse, and
   // reusing them keeps the hot sync loop tight.
   #stmt = new Map<string, PreparedStatement>();
   #transactionDepth = 0;
 
-  constructor(driver: StorageDriver) {
+  constructor(driver: StorageDriver, options: { syncLockMaxAgeMs?: number } = {}) {
     this.driver = driver;
+    const age = options.syncLockMaxAgeMs ?? STALE_LOCK_MS;
+    if (!Number.isSafeInteger(age) || age <= 0) throw new IndexError('invalid sync lock age');
+    this.syncLockMaxAgeMs = age;
   }
 
   #prepare(sql: string): PreparedStatement {
@@ -1164,7 +1168,7 @@ export class Repo {
   /** Atomically acquire the per-Account sync lock across SQLite connections and D1 isolates. */
   async acquireSyncRun(input: SyncRunStart): Promise<number | undefined> {
     if (!SYNC_PHASES.includes(input.phase)) throw new IndexError(`invalid sync phase: ${String(input.phase)}`);
-    const cutoff = new Date(Date.now() - STALE_LOCK_MS).toISOString();
+    const cutoff = new Date(Date.now() - this.syncLockMaxAgeMs).toISOString();
     const row = await this.#prepare(
       `INSERT INTO sync_runs (account, phase, selector, started_at)
        SELECT ?, ?, ?, ?
@@ -1192,7 +1196,7 @@ export class Repo {
    * is never mistaken for dead.
    */
   async activeSyncRun(account: string, exceptId?: number): Promise<number | undefined> {
-    const cutoff = new Date(Date.now() - STALE_LOCK_MS).toISOString();
+    const cutoff = new Date(Date.now() - this.syncLockMaxAgeMs).toISOString();
     const row = await this.#prepare(
       `SELECT id FROM sync_runs
         WHERE account = ? AND finished_at IS NULL AND id != ? AND started_at > ?

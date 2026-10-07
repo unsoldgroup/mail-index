@@ -1,7 +1,7 @@
 import type { AuthRequest, OAuthHelpers } from '@cloudflare/workers-oauth-provider';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { D1Driver, type D1DatabaseBinding } from '../src/index/drivers/d1.js';
-import { Repo } from '../src/index/repo.js';
+import { workerRepository } from './repository.js';
 import { getUserVersion, runMigrations } from '../src/index/migrations.js';
 import { SCHEMA_VERSION } from '../src/index/schema.js';
 import { buildServer } from '../src/mcp/server.js';
@@ -54,7 +54,7 @@ function assertBindings(env: Partial<Env>): asserts env is Env {
   }
 }
 
-async function storage(env: Env) { const driver = new D1Driver(env.DB); await runMigrations(driver); return { driver, repo: new Repo(driver) }; }
+async function storage(env: Env) { const driver = new D1Driver(env.DB); await runMigrations(driver); return { driver, repo: workerRepository(driver) }; }
 
 /**
  * Serve one MCP request STATELESSLY (SDK "stateless mode", the documented
@@ -145,7 +145,7 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
     const state = await signPayload({ auth, redirectUri, expiresAt: Date.now() + 10 * 60_000 }, env.TOKEN_ENC_KEY);
     const google = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     google.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', scope: 'openid email', state, prompt: 'select_account' }).toString();
-    return Response.redirect(google, 302);
+    return Response.redirect(google.toString(), 302);
   }
   if (url.pathname === '/oauth/google/callback') {
     if (!env.OAUTH_PROVIDER) throw new Error('Missing OAuth provider helpers');
@@ -180,7 +180,7 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
     if (!accessToken || !refreshToken) throw new Error('Google callback returned incomplete tokens');
     const address = await verifyGoogleIdentity(fetchImpl, accessToken); const { driver } = await storage(env);
     try {
-      await saveGrant(driver, { account: state.account, address, scopes: state.writes ? [GMAIL_READONLY, GMAIL_MODIFY] : [GMAIL_READONLY], refreshToken, key: env.TOKEN_ENC_KEY });
+      await saveGrant(driver, { account: state.account, address, scopes: mailboxScopes(state.writes), refreshToken, key: env.TOKEN_ENC_KEY });
     } catch (err) {
       if (!(err instanceof AccountMismatchError)) throw err;
       return new Response(`<h1>Wrong account label</h1><p>${escapeHtml(err.message)}</p><p><a href="/setup/google/start?account=${encodeURIComponent(address.split('@')[0] ?? 'account')}">Connect ${escapeHtml(address)} under its own label</a></p>`, { status: 409, headers: { 'content-type': 'text/html; charset=utf-8' } });
@@ -194,7 +194,7 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
     const state = await signState({ account: '', writes: false, login: true, redirectUri, expiresAt: Date.now() + 10 * 60_000 }, env.TOKEN_ENC_KEY);
     const consent = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     consent.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', scope: 'openid email', state, prompt: 'select_account' }).toString();
-    return Response.redirect(consent, 302);
+    return Response.redirect(consent.toString(), 302);
   }
   if (url.pathname.startsWith('/setup')) {
     const email = await operatorEmail(request, env); if (!email || !allowed(email, env)) return new Response(`<h1>mail-index</h1><p><a href="/setup/login">Sign in as an operator</a> to continue.</p>`, { status: 401, headers: { 'content-type': 'text/html; charset=utf-8' } });
@@ -203,14 +203,17 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
       const writes = url.searchParams.get('writes') === '1'; const redirectUri = `${url.origin}/setup/google/callback`;
       const state = await signState({ account, writes, redirectUri, expiresAt: Date.now() + 10 * 60_000 }, env.TOKEN_ENC_KEY);
       const consent = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-      consent.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', access_type: 'offline', prompt: 'consent', scope: (writes ? [GMAIL_READONLY, GMAIL_MODIFY] : [GMAIL_READONLY]).join(' '), state }).toString();
-      return Response.redirect(consent, 302);
+      consent.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', access_type: 'offline', prompt: 'consent', scope: mailboxScopes(writes).join(' '), state }).toString();
+      return Response.redirect(consent.toString(), 302);
     }
     const { driver } = await storage(env); const accounts = await driver.prepare('SELECT account,address,scopes FROM google_tokens ORDER BY account').all() as { account: string; address: string; scopes: string }[];
     return new Response(`<h1>mail-index setup</h1><p>Operator: ${escapeHtml(email)}</p><p>Register callbacks: ${escapeHtml(`${url.origin}/oauth/google/callback`)} and ${escapeHtml(`${url.origin}/setup/google/callback`)}</p><ul>${accounts.map((a) => `<li>${escapeHtml(a.account)} — ${escapeHtml(a.address)} — ${escapeHtml(a.scopes)}</li>`).join('')}</ul>`, { headers: { 'content-type': 'text/html; charset=utf-8' } });
   }
   return Response.json({ error: 'not_found' }, { status: 404 });
 }
+
+/** `openid email` lets staff identity checks read the immutable OIDC subject (EXP-4599). */
+function mailboxScopes(writes: boolean): string[] { return ['openid', 'email', GMAIL_READONLY, ...(writes ? [GMAIL_MODIFY] : [])]; }
 
 function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!); }
 

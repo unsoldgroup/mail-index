@@ -72,10 +72,11 @@
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^0.8.2",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "graphology": "^0.26.0",
     "graphology-communities-louvain": "^2.0.2",
-    "graphology-metrics": "^2.4.0"
+    "graphology-metrics": "^2.4.0",
+    "zod": "4.4.3"
   },
   "pnpm": {
     "overrides": {
