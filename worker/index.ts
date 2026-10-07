@@ -1,7 +1,7 @@
 import type { AuthRequest, OAuthHelpers } from '@cloudflare/workers-oauth-provider';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { D1Driver, type D1DatabaseBinding } from '../src/index/drivers/d1.js';
-import { Repo } from '../src/index/repo.js';
+import { workerRepository } from './repository.js';
 import { getUserVersion, runMigrations } from '../src/index/migrations.js';
 import { SCHEMA_VERSION } from '../src/index/schema.js';
 import { buildServer } from '../src/mcp/server.js';
@@ -54,7 +54,7 @@ function assertBindings(env: Partial<Env>): asserts env is Env {
   }
 }
 
-async function storage(env: Env) { const driver = new D1Driver(env.DB); await runMigrations(driver); return { driver, repo: new Repo(driver) }; }
+async function storage(env: Env) { const driver = new D1Driver(env.DB); await runMigrations(driver); return { driver, repo: workerRepository(driver) }; }
 
 /**
  * Serve one MCP request STATELESSLY (SDK "stateless mode", the documented

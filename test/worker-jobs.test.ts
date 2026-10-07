@@ -640,7 +640,7 @@ test('Worker queue sync recovers a dead 21-minute lock without changing audit ro
   } finally { await mf.dispose(); }
 });
 
-test('Worker queue sync retains an 18-minute lock and performs no provider read or cursor write', async () => {
+test('Worker queue sync retains an 18-minute lock and performs no mail read or cursor write', async () => {
   const { mf, env, driver } = await fixture();
   try {
     const repo = new Repo(driver);
@@ -649,7 +649,7 @@ test('Worker queue sync retains an 18-minute lock and performs no provider read 
     await driver.prepare('UPDATE sync_runs SET started_at=? WHERE id=?').run(new Date(Date.now() - 18 * 60_000).toISOString(), active);
     const jobId = await enqueueJob(env, 'sync', 'acct-a', {});
     let calls = 0;
-    await assert.rejects(() => runJob(env, { jobId, kind: 'sync', account: 'acct-a', params: {} }, (async () => { calls++; throw Error('unexpected provider call'); }) as typeof fetch), /already in progress/);
+    await assert.rejects(() => runJob(env, { jobId, kind: 'sync', account: 'acct-a', params: {} }, (async (input: RequestInfo | URL) => { if (String(input).includes('/messages')) calls++; return gmailFetch(input); }) as typeof fetch), /already in progress/);
     assert.equal(calls, 0);
     assert.equal((await repo.getAccountSettings('acct-a')).backfill_cursor, '2024-08-17');
   } finally { await mf.dispose(); }

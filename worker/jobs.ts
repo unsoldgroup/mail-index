@@ -1,6 +1,7 @@
 /** Remote O(N) execution engine. Cron and future Gmail push both call enqueueSyncJob. */
 import { D1Driver } from '../src/index/drivers/d1.js';
-import { Repo } from '../src/index/repo.js';
+import type { Repo } from '../src/index/repo.js';
+import { workerRepository } from './repository.js';
 import { runMigrations } from '../src/index/migrations.js';
 import { windowCutoff, nextBackfillSlice, BACKFILL_FLOOR } from '../src/index/settings.js';
 import { syncMetadata } from '../src/ingest/sync.js';
@@ -193,7 +194,7 @@ export async function enqueueScheduledSyncs(env: Env): Promise<string[]> {
  * tick" as ADR-0010 originally stated — see the amendment there for why.
  */
 export async function enqueueWorkingSetJobs(env: Env, driver: D1Driver, accounts: readonly string[]): Promise<string[]> {
-  const repo = new Repo(driver);
+  const repo = workerRepository(driver);
   const queued: string[] = [];
   for (const account of accounts) {
     const settings = await repo.getAccountSettings(account);
@@ -216,7 +217,7 @@ export async function enqueueWorkingSetJobs(env: Env, driver: D1Driver, accounts
 
 export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fetch = fetch): Promise<void> {
   const driver = new D1Driver(env.DB); await runMigrations(driver);
-  const repo = new Repo(driver);
+  const repo = workerRepository(driver);
   const row = await driver.prepare('SELECT status,kind,account,params_json,terminal FROM jobs WHERE id=?').get(message.jobId) as { status: string; kind: JobKind; account: string; params_json: string; terminal: number } | undefined;
   if (!row) throw new Error(`Unknown Job ${message.jobId}`);
   if (row.status === 'done' || row.terminal === 1) return;
