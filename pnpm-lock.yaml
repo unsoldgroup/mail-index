@@ -41,7 +41,7 @@ importers:
         version: 9.39.4
       '@posthog/mcp':
         specifier: ^0.23.0
-        version: 0.23.0(@modelcontextprotocol/sdk@1.31.0(zod@4.4.3))(posthog-node@5.57.2)
+        version: 0.23.0(@modelcontextprotocol/sdk@1.32.2(zod@4.6.7))(posthog-node@5.57.2)
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.2
@@ -1777,12 +1777,12 @@ snapshots:
     dependencies:
       '@posthog/types': 1.416.1
 
-  '@posthog/mcp@0.23.0(@modelcontextprotocol/sdk@1.31.0(zod@4.4.3))(posthog-node@5.57.2)':
+  '@posthog/mcp@0.23.0(@modelcontextprotocol/sdk@1.32.2(zod@4.6.7))(posthog-node@5.57.2)':
     dependencies:
       '@posthog/core': 1.60.1
       posthog-node: 5.57.2
     optionalDependencies:
-      '@modelcontextprotocol/sdk': 1.31.0(zod@4.4.3)
+      '@modelcontextprotocol/sdk': 1.32.2(zod@4.6.7)
 
   '@posthog/types@1.416.1': {}
 
