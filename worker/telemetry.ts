@@ -1,6 +1,6 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { instrumentMcpAnalytics, parseSurface, type ToolTiers } from '@unsoldgroup/mcp-telemetry';
+import { instrumentMcpAnalytics, parseSurface, type ToolTiers } from './mcp-telemetry.js';
 
 /**
  * Tier of every advertised tool. `write` covers mailbox writes, index

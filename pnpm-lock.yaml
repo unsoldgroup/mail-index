@@ -39,6 +39,9 @@ importers:
       '@eslint/js':
         specifier: ^9.0.0
         version: 9.39.4
+      '@posthog/mcp':
+        specifier: ^0.23.0
+        version: 0.23.0(@modelcontextprotocol/sdk@1.31.0(zod@4.4.3))(posthog-node@5.57.2)
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.2
@@ -48,9 +51,6 @@ importers:
       '@typescript-eslint/parser':
         specifier: ^8.0.0
         version: 8.61.1(eslint@9.39.4)(typescript@5.9.3)
-      '@unsoldgroup/mcp-telemetry':
-        specifier: git+https://github.com/unsoldgroup/mcp-telemetry.git
-        version: git+https://github.com/unsoldgroup/mcp-telemetry.git#eeba6e74a4f8a2e6ff705e3fd795044849dde1e5(@modelcontextprotocol/sdk@1.31.0(zod@4.4.3))
       esbuild:
         specifier: ^0.28.1
         version: 0.28.1
@@ -63,6 +63,9 @@ importers:
       miniflare:
         specifier: ^4.20260301.1
         version: 4.20260714.0
+      posthog-node:
+        specifier: ^5.57.2
+        version: 5.57.2
       prettier:
         specifier: ^3.0.0
         version: 3.8.4
@@ -629,13 +632,6 @@ packages:
   '@typescript-eslint/visitor-keys@8.61.1':
     resolution: {integrity: sha512-6fJ9MHWtK14C1DSkiMlHUSOmrVebL7150xZJBlJiL62jjhIA4JmOq6flwBgDxIdBKKdoiZRel+dfPD5MLfny3w==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
-
-  '@unsoldgroup/mcp-telemetry@git+https://github.com/unsoldgroup/mcp-telemetry.git#eeba6e74a4f8a2e6ff705e3fd795044849dde1e5':
-    resolution: {commit: eeba6e74a4f8a2e6ff705e3fd795044849dde1e5, repo: https://github.com/unsoldgroup/mcp-telemetry.git, type: git}
-    version: 0.1.0
-    engines: {node: '>=24'}
-    peerDependencies:
-      '@modelcontextprotocol/sdk': '>=1.26.0'
 
   '@yomguithereal/helpers@1.1.1':
     resolution: {integrity: sha512-UYvAq/XCA7xoh1juWDYsq3W0WywOB+pz8cgVnE1b45ZfdMhBvHDrgmSFG3jXeZSr2tMTYLGHFHON+ekG05Jebg==}
@@ -1892,16 +1888,6 @@ snapshots:
     dependencies:
       '@typescript-eslint/types': 8.61.1
       eslint-visitor-keys: 5.0.1
-
-  '@unsoldgroup/mcp-telemetry@git+https://github.com/unsoldgroup/mcp-telemetry.git#eeba6e74a4f8a2e6ff705e3fd795044849dde1e5(@modelcontextprotocol/sdk@1.31.0(zod@4.4.3))':
-    dependencies:
-      '@modelcontextprotocol/sdk': 1.31.0(zod@4.4.3)
-      '@posthog/mcp': 0.23.0(@modelcontextprotocol/sdk@1.31.0(zod@4.4.3))(posthog-node@5.57.2)
-      posthog-node: 5.57.2
-    transitivePeerDependencies:
-      - '@modelcontextprotocol/server'
-      - '@opentelemetry/api'
-      - rxjs
 
   '@yomguithereal/helpers@1.1.1': {}
 

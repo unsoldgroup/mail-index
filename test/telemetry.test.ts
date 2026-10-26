@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { gunzipSync } from 'node:zlib';
-import { assertTierCoverage } from '@unsoldgroup/mcp-telemetry';
+import { assertTierCoverage } from '../dist-worker/worker/mcp-telemetry.js';
 import { toolList } from '../dist/mcp/server.js';
 import { SENSITIVE_TOOLS, TOOL_TIERS, instrumentWorkerMcp } from '../dist-worker/worker/telemetry.js';
 
