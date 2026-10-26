@@ -50,6 +50,12 @@ npx wrangler deploy --dry-run --config worker/wrangler.jsonc
 npx wrangler deploy --config worker/wrangler.jsonc
 ```
 
+The live Unsold Deployment (`mail-index.alex-425.workers.dev`) deploys with the
+committed `worker/wrangler.production.jsonc`, which carries the real D1, KV,
+Queue and R2 bindings: pass `--config worker/wrangler.production.jsonc` to every
+command above. Do not use the older `dotenv/mail-index/worker-wrangler.jsonc`
+copy in Bitwarden; it predates the sweeps Queue and is stale.
+
 Keep `observability.enabled: true` and `head_sampling_rate: 1`. The configuration
 also pins a measured 30-second CPU limit and a queue consumer.
 
