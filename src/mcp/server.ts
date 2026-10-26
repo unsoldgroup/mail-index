@@ -602,14 +602,15 @@ export function toolList(): {
  * rather than throwing, so the client sees a clean tool error, not a transport
  * fault.
  */
-export function buildServer(ctx: ToolContext): Server {
+export function buildServer(ctx: ToolContext, opts: { telemetry?: boolean } = {}): Server {
   const server = new Server(
     { name: 'mail-index', version: '1.0.0' },
     {
       capabilities: { tools: {} },
-      // Surfaced to the agent once at connect (no per-tool token cost). mail-index
-      // has no telemetry, so feedback is explicit + opt-in: point the user at
-      // GitHub. Nothing is ever sent automatically.
+      // Surfaced to the agent once at connect (no per-tool token cost). Local
+      // installs have no telemetry; a remote Deployment with a PostHog token
+      // records tool-usage metadata only (worker/telemetry.ts). Feedback stays
+      // explicit + opt-in: point the user at GitHub.
       instructions:
         'mail-index — local, read-only recall over THIS user\'s mailbox (Gmail), ' +
         'over MCP. REACH FOR THESE TOOLS WHENEVER a question could be answered from ' +
@@ -632,7 +633,10 @@ export function buildServer(ctx: ToolContext): Server {
         'give them `freshness.refresh_command`; do not present stale results as ' +
         'current. If `settings_get` reports no `onboarding_completed_at`, run ' +
         '`onboarding` first: it returns one question at a time for you to ask. ' +
-        'No telemetry — to report a bug or give feedback, help the user draft ' +
+        (opts.telemetry
+          ? 'This Deployment records tool-usage metadata (tool name, duration, error flag; never arguments or results). '
+          : 'No telemetry. ') +
+        'To report a bug or give feedback, help the user draft ' +
         'it and point them to https://github.com/unsoldgroup/mail-index/issues ' +
         '(nothing is sent automatically).',
     },

@@ -60,6 +60,8 @@ const WORKER_NETWORK_ALLOW = new Set([
   'oauth.ts', // OAuth provider serving entrypoint
   'import-seed-entry.ts', // one-shot local Wrangler import endpoint
   'triggers.ts', // HMAC-signed webhook delivery
+  'mcp-telemetry.ts', // vendored PostHog client wrapper used only by telemetry.ts
+  'telemetry.ts', // opt-in PostHog MCP tool-usage metadata (no args/results); no-op without POSTHOG_PROJECT_TOKEN
 ]);
 
 /** The ONE bin/ file allowed to reach the network: the self-updater. */

@@ -280,8 +280,10 @@ More: **[unsold.group/al](https://unsold.group/al)**
 
 ## Feedback & contact
 
-There's **no telemetry** — we only know what you tell us, so feedback is
-genuinely welcome:
+There's **no telemetry** in the local install. A self-hosted remote Deployment
+sends tool-usage metadata (never arguments or results) only if its operator sets
+`POSTHOG_PROJECT_TOKEN` ([INSTALL-worker.md](docs/INSTALL-worker.md)). We only
+know what you tell us, so feedback is genuinely welcome:
 
 - 💬 **[Discussions](https://github.com/unsoldgroup/mail-index/discussions)** — questions, ideas, how you use it
 - 🐞 **[Report a bug](https://github.com/unsoldgroup/mail-index/issues/new?template=bug_report.yml)** · 💡 **[Request a feature](https://github.com/unsoldgroup/mail-index/issues/new?template=feature_request.yml)**

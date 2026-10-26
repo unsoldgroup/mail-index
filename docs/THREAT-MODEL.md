@@ -60,6 +60,9 @@ launcher that fires it. Disable entirely with `MAIL_INDEX_NO_AUTOUPDATE=1`.
 - **No exfiltration by the tool.** It has no network egress of its own and no
   telemetry/analytics — verifiable by the egress guard and a 4-package, pure-JS
   dependency tree.
+  The remote Worker Deployment can send tool-usage metadata to PostHog when
+  its operator sets `POSTHOG_PROJECT_TOKEN`; the egress guard pins that to
+  `worker/telemetry.ts`, and the shared allowlist drops arguments and results.
 - **No mailbox mutation by default — and never send/delete.** A standard install
   is read-only at the token level (`gmail.readonly`): the adapter calls only
   `messages.list` / `messages.get`, and the mutation seam is unreachable.
