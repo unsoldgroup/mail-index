@@ -52,6 +52,8 @@ test('no code path names a Gmail send endpoint', () => {
       assert.ok(code.includes(GUARD), 'the runner send guard is in place');
       code = code.replace(GUARD, '');
     }
+    // The vendored telemetry wrapper names a 'send' risk tier, not a Gmail endpoint.
+    if (file.endsWith('worker/mcp-telemetry.ts')) code = code.replace(/export type ToolTier = [^;]+;/, '');
     // REST paths, discovery method names, upload endpoint, gog/gws CLI verbs.
     if (/(?:messages|drafts)\s*[/.]\s*send|['"`]send['"`]|upload\/gmail/.test(code)) hits.push(relative(ROOT, file));
   }
