@@ -19,9 +19,13 @@ client) can query it. Local-first — the default index never leaves your machin
 Operators who need an always-on connector can instead deploy the optional,
 single-tenant [remote Worker Deployment](docs/INSTALL-worker.md) in their own
 Cloudflare account; mail-index operates no hosting service.
-Read-only by default — it never sends or mutates your mail unless you
-explicitly opt into archive + label edits (a least-privilege `gmail.modify`
-re-auth; never send or delete). See [ADR-0007](docs/adr/0007-opt-in-mailbox-writes.md).
+Read-only by default — it never mutates your mail unless you explicitly opt
+into archive + label edits (a `gmail.modify` re-auth) or, on the remote
+Deployment, drafts (a `gmail.compose` re-auth). It never sends or deletes mail.
+Both opt-in scopes can send at the token level, so that guarantee is enforced in
+code (a send guard on the Gmail runner plus `test/drafts.test.ts`), not by the
+scope. See [ADR-0007](docs/adr/0007-opt-in-mailbox-writes.md) and
+[ADR-0011](docs/adr/0011-opt-in-drafts-never-send.md).
 
 <p align="center">
   <a href="docs/demo/mcp-demo.html">
@@ -70,7 +74,8 @@ re-auth; never send or delete). See [ADR-0007](docs/adr/0007-opt-in-mailbox-writ
 > Gmail — via the `archive` / `label` CLI commands and the `archive_message` /
 > `modify_labels` MCP tools, on both the gog and gws adapters. It stays
 > **read-only by default**: writes are unreachable until you opt in with a
-> _least-privilege_ `gmail.modify` grant (**never** send or delete) — enable per
+> `gmail.modify` grant (mail-index **never** sends or deletes; the scope could
+> send, so a code guard enforces this, see ADR-0011) — enable per
 > account with `mail-index setup --account <email> --enable-writes` or the
 > bundled `scripts/enable-writes.sh`. Labels render as their **human names**
 > everywhere (the index caches Gmail's label catalogue and resolves
@@ -219,8 +224,13 @@ mail-index status  [--json]              Per-account freshness + counts
 
 Writes are off by default. Enable archive + label edits for an account with
 `mail-index setup --account <email> --enable-writes` (or the bundled
-`scripts/enable-writes.sh <email>`) — a least-privilege `gmail.modify` grant
-(never send or delete). See [ADR-0007](docs/adr/0007-opt-in-mailbox-writes.md).
+`scripts/enable-writes.sh <email>`), a `gmail.modify` grant. On the remote
+Deployment, `create_draft` is a third opt-in writer, enabled with a separate
+`gmail.compose` grant (`&drafts=1`). Both scopes can send at the token level;
+mail-index never sends or deletes because the Gmail runner refuses send paths
+and `test/drafts.test.ts` fails CI on any new one. See
+[ADR-0007](docs/adr/0007-opt-in-mailbox-writes.md) and
+[ADR-0011](docs/adr/0011-opt-in-drafts-never-send.md).
 
 ## Documentation
 

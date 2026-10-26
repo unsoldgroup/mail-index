@@ -63,11 +63,19 @@ launcher that fires it. Disable entirely with `MAIL_INDEX_NO_AUTOUPDATE=1`.
 - **No mailbox mutation by default — and never send/delete.** A standard install
   is read-only at the token level (`gmail.readonly`): the adapter calls only
   `messages.list` / `messages.get`, and the mutation seam is unreachable.
-  Archive + label edits are an explicit OPT-IN gated on a separate, least-
-  privilege `gmail.modify` re-auth (`mail-index setup --enable-writes`), exposed
-  as two clearly-marked tools (`archive_message` / `modify_labels`). Even opted
-  in, the tool can only archive/relabel — it requests no `gmail.send` and no
-  delete scope ([ADR-0007](adr/0007-opt-in-mailbox-writes.md), [ADR-0001](adr/0001-inline-enrichment-is-o1-only.md)).
+  Three remote writers are explicit, per-account opt-ins: `archive_message` and
+  `modify_labels` need a separate `gmail.modify` re-auth
+  (`mail-index setup --enable-writes`, or `&writes=1` on the Worker), and
+  `create_draft` (remote Deployment only) needs a separate `gmail.compose`
+  re-auth (`&drafts=1`). mail-index never requests `gmail.send` or a delete
+  scope. **But both `gmail.modify` and `gmail.compose` can send mail at the
+  token level** (Gmail's `messages.send` and `drafts.send` accept either). So
+  for an opted-in account the no-send guarantee is enforced in code, not by the
+  scope: the single Gmail REST seam (`createGmailRestRunner`) refuses any path
+  with a `send` segment before any network call, and `test/drafts.test.ts`
+  proves that guard and scans `src/` and `worker/` for any send endpoint, so a
+  new send path fails CI. An operator who grants either scope trusts the
+  deployed code to never send ([ADR-0011](adr/0011-opt-in-drafts-never-send.md), [ADR-0007](adr/0007-opt-in-mailbox-writes.md), [ADR-0001](adr/0001-inline-enrichment-is-o1-only.md)).
 - **Local Deployment credential isolation.** Tokens are the adapter's concern
   and never enter the local index DB.
 - **Operator-owned placement.** Local data stays on the machine. Remote data
@@ -97,8 +105,12 @@ launcher that fires it. Disable entirely with `MAIL_INDEX_NO_AUTOUPDATE=1`.
 
 mail-index reads by default. Grant a **read-only** provider scope (for Gmail,
 `https://www.googleapis.com/auth/gmail.readonly`). Only explicit archive/label
-actions use the separately consented `gmail.modify` scope; send/delete scopes
-are never requested.
+actions use the separately consented `gmail.modify` scope, and only
+`create_draft` uses the separately consented `gmail.compose` scope. mail-index
+never requests `gmail.send` or a delete scope. `gmail.modify` and
+`gmail.compose` can both send at the token level, so for those grants "never
+sends" is a code guarantee (the runner guard plus `test/drafts.test.ts`), not a
+scope guarantee ([ADR-0011](adr/0011-opt-in-drafts-never-send.md)).
 
 ## Remote Deployment: widened trust boundary
 
@@ -112,8 +124,11 @@ SQLite on an encrypted local disk.
 The Worker holds Google refresh-token ciphertext in D1. Tokens use AES-GCM; the
 key exists only as the `TOKEN_ENC_KEY` Worker secret. A D1 export alone cannot
 decrypt them. The operator supplies and controls the Google OAuth client. The
-default grant is `gmail.readonly`; `gmail.modify` is a separate explicit
-re-consent and still cannot send or delete mail.
+default grant is `gmail.readonly`; `gmail.modify` (`&writes=1`) and
+`gmail.compose` (`&drafts=1`) are separate explicit re-consents. Both scopes
+can send mail at the token level, so a leaked refresh token for such an account
+can send. mail-index itself never sends: the runner guard refuses send paths
+and `test/drafts.test.ts` fails CI on any new send path.
 
 The audited remote seams are the Gmail REST adapter, D1 StorageDriver, and
 webhook delivery in the queue consumer. Webhook HTTP runs in `worker/`, not the
