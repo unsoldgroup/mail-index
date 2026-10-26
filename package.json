@@ -61,6 +61,7 @@
     "@types/node": "^24.0.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
+    "@unsoldgroup/mcp-telemetry": "git+https://github.com/unsoldgroup/mcp-telemetry.git",
     "esbuild": "^0.28.1",
     "eslint": "^9.0.0",
     "graphology-types": "^0.24.8",
@@ -84,6 +85,9 @@
       "fast-uri": ">=4.1.3",
       "hono": ">=4.12.34",
       "ip-address": ">=10.3.1"
-    }
+    },
+    "onlyBuiltDependencies": [
+      "@unsoldgroup/mcp-telemetry"
+    ]
   }
 }

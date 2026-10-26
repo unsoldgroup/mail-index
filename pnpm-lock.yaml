@@ -48,6 +48,9 @@ importers:
       '@typescript-eslint/parser':
         specifier: ^8.0.0
         version: 8.61.1(eslint@9.39.4)(typescript@5.9.3)
+      '@unsoldgroup/mcp-telemetry':
+        specifier: git+https://github.com/unsoldgroup/mcp-telemetry.git
+        version: git+https://github.com/unsoldgroup/mcp-telemetry.git#eeba6e74a4f8a2e6ff705e3fd795044849dde1e5(@modelcontextprotocol/sdk@1.31.0(zod@4.4.3))
       esbuild:
         specifier: ^0.28.1
         version: 0.28.1
@@ -533,6 +536,25 @@ packages:
   '@poppinss/exception@1.2.3':
     resolution: {integrity: sha512-dCED+QRChTVatE9ibtoaxc+WkdzOSjYTKi/+uacHWIsfodVfpsueo3+DKpgU5Px8qXjgmXkSvhXvSCz3fnP9lw==}
 
+  '@posthog/core@1.60.1':
+    resolution: {integrity: sha512-UpswaG2957O6Ywfx1aCeI8BbXcfoKduKwq1ytBml80AQuAmgK672OmhDcldA7wg4vGP49LpDTgxcNbLvZwQOqw==}
+
+  '@posthog/mcp@0.23.0':
+    resolution: {integrity: sha512-pGWHFn3gXVcThM/fF8QgHf01SBdwQgOgv+HmWhMEzR63iJdCsy8sfD+b2ZTU0ZODAeTMmbwzRvJLc371/WWjvQ==}
+    engines: {node: ^20.20.0 || >=22.22.0}
+    peerDependencies:
+      '@modelcontextprotocol/sdk': '>=1.26.0'
+      '@modelcontextprotocol/server': '>=2.0.0'
+      posthog-node: ^5.0.0
+    peerDependenciesMeta:
+      '@modelcontextprotocol/sdk':
+        optional: true
+      '@modelcontextprotocol/server':
+        optional: true
+
+  '@posthog/types@1.416.1':
+    resolution: {integrity: sha512-PG06HE2axHNyyZ9CKSSHKSW4pWfQwEtPA1dewFqIwggcIgk1BsQ+tHSNqvZz+IvE2WnBZ8OcOkF9SWI55VxQfA==}
+
   '@sindresorhus/is@7.2.0':
     resolution: {integrity: sha512-P1Cz1dWaFfR4IR+U13mqqiGsLFf1KbayybWwdd2vfctdV6hDpUkgCY0nKOLLTMSoRd/jJNjtbqzf13K8DCCXQw==}
     engines: {node: '>=18'}
@@ -607,6 +629,13 @@ packages:
   '@typescript-eslint/visitor-keys@8.61.1':
     resolution: {integrity: sha512-6fJ9MHWtK14C1DSkiMlHUSOmrVebL7150xZJBlJiL62jjhIA4JmOq6flwBgDxIdBKKdoiZRel+dfPD5MLfny3w==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+
+  '@unsoldgroup/mcp-telemetry@git+https://github.com/unsoldgroup/mcp-telemetry.git#eeba6e74a4f8a2e6ff705e3fd795044849dde1e5':
+    resolution: {commit: eeba6e74a4f8a2e6ff705e3fd795044849dde1e5, repo: https://github.com/unsoldgroup/mcp-telemetry.git, type: git}
+    version: 0.1.0
+    engines: {node: '>=24'}
+    peerDependencies:
+      '@modelcontextprotocol/sdk': '>=1.26.0'
 
   '@yomguithereal/helpers@1.1.1':
     resolution: {integrity: sha512-UYvAq/XCA7xoh1juWDYsq3W0WywOB+pz8cgVnE1b45ZfdMhBvHDrgmSFG3jXeZSr2tMTYLGHFHON+ekG05Jebg==}
@@ -1192,6 +1221,18 @@ packages:
     resolution: {integrity: sha512-wQ0b/W4Fr01qtpHlqSqspcj3EhBvimsdh0KlHhH8HRZnMsEa0ea2fTULOXOS9ccQr3om+GcGRk4e+isrZWV8qQ==}
     engines: {node: '>=16.20.0'}
 
+  posthog-node@5.57.2:
+    resolution: {integrity: sha512-S03L9YC21EV0CIo7GW1lv/faTU0ENjO4uyFTuERxGIuDebjl3+UcRvJIq8RzAM2YJumpAlXPoDNyrxAvUZctfg==}
+    engines: {node: ^20.20.0 || >=22.22.0}
+    peerDependencies:
+      '@opentelemetry/api': ^1.2.0
+      rxjs: ^7.0.0
+    peerDependenciesMeta:
+      '@opentelemetry/api':
+        optional: true
+      rxjs:
+        optional: true
+
   prelude-ls@1.2.1:
     resolution: {integrity: sha512-vkcDPrRZo1QZLbn5RLGPpg/WmIQ65qoWWhcGKf/b5eplkkarX0m9z8ppCat4mlOqUsWpyNuYgO3VRyrYHSzX5g==}
     engines: {node: '>= 0.8.0'}
@@ -1736,6 +1777,19 @@ snapshots:
 
   '@poppinss/exception@1.2.3': {}
 
+  '@posthog/core@1.60.1':
+    dependencies:
+      '@posthog/types': 1.416.1
+
+  '@posthog/mcp@0.23.0(@modelcontextprotocol/sdk@1.31.0(zod@4.4.3))(posthog-node@5.57.2)':
+    dependencies:
+      '@posthog/core': 1.60.1
+      posthog-node: 5.57.2
+    optionalDependencies:
+      '@modelcontextprotocol/sdk': 1.31.0(zod@4.4.3)
+
+  '@posthog/types@1.416.1': {}
+
   '@sindresorhus/is@7.2.0': {}
 
   '@speed-highlight/core@1.2.17': {}
@@ -1838,6 +1892,16 @@ snapshots:
     dependencies:
       '@typescript-eslint/types': 8.61.1
       eslint-visitor-keys: 5.0.1
+
+  '@unsoldgroup/mcp-telemetry@git+https://github.com/unsoldgroup/mcp-telemetry.git#eeba6e74a4f8a2e6ff705e3fd795044849dde1e5(@modelcontextprotocol/sdk@1.31.0(zod@4.4.3))':
+    dependencies:
+      '@modelcontextprotocol/sdk': 1.31.0(zod@4.4.3)
+      '@posthog/mcp': 0.23.0(@modelcontextprotocol/sdk@1.31.0(zod@4.4.3))(posthog-node@5.57.2)
+      posthog-node: 5.57.2
+    transitivePeerDependencies:
+      - '@modelcontextprotocol/server'
+      - '@opentelemetry/api'
+      - rxjs
 
   '@yomguithereal/helpers@1.1.1': {}
 
@@ -2434,6 +2498,10 @@ snapshots:
   picomatch@4.0.4: {}
 
   pkce-challenge@5.0.1: {}
+
+  posthog-node@5.57.2:
+    dependencies:
+      '@posthog/core': 1.60.1
 
   prelude-ls@1.2.1: {}
 

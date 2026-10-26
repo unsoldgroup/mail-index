@@ -32,6 +32,7 @@
 
   // Secrets (set with `wrangler secret put`):
   // TOKEN_ENC_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, CRM_WEBHOOK_SECRET.
+  // Optional: POSTHOG_PROJECT_TOKEN enables MCP tool-usage analytics (docs/INSTALL-worker.md).
   // CRM_WEBHOOK_URL is a non-secret optional variable for the Twenty App callback.
   // OPERATOR_EMAILS is a comma-separated non-secret allowlist variable.
 }

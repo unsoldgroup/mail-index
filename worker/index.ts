@@ -14,6 +14,7 @@ import { triggerAdmin } from './triggers.js';
 import { agentCard, handleA2a } from './a2a.js';
 import { handleCrmRequest } from './crm-api.js';
 import type { AttachmentBucket } from './attachments.js';
+import { instrumentWorkerMcp, type TelemetryEnv } from './telemetry.js';
 
 const VERSION = '1.4.0';
 const SESSION_COOKIE = 'mail_index_operator';
@@ -23,7 +24,7 @@ interface QueueMessage<T> { body: T; ack(): void; retry(): void }
 interface QueueBatch<T> { messages: QueueMessage<T>[] }
 interface WorkerContext { waitUntil(promise: Promise<unknown>): void; passThroughOnException(): void; props?: unknown }
 
-export interface Env {
+export interface Env extends TelemetryEnv {
   DB: D1DatabaseBinding;
   SYNC_QUEUE: QueueBinding;
   // The sweeps ride their OWN Queue so a sync can never starve them. A sync Job
@@ -71,8 +72,10 @@ async function storage(env: Env) { const driver = new D1Driver(env.DB); await ru
  * Each request therefore gets its own server + transport. The tool surface is
  * rebuilt from D1 per request, so nothing of value lived in that map anyway.
  */
-async function handleMcp(request: Request, env: Env, fetchImpl: typeof fetch = fetch): Promise<Response> {
-  const server = buildServer(await buildWorkerToolContext(env, fetchImpl, new URL(request.url).origin));
+async function handleMcp(request: Request, env: Env, fetchImpl: typeof fetch = fetch, ctx?: WorkerContext): Promise<Response> {
+  const telemetry = Boolean(env.POSTHOG_PROJECT_TOKEN && ctx);
+  const server = buildServer(await buildWorkerToolContext(env, fetchImpl, new URL(request.url).origin), { telemetry });
+  if (telemetry) instrumentWorkerMcp(server, request, env, ctx);
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   await server.connect(transport);
   return transport.handleRequest(request);
@@ -100,10 +103,10 @@ export async function buildWorkerToolContext(env: Env, fetchImpl: typeof fetch =
 
 export interface WorkerDependencies { fetchImpl?: typeof fetch }
 
-export async function handleAuthorizedRequest(request: Request, env: Partial<Env>, dependencies: WorkerDependencies = {}): Promise<Response> {
+export async function handleAuthorizedRequest(request: Request, env: Partial<Env>, dependencies: WorkerDependencies = {}, ctx?: WorkerContext): Promise<Response> {
   assertBindings(env);
   const url = new URL(request.url);
-  if (url.pathname === '/mcp' && ['GET', 'POST', 'DELETE'].includes(request.method)) return handleMcp(request, env, dependencies.fetchImpl);
+  if (url.pathname === '/mcp' && ['GET', 'POST', 'DELETE'].includes(request.method)) return handleMcp(request, env, dependencies.fetchImpl, ctx);
   if (url.pathname === '/a2a' && request.method === 'POST') return handleA2a(request, await buildWorkerToolContext(env));
   if (url.pathname.startsWith('/crm/v1/')) return handleCrmRequest(request, env);
   return Response.json({ error: 'not_found' }, { status: 404 });
@@ -218,7 +221,7 @@ function mailboxScopes(writes: boolean, drafts = false): string[] { return ['ope
 
 function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!); }
 
-export const apiHandler = { fetch: (request: Request, env: Env) => handleAuthorizedRequest(request, env) };
+export const apiHandler = { fetch: (request: Request, env: Env, ctx: WorkerContext) => handleAuthorizedRequest(request, env, {}, ctx) };
 export const defaultHandler = { fetch: (request: Request, env: Env, ctx: WorkerContext) => handlePublicRequest(request, env, ctx) };
 
 export default {

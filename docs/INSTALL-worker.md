@@ -53,6 +53,13 @@ npx wrangler deploy --config worker/wrangler.jsonc
 Keep `observability.enabled: true` and `head_sampling_rate: 1`. The configuration
 also pins a measured 30-second CPU limit and a queue consumer.
 
+Optional tool-usage analytics: set `POSTHOG_PROJECT_TOKEN` (secret) and, if you
+like, `POSTHOG_HOST`, `ENVIRONMENT` and `DEPLOY_GIT_SHA`. The Worker then sends
+one PostHog event per MCP request with operational metadata only: tool name,
+tier (`read`/`write`), a `sensitive` flag for mail-content reads, duration,
+error flag, and the `?surface=` tag from the connector URL. Arguments and
+results are never sent. Without the token nothing is sent.
+
 ## 4. Connect an agent
 
 In claude.ai, add a custom remote connector whose URL is
