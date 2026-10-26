@@ -2153,31 +2153,52 @@ export class Repo {
   /**
    * The per-contact scoring features the interest engine blends (PLAN §10). One
    * row per aggregated contact for `account`. The aggregate columns are read
-   * straight off `contacts`; `bulk_count` is computed with a correlated
-   * subquery counting this contact's *received* bulk mail (is_list OR
-   * promotions/social) from the raw `messages`, matching either the exact
-   * `from_addr` or the bare address embedded in a `Name <addr>` header — the one
-   * §10 signal the contact rollup does not already carry.
+   * straight off `contacts`; `bulk_count` counts this contact's *received* bulk
+   * mail (is_list OR promotions/social) from the raw `messages`, matching either
+   * the exact `from_addr` or the bare address embedded in a `Name <addr>`
+   * header (case-insensitive) — the one §10 signal the contact rollup does not
+   * already carry.
+   *
+   * The bulk mail is grouped by sender in ONE scan and attributed here. It used
+   * to be a correlated subquery per contact, O(contacts x messages): ~1.8k
+   * contacts over ~17k messages blew D1's per-query CPU limit and reset the
+   * database every hourly sync (USG-341).
    */
   async contactScoringRows(account: string): Promise<ContactScoringRow[]> {
-    const rows = await this.#prepare(
-      `SELECT c.address, c.msgs_received, c.msgs_sent, c.read_count,
-              c.replied_count, c.initiated_count, c.starred_count,
-              c.important_count, c.last_seen,
-              (
-                SELECT count(*) FROM messages m
-                 WHERE m.account = c.account
-                   AND m.direction = 'received'
-                   AND (m.is_list = 1 OR m.category IN ('promotions','social'))
-                   AND (
-                     m.from_addr = c.address
-                     OR instr(lower(m.from_addr), '<' || lower(c.address) || '>') > 0
-                   )
-              ) AS bulk_count
-         FROM contacts c
-        WHERE c.account = ?`,
-    ).all(account) as unknown as ContactScoringRow[];
-    return rows;
+    const contacts = await this.#prepare(
+      `SELECT address, msgs_received, msgs_sent, read_count,
+              replied_count, initiated_count, starred_count,
+              important_count, last_seen
+         FROM contacts
+        WHERE account = ?`,
+    ).all(account) as unknown as Omit<ContactScoringRow, 'bulk_count'>[];
+    const senders = await this.#prepare(
+      `SELECT from_addr, count(*) AS n
+         FROM messages
+        WHERE account = ?
+          AND direction = 'received'
+          AND (is_list = 1 OR category IN ('promotions','social'))
+          AND from_addr IS NOT NULL
+        GROUP BY from_addr`,
+    ).all(account) as { from_addr: string; n: number }[];
+
+    const exact = new Set(contacts.map((c) => c.address));
+    const byLower = new Map<string, string[]>();
+    for (const { address } of contacts) {
+      const key = address.toLowerCase();
+      byLower.set(key, [...(byLower.get(key) ?? []), address]);
+    }
+    const bulk = new Map<string, number>();
+    for (const { from_addr: from, n } of senders) {
+      // A Set, so a message matching a contact both ways still counts once.
+      const hits = new Set<string>();
+      if (exact.has(from)) hits.add(from);
+      for (const [, inner] of from.toLowerCase().matchAll(/<([^<>]*)>/g)) {
+        for (const address of byLower.get(inner ?? '') ?? []) hits.add(address);
+      }
+      for (const address of hits) bulk.set(address, (bulk.get(address) ?? 0) + n);
+    }
+    return contacts.map((c) => ({ ...c, bulk_count: bulk.get(c.address) ?? 0 }));
   }
 
   /**
