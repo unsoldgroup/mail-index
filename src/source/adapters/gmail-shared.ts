@@ -263,3 +263,41 @@ export function parseLabelList(
     .filter((l): l is { id: string; name: string; type?: string } => !!l.id && !!l.name)
     .map((l) => ({ id: l.id, name: l.name, ...(l.type ? { type: l.type } : {}) }));
 }
+
+/**
+ * Build the base64url RFC 2822 `raw` for a Gmail draft. Header values with
+ * CR/LF are refused (header injection); a non-ASCII subject is RFC 2047
+ * encoded; the body travels as base64 UTF-8 text/plain.
+ */
+export function buildRawDraft(draft: {
+  from: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  body: string;
+  inReplyTo?: string | null;
+  references?: string | null;
+}): string {
+  const headers: [string, string | undefined][] = [
+    ['From', draft.from],
+    ['To', draft.to.join(', ')],
+    ['Cc', draft.cc?.length ? draft.cc.join(', ') : undefined],
+    ['Bcc', draft.bcc?.length ? draft.bcc.join(', ') : undefined],
+    // eslint-disable-next-line no-control-regex
+    ['Subject', /[^\x00-\x7f]/.test(draft.subject) ? `=?UTF-8?B?${Buffer.from(draft.subject).toString('base64')}?=` : draft.subject],
+    ['In-Reply-To', draft.inReplyTo ?? undefined],
+    ['References', draft.references ?? undefined],
+    ['MIME-Version', '1.0'],
+    ['Content-Type', 'text/plain; charset=UTF-8'],
+    ['Content-Transfer-Encoding', 'base64'],
+  ];
+  const lines: string[] = [];
+  for (const [name, value] of headers) {
+    if (value === undefined || value === '') continue;
+    if (/[\r\n]/.test(value)) throw new Error(`draft ${name} must not contain line breaks`);
+    lines.push(`${name}: ${value}`);
+  }
+  const body = Buffer.from(draft.body).toString('base64').replace(/.{76}/g, '$&\r\n');
+  return Buffer.from(`${lines.join('\r\n')}\r\n\r\n${body}`).toString('base64url');
+}

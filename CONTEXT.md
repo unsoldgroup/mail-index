@@ -81,9 +81,13 @@ _Avoid_: filter (that's the provider's word), alert
 By default the tool never mutates the mailbox, and never sends or deletes mail at
 all. Fetching message content is permitted — read-only does not mean offline.
 Two mutations — archive (drop INBOX) and label edit (add/remove labels) — are an
-explicit OPT-IN gated on a least-privilege `gmail.modify` re-auth
+explicit OPT-IN gated on a `gmail.modify` re-auth
 (`mail-index setup --enable-writes`); they flow through the same adapter seam and
-never touch the local-only / zero-egress guarantee (ADR-0007).
+never touch the local-only / zero-egress guarantee (ADR-0007). On the remote
+Deployment, draft creation (`create_draft`) is a third opt-in, gated on a
+`gmail.compose` re-auth (ADR-0011). Both scopes can send at the token level, so
+"never sends" is enforced in code (the Gmail runner's send guard plus
+`test/drafts.test.ts`), not by the scope.
 
 **Interest profile**:
 The user-curated policy (important/muted contacts and domains + freeform

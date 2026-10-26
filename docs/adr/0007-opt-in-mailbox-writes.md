@@ -1,5 +1,8 @@
 # Mailbox writes (archive + label edit) are opt-in, least-privilege
 
+> Amended by [ADR-0011](0011-opt-in-drafts-never-send.md): opt-in drafts, and
+> the no-send guarantee is enforced in code, because `gmail.modify` can send.
+
 mail-index is read-only on the mailbox by default and says so prominently
 ([ADR-0002](0002-local-index-only-for-privacy.md), README, SECURITY.md,
 THREAT-MODEL.md). We add two mailbox MUTATIONS — **archive** (drop the `INBOX`

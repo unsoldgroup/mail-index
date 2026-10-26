@@ -61,8 +61,9 @@ that sole mailbox.
 ### Command handbacks — O(N) work is never inline
 
 The server is **read-only on the mailbox by default** ([D15](PLAN.md)) — the
-exceptions are the two opt-in writers `archive_message` / `modify_labels`
-([ADR-0007](adr/0007-opt-in-mailbox-writes.md)). The single permitted read-side
+exceptions are the opt-in writers `archive_message` / `modify_labels`
+([ADR-0007](adr/0007-opt-in-mailbox-writes.md)) and, on the remote Deployment,
+`create_draft` ([ADR-0011](adr/0011-opt-in-drafts-never-send.md)). The single permitted read-side
 provider contacts are bounded single-Message reads: `get_message`'s inline O(1)
 body fetch and `get_message_attachment`'s list/download calls
 ([ADR-0001](adr/0001-inline-enrichment-is-o1-only.md)). Anything bulk — sync,
@@ -131,8 +132,8 @@ All of the above also carry `index_as_of` on the top-level response object.
 ## Tools
 
 The surface includes read-only recall and attachment tools, local write-backs,
-remote administration, plus the two opt-in mailbox writers `archive_message` /
-`modify_labels`. Account resolution: tools that need an
+remote administration, plus the opt-in mailbox writers `archive_message`,
+`modify_labels` and `create_draft`. Account resolution: tools that need an
 account take an optional `account`; when omitted and exactly one account is
 configured / indexed, it is used, otherwise the tool errors asking for one.
 
@@ -406,11 +407,12 @@ Returns `{ sources, read_command, sync_started?, eta_seconds?, index_as_of }`.
 
 ### Opt-in writers (mutate the mailbox)
 
-These two are the **only** tools that change the mailbox. They require a
+These three are the **only** tools that change the mailbox, and none of them
+sends or deletes mail. `archive_message` and `modify_labels` require a
 `gmail.modify`-capable grant (a default `gmail.readonly` install refuses them
 with a re-auth hint) and should be called only when the user explicitly asks to
-archive or relabel. Never send or delete. See
-[ADR-0007](adr/0007-opt-in-mailbox-writes.md).
+archive or relabel. See [ADR-0007](adr/0007-opt-in-mailbox-writes.md).
+`create_draft` requires a separate `gmail.compose` grant; see below.
 
 #### `archive_message`
 Archive one message — removes its `INBOX` label.
@@ -434,6 +436,35 @@ existing user-label **names**; creating new labels is not supported).
 
 At least one of `add` / `remove` is required. Returns
 `{ ref, labels, indexed, index_as_of }`.
+
+#### `create_draft`
+Create one Gmail **draft**. It is never sent: the user reviews and sends it
+from Gmail. Remote Deployment only (the local adapters have no draft seam).
+
+| Arg | Type | Notes |
+|-----|------|-------|
+| `from` | string (required) | a verified send-as address of the account |
+| `to` | string[] (required) | at least one recipient |
+| `body` | string (required) | plain text |
+| `cc` / `bcc` | string[] | |
+| `subject` | string | defaults to `Re: <original>` for a reply |
+| `reply_to_ref` | string | `<account>:<message-id>` to reply to; threads the draft and sets `In-Reply-To` / `References` |
+| `account` | string | required unless `reply_to_ref` is given |
+
+`from` is checked against the account's `users.settings.sendAs` list (primary
+address plus send-as aliases whose verification is `accepted`; cached for ten
+minutes per Worker isolate). Any other address is refused, and the error lists
+the allowed ones. Header values with line breaks are refused.
+
+Requires the per-account drafts consent: open
+`/setup/google/start?account=<label>&drafts=1` (add `&writes=1` to keep
+archive/label writes, because re-consent replaces the stored scopes). Without
+`gmail.compose` the tool refuses with that link. Returns
+`{ ref, draft_id, thread_id, from, sent: false, index_as_of }`.
+
+`gmail.compose` also permits sending at the token level. mail-index never
+sends: the only Gmail seam rejects every `send` path and a test proves no code
+names a send endpoint. See [ADR-0011](adr/0011-opt-in-drafts-never-send.md).
 
 ---
 

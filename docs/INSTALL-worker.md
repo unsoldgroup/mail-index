@@ -73,7 +73,10 @@ machine signs in again at `/setup/login`.
 Then start `/setup/google/start?account=<label>`. The default consent stores a read-only
 grant. To opt into archive/label edits, revisit
 `/setup/google/start?account=<label>&writes=1`; this is the remote equivalent of
-local `--enable-writes`. Every Account is independent.
+local `--enable-writes`. To let agents create Gmail drafts with `create_draft`,
+add `&drafts=1` (scope `gmail.compose`). Re-consent replaces the stored scopes,
+so pass both flags to keep both. mail-index never sends; see
+[ADR-0011](adr/0011-opt-in-drafts-never-send.md). Every Account is independent.
 
 Each grant's refresh token is bound to the Worker's own Google client — the
 local CLI's Desktop-client tokens cannot be transplanted here (see

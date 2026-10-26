@@ -849,7 +849,7 @@ test('surface: exactly the PLAN §12 tools are advertised, all with schemas, all
     'interest_propose', 'interest_set', 'interest_get', 'save_summary',
     'onboarding', 'settings_get', 'settings_set', 'backfill_bodies',
     'domains_to_categorize', 'save_domain_category', 'cadence', 'sync_status',
-    'relay_menu_status', 'sync_now', 'catch_up', 'digest_sources', 'archive_message', 'modify_labels',
+    'relay_menu_status', 'sync_now', 'catch_up', 'digest_sources', 'archive_message', 'modify_labels', 'create_draft',
     'trigger_rule_save', 'trigger_rule_list', 'trigger_rule_delete',
     'webhook_consumer_register', 'webhook_consumer_delete',
   ];
@@ -967,11 +967,11 @@ test('setup mode: tools/list advertises exactly the reduced setup surface', asyn
 test('setup mode: with config present the full tool surface is what serve() would use', async () => {
   // The config-present path serves the full surface — assert its size/identity
   // here so the bootstrapping branch never silently shrinks the real surface.
-  // 21 original read tools + the 2 opt-in writers (archive_message,
-  // modify_labels) + 2 relay/status quick-action tools + five remote Trigger
+  // 21 original read tools + the 3 opt-in writers (archive_message,
+  // modify_labels, create_draft) + 2 relay/status quick-action tools + five remote Trigger
   // rule tools + the four working-set tools (onboarding, settings_get,
   // settings_set, backfill_bodies) + get_message_attachment.
-  assert.equal(TOOLS.length, 35, 'full surface includes the working-set and attachment tools');
+  assert.equal(TOOLS.length, 36, 'full surface includes the working-set and attachment tools');
 });
 
 test('setup_status reports observation and does not crash with no config', async () => {
