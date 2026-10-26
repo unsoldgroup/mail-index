@@ -52,5 +52,10 @@ test('a /mcp tool call emits tier, surface and no arguments when a token is set'
     assert.match(sent, /"mcp_surface":"chatgpt"/);
     assert.match(sent, /"sensitive":true/);
     assert.doesNotMatch(sent, /secret-needle/);
+    const list = await handleAuthorizedRequest(new Request('https://w.example/mcp', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }) }), env, {}, { waitUntil: (p: Promise<unknown>) => { pending.push(p); }, passThroughOnException() {} });
+    const listed = await list.text();
+    assert.match(listed, /"search"/);
+    assert.doesNotMatch(listed, /get_more_tools/);
   } finally { globalThis.fetch = realFetch; await mf.dispose(); }
 });

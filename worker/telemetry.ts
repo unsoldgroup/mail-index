@@ -49,6 +49,9 @@ export function instrumentWorkerMcp(server: Server, request: Request, env: Telem
     surface: parseSurface(request.url),
     tiers: TOOL_TIERS,
     sensitive: SENSITIVE_TOOLS,
+    // No virtual get_more_tools: its free-text intent could carry mailbox
+    // content past the allowlist, and the package logs its raw arguments.
+    sdkOptions: { reportMissing: false },
   });
   return true;
 }
