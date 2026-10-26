@@ -1,4 +1,5 @@
 import type {
+  DraftInput,
   LabelChange,
   MailScope,
   MailSource,
@@ -11,6 +12,7 @@ import { InsufficientScopeError } from '../../index.js';
 import {
   type GmailMessage,
   buildGmailQuery,
+  buildRawDraft,
   extractAttachments,
   extractBodies,
   extractInlineAttachment,
@@ -167,6 +169,49 @@ export class GmailRestAdapter implements MailSource {
           'Reconnect this Account with Gmail mailbox writes enabled.',
           error.message,
         );
+      }
+      throw error;
+    }
+  }
+
+  /** Verified send-as addresses (the primary address is always verified). */
+  async listSendAs(): Promise<string[]> {
+    const response = (await this.#run({ path: 'settings/sendAs' })) as {
+      sendAs?: { sendAsEmail?: string; isPrimary?: boolean; verificationStatus?: string }[];
+    };
+    return (response.sendAs ?? [])
+      .filter((a) => a.sendAsEmail && (a.isPrimary || a.verificationStatus === 'accepted'))
+      .map((a) => a.sendAsEmail!.toLowerCase());
+  }
+
+  /** `users.drafts.create` only. Nothing here (or anywhere) sends: see ADR-0011. */
+  async createDraft(draft: DraftInput): Promise<{ id: string; threadId: string | null }> {
+    let threadId: string | undefined;
+    let inReplyTo: string | null = null;
+    let references: string | null = null;
+    let subject = draft.subject;
+    if (draft.replyToId) {
+      const [original] = await this.getMetadata([draft.replyToId]);
+      if (!original) throw new Error(`message ${draft.replyToId} was not found in the mailbox`);
+      threadId = original.threadId ?? undefined;
+      inReplyTo = original.messageId ?? null;
+      const prior = Object.entries(original.headers ?? {}).find(([k]) => k.toLowerCase() === 'references')?.[1];
+      references = [prior, original.messageId].filter(Boolean).join(' ') || null;
+      if (subject === undefined && original.subject) {
+        subject = /^re:/i.test(original.subject) ? original.subject : `Re: ${original.subject}`;
+      }
+    }
+    const raw = buildRawDraft({ ...draft, subject: subject ?? '', inReplyTo, references });
+    try {
+      const created = (await this.#run({
+        path: 'drafts',
+        method: 'POST',
+        body: { message: { raw, ...(threadId ? { threadId } : {}) } },
+      })) as { id?: string; message?: { threadId?: string } };
+      return { id: created.id ?? '', threadId: created.message?.threadId ?? threadId ?? null };
+    } catch (error) {
+      if (error instanceof GmailRestError && error.status === 403) {
+        throw new InsufficientScopeError(this.provider, 'Reconnect this Account with Gmail drafts enabled.', error.message);
       }
       throw error;
     }

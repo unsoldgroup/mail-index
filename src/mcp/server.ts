@@ -56,6 +56,7 @@ import {
   digestSources,
   archiveMessage,
   modifyLabels,
+  createDraft,
   McpToolError,
   type ToolContext,
 } from './tools.js';
@@ -94,7 +95,7 @@ function obj(
 /**
  * The full agent surface: read-only recall/download primitives, local
  * write-backs, remote administration, and the two OPT-IN mailbox writers
- * archive_message / modify_labels (ADR-0007). Every entry advertises a compact input schema and
+ * archive_message / modify_labels (ADR-0007) and create_draft (ADR-0011). Every entry advertises a compact input schema and
  * dispatches to the pure engine. Descriptions tell the agent the recall-first,
  * token-conscious contract (compact shapes, handbacks for bulk work,
  * `index_as_of` on every response).
@@ -447,6 +448,32 @@ export const TOOLS: ToolDef[] = [
       }),
   },
   {
+    name: 'create_draft',
+    description:
+      'OPT-IN WRITE — creates ONE Gmail DRAFT; it NEVER sends. The user reviews and sends it from Gmail. `from` must be a verified send-as address of the account (the error lists them). Pass reply_to_ref (<account:message-id>) to reply in that thread; subject then defaults to "Re: <original>". Requires a gmail.compose grant; otherwise it refuses with the re-consent link. Use only when the user asked for a draft.',
+    inputSchema: obj({ account: str, from: str, to: strArr, cc: strArr, bcc: strArr, subject: str, body: str, reply_to_ref: str }, ['from', 'to', 'body']),
+    annotations: {
+      title: 'Create Draft',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    run: (ctx, a) => {
+      const list = (k: string) => (Array.isArray(a[k]) ? { [k]: (a[k] as unknown[]).map(String) } : {});
+      return createDraft(ctx, {
+        from: String(a['from']),
+        to: Array.isArray(a['to']) ? (a['to'] as unknown[]).map(String) : [],
+        body: String(a['body']),
+        ...list('cc'),
+        ...list('bcc'),
+        ...optStr(a, 'account'),
+        ...optStr(a, 'subject'),
+        ...optStr(a, 'reply_to_ref'),
+      });
+    },
+  },
+  {
     name: 'trigger_rule_save', description: 'Create or update a remote Deployment Trigger rule.',
     inputSchema: obj({ id: str, name: str, account: str, predicate: { type: 'object' }, consumer_ids: strArr, enabled: bool }, ['name', 'predicate', 'consumer_ids']),
     run: (ctx, a) => requireTriggerAdmin(ctx).saveRule(a),
@@ -599,8 +626,8 @@ export function buildServer(ctx: ToolContext): Server {
         '`get_message` for the few rows you actually need the full body of — do not ' +
         'fetch every result. Use `get_message_attachment` to list or download a ' +
         'receipt, invoice, statement, or other file from one selected message. ' +
-        'Local-first and read-only: it never sends or changes ' +
-        'mail. If a response carries `freshness.auth: "needs_reauth"`, the mailbox ' +
+        'Local-first and read-only by default: it never sends mail, and changes the ' +
+        'mailbox (archive, labels, drafts) only through the explicit opt-in tools. If a response carries `freshness.auth: "needs_reauth"`, the mailbox ' +
         'credential has been rejected and the index is FROZEN — tell the user and ' +
         'give them `freshness.refresh_command`; do not present stale results as ' +
         'current. If `settings_get` reports no `onboarding_completed_at`, run ' +

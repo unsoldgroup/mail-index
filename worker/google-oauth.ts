@@ -3,6 +3,8 @@ import { GmailRestAdapter } from '../src/source/adapters/gmail-rest/index.js';
 
 export const GMAIL_READONLY = 'https://www.googleapis.com/auth/gmail.readonly';
 export const GMAIL_MODIFY = 'https://www.googleapis.com/auth/gmail.modify';
+/** Opt-in drafts (ADR-0011). The scope also permits sending; code never does. */
+export const GMAIL_COMPOSE = 'https://www.googleapis.com/auth/gmail.compose';
 
 function keyBytes(encoded: string): Uint8Array {
   const bytes = Uint8Array.from(Buffer.from(encoded, 'base64'));
@@ -41,7 +43,7 @@ async function hmacKey(encoded: string) {
  * `/setup/google/callback` redirect URI so operators register only the two
  * callbacks INSTALL-worker.md already lists, and carries no account/writes.
  */
-export interface OAuthState { account: string; writes: boolean; redirectUri: string; expiresAt: number; login?: boolean }
+export interface OAuthState { account: string; writes: boolean; drafts?: boolean; redirectUri: string; expiresAt: number; login?: boolean }
 
 export async function signState(state: OAuthState, encodedKey: string): Promise<string> {
   return signPayload(state, encodedKey);

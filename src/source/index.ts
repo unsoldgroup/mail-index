@@ -305,4 +305,29 @@ export interface MailSource {
    * `archive_message`/`modify_labels` MCP tools — never from sync or enrich.
    */
   modify?(id: string, change: LabelChange): Promise<void>;
+
+  /**
+   * OPT-IN draft seam (ADR-0011). Create one draft in the mailbox; it is never
+   * sent. Absent on adapters without draft support, so callers MUST
+   * feature-detect. Reached only from the `create_draft` MCP tool.
+   */
+  createDraft?(draft: DraftInput): Promise<{ id: string; threadId: string | null }>;
+
+  /** The mailbox's verified send-as addresses, lower-cased (the only legal draft `from`). */
+  listSendAs?(): Promise<string[]>;
+}
+
+/** One draft to create ({@link MailSource.createDraft}). */
+export interface DraftInput {
+  /** A verified send-as address of the mailbox (bare address). */
+  from: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  /** Defaults to `Re: <original subject>` for a reply, else empty. */
+  subject?: string;
+  /** Plain-text body. */
+  body: string;
+  /** Provider id of the message this replies to: threads the draft and sets In-Reply-To/References. */
+  replyToId?: string;
 }

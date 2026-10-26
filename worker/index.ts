@@ -8,7 +8,7 @@ import { buildServer } from '../src/mcp/server.js';
 import type { ToolContext } from '../src/mcp/tools.js';
 import { GmailRestAdapter } from '../src/source/adapters/gmail-rest/index.js';
 import { InsufficientScopeError } from '../src/source/index.js';
-import { AccountMismatchError, accessTokenProvider, exchangeToken, GMAIL_MODIFY, GMAIL_READONLY, saveGrant, signPayload, signState, verifyGoogleIdentity, verifyPayload, verifyState } from './google-oauth.js';
+import { AccountMismatchError, accessTokenProvider, exchangeToken, GMAIL_COMPOSE, GMAIL_MODIFY, GMAIL_READONLY, saveGrant, signPayload, signState, verifyGoogleIdentity, verifyPayload, verifyState } from './google-oauth.js';
 import { enqueueJob, enqueueScheduledSyncs, jobStatus, runJob, type JobMessage } from './jobs.js';
 import { triggerAdmin } from './triggers.js';
 import { agentCard, handleA2a } from './a2a.js';
@@ -88,6 +88,7 @@ export async function buildWorkerToolContext(env: Env, fetchImpl: typeof fetch =
     const label = account.account ?? '';
     const source = new GmailRestAdapter({ fetchImpl, tokenProvider: accessTokenProvider(driver, label, env, fetchImpl) });
     if (!scopes.get(label)?.includes(GMAIL_MODIFY)) Object.defineProperty(source, 'modify', { value: async () => { throw new InsufficientScopeError('gmail-rest', `/setup?account=${encodeURIComponent(label)}&writes=1`, 'Reconnect this Account with mailbox writes enabled.'); } });
+    if (!scopes.get(label)?.split(' ').includes(GMAIL_COMPOSE)) Object.defineProperty(source, 'createDraft', { value: async () => { throw new InsufficientScopeError('gmail-rest', `/setup/google/start?account=${encodeURIComponent(label)}&drafts=1`, 'Reconnect this Account with drafts enabled.'); } });
     return source;
   }, jobStatus: (account) => jobStatus(env, account), enqueueJob: (kind, account, params) => enqueueJob(env, kind, account, params),
     // The exact link a human must open to repair a rejected grant. Keeping the
@@ -180,7 +181,7 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
     if (!accessToken || !refreshToken) throw new Error('Google callback returned incomplete tokens');
     const address = await verifyGoogleIdentity(fetchImpl, accessToken); const { driver } = await storage(env);
     try {
-      await saveGrant(driver, { account: state.account, address, scopes: mailboxScopes(state.writes), refreshToken, key: env.TOKEN_ENC_KEY });
+      await saveGrant(driver, { account: state.account, address, scopes: mailboxScopes(state.writes, state.drafts), refreshToken, key: env.TOKEN_ENC_KEY });
     } catch (err) {
       if (!(err instanceof AccountMismatchError)) throw err;
       return new Response(`<h1>Wrong account label</h1><p>${escapeHtml(err.message)}</p><p><a href="/setup/google/start?account=${encodeURIComponent(address.split('@')[0] ?? 'account')}">Connect ${escapeHtml(address)} under its own label</a></p>`, { status: 409, headers: { 'content-type': 'text/html; charset=utf-8' } });
@@ -200,10 +201,10 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
     const email = await operatorEmail(request, env); if (!email || !allowed(email, env)) return new Response(`<h1>mail-index</h1><p><a href="/setup/login">Sign in as an operator</a> to continue.</p>`, { status: 401, headers: { 'content-type': 'text/html; charset=utf-8' } });
     if (url.pathname === '/setup/google/start') {
       const account = url.searchParams.get('account')?.trim(); if (!account) return Response.json({ error: 'account_required' }, { status: 400 });
-      const writes = url.searchParams.get('writes') === '1'; const redirectUri = `${url.origin}/setup/google/callback`;
-      const state = await signState({ account, writes, redirectUri, expiresAt: Date.now() + 10 * 60_000 }, env.TOKEN_ENC_KEY);
+      const writes = url.searchParams.get('writes') === '1'; const drafts = url.searchParams.get('drafts') === '1'; const redirectUri = `${url.origin}/setup/google/callback`;
+      const state = await signState({ account, writes, drafts, redirectUri, expiresAt: Date.now() + 10 * 60_000 }, env.TOKEN_ENC_KEY);
       const consent = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-      consent.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', access_type: 'offline', prompt: 'consent', scope: mailboxScopes(writes).join(' '), state }).toString();
+      consent.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', access_type: 'offline', prompt: 'consent', scope: mailboxScopes(writes, drafts).join(' '), state }).toString();
       return Response.redirect(consent.toString(), 302);
     }
     const { driver } = await storage(env); const accounts = await driver.prepare('SELECT account,address,scopes FROM google_tokens ORDER BY account').all() as { account: string; address: string; scopes: string }[];
@@ -213,7 +214,7 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
 }
 
 /** `openid email` lets staff identity checks read the immutable OIDC subject (EXP-4599). */
-function mailboxScopes(writes: boolean): string[] { return ['openid', 'email', GMAIL_READONLY, ...(writes ? [GMAIL_MODIFY] : [])]; }
+function mailboxScopes(writes: boolean, drafts = false): string[] { return ['openid', 'email', GMAIL_READONLY, ...(writes ? [GMAIL_MODIFY] : []), ...(drafts ? [GMAIL_COMPOSE] : [])]; }
 
 function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!); }
 

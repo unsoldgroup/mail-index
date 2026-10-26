@@ -24,6 +24,9 @@ export function createGmailRestRunner(
   tokenProvider: () => Promise<string>,
 ): GmailRestRunner {
   return async ({ path, query = {}, method = 'GET', body }) => {
+    // The one Gmail seam refuses every send endpoint (messages.send,
+    // drafts.send), whatever scope the token carries. ADR-0011.
+    if (path.split(/[/?#]/).includes('send')) throw new Error('mail-index never sends mail');
     const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`);
     for (const [key, value] of Object.entries(query)) {
       if (value !== undefined) url.searchParams.set(key, String(value));

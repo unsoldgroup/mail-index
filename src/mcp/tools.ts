@@ -854,6 +854,80 @@ export async function modifyLabels(
   return mutateLabels(ctx, args.ref, { addLabelIds: add, removeLabelIds: remove });
 }
 
+export interface CreateDraftArgs {
+  account?: string;
+  from: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject?: string;
+  body: string;
+  /** `<account:message-id>` of the message to reply to (threads the draft). */
+  reply_to_ref?: string;
+}
+
+// ponytail: per-isolate cache, one sendAs.list per account per 10 minutes.
+const SEND_AS_TTL_MS = 10 * 60 * 1000;
+const sendAsCache = new Map<string, { emails: string[]; expiresAt: number }>();
+
+/**
+ * `create_draft` — OPT-IN write (ADR-0011). Creates one Gmail draft and never
+ * sends it. `from` must be one of the account's verified send-as addresses.
+ * Requires a `gmail.compose` grant.
+ */
+export async function createDraft(
+  ctx: ToolContext,
+  args: CreateDraftArgs,
+): Promise<WithMeta & { ref: string | null; draft_id: string; thread_id: string | null; from: string; sent: false }> {
+  const reply = args.reply_to_ref ? parseToolRef(args.reply_to_ref) : undefined;
+  if (reply && args.account && args.account !== reply.account) {
+    throw new McpToolError(`reply_to_ref belongs to account "${reply.account}", not "${args.account}"`);
+  }
+  const account = reply?.account ?? args.account;
+  if (!account) throw new McpToolError('create_draft needs "account" (or a "reply_to_ref")');
+  const to = args.to.map((a) => a.trim()).filter(Boolean);
+  if (to.length === 0) throw new McpToolError('create_draft needs at least one "to" recipient');
+  const accCfg = ctx.config.accounts[account];
+  if (!accCfg) throw new McpToolError(`unknown account "${account}" — not in the operator config`);
+  if (!ctx.buildSource) throw new McpToolError('drafts are not available in this server context');
+  const source = ctx.buildSource(accCfg);
+  if (!source.createDraft || !source.listSendAs) {
+    throw new McpToolError(`drafts are not supported by the ${source.provider} adapter`);
+  }
+  const now = (ctx.now?.() ?? new Date()).getTime();
+  let cached = sendAsCache.get(account);
+  if (!cached || cached.expiresAt <= now) {
+    cached = { emails: await source.listSendAs(), expiresAt: now + SEND_AS_TTL_MS };
+    sendAsCache.set(account, cached);
+  }
+  const from = args.from.trim().toLowerCase();
+  if (!cached.emails.includes(from)) {
+    throw new McpToolError(`"${args.from}" is not a verified send-as address of ${account}. Use one of: ${cached.emails.join(', ')}`);
+  }
+  try {
+    const draft = await source.createDraft({
+      from,
+      to,
+      ...(args.cc ? { cc: args.cc } : {}),
+      ...(args.bcc ? { bcc: args.bcc } : {}),
+      ...(args.subject !== undefined ? { subject: args.subject } : {}),
+      body: args.body,
+      ...(reply ? { replyToId: reply.id } : {}),
+    });
+    return await withMeta(ctx, account, {
+      ref: reply ? `${account}:${reply.id}` : null,
+      draft_id: draft.id,
+      thread_id: draft.threadId,
+      from,
+      sent: false,
+    });
+  } catch (err) {
+    if (err instanceof InsufficientScopeError) throw new McpToolError(err.message);
+    if (err instanceof Error && /line breaks/.test(err.message)) throw new McpToolError(err.message);
+    throw err;
+  }
+}
+
 /**
  * Parse a stored `ocr_images_json` into a plain array (or `[]` on absent/bad
  * JSON). Surfaced on `get_message` so the agent can fetch + read these images
