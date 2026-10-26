@@ -281,3 +281,35 @@ test('contactScoringRows treats sender addresses as literals, not LIKE patterns'
   const rows = await repo.contactScoringRows(ACCOUNT);
   assert.equal(rows[0]?.bulk_count, 1);
 });
+
+test('contactScoringRows matches bulk senders exactly, by <addr>, and case-insensitively', async () => {
+  const repo = await freshRepo();
+  await seedWorld(repo);
+  // Same newsletter, bare and upper-cased forms: both still credit the contact.
+  await seed(repo, { id: 'n-bare', from: 'news@bulletin.example.org', isList: true, internalDate: NOW - 20_000 });
+  await seed(repo, { id: 'n-upper', from: 'Weekly <NEWS@Bulletin.Example.org>', category: 'social', internalDate: NOW - 20_001 });
+  // Non-bulk mail from the same sender is not bulk.
+  await seed(repo, { id: 'n-plain', from: 'news@bulletin.example.org', internalDate: NOW - 20_002 });
+  await aggregateAccount(repo, ACCOUNT, [ME]);
+  const rows = await repo.contactScoringRows(ACCOUNT);
+  assert.equal(rows.find((r) => r.address === 'news@bulletin.example.org').bulk_count, 7);
+});
+
+test('contactScoringRows has no per-contact correlated subquery (USG-341 query-plan check)', async () => {
+  // A correlated subquery per contact is O(contacts x messages) and exceeded
+  // D1's per-query CPU limit on real mailboxes. Every statement this read
+  // issues must plan without one.
+  const repo = await freshRepo();
+  await seedWorld(repo);
+  const issued = [];
+  const prepare = repo.driver.prepare.bind(repo.driver);
+  repo.driver.prepare = (sql) => { issued.push(sql); return prepare(sql); };
+  await repo.contactScoringRows(ACCOUNT);
+  repo.driver.prepare = prepare;
+  assert.ok(issued.length > 0, 'the read went through the driver');
+  for (const sql of issued) {
+    const plan = await repo.driver.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(ACCOUNT);
+    const detail = plan.map((row) => row.detail).join('\n');
+    assert.doesNotMatch(detail, /CORRELATED/, `correlated subquery in:\n${sql}\n${detail}`);
+  }
+});
