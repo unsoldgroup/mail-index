@@ -46,6 +46,8 @@ export interface Env extends TelemetryEnv {
   CRM_WEBHOOK_SECRET?: string;
   /** Comma-separated mailboxes allowed to reach the CRM; unset means all. */
   CRM_ACCOUNTS?: string;
+  /** Comma-separated Account labels/addresses the InboxArchive RPC may archive in; unset means disabled (EXP-5030). */
+  INBOX_ARCHIVE_ACCOUNTS?: string;
   ATTACHMENTS?: AttachmentBucket;
 }
 

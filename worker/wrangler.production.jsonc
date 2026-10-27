@@ -62,6 +62,9 @@
     // CRM_ACCOUNTS is deliberately unset: which mailboxes reach a CRM is
     // chosen per workspace in the app's mailbox selector, so a second switch
     // here would silently override it. It stays available as a hard guard.
+    // INBOX_ARCHIVE_ACCOUNTS (comma-separated Account labels/addresses) is
+    // deliberately unset: the InboxArchive RPC (EXP-5030) answers 'disabled'
+    // until activation sets it and the Account holds a gmail.modify grant.
     "CRM_WEBHOOK_URL": "https://ei.unsold.cloud/s/mail-index/completed"
   }
 }

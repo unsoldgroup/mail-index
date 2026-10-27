@@ -34,3 +34,4 @@ export default {
 // Named RPC only. Existing OAuth/public HTTP routes cannot access this capability.
 export { StaffIdentityProbe, StaffLinkStaging } from './staff-staging-entrypoint.js';
 export { StaffSentEvidence } from './staff-evidence-entrypoint.js';
+export { InboxArchive } from './inbox-archive-entrypoint.js';
