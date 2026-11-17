@@ -714,6 +714,19 @@ test('catch_up: STALE index returns data + sync_started + eta + handback, spawns
   assert.ok('index_as_of' in res);
 });
 
+test('catch_up: long curated addresses and domains cannot exceed SQLite pattern limits', async () => {
+  const repo = await freshRepo();
+  await seedMailbox(repo);
+  await repo.upsertContact({ account: ACCOUNT, address: `${'x'.repeat(50_001)}@example.com`, curation: 'important' });
+  await curationSet(repo, ACCOUNT, {
+    contacts: [{ address: `${'x'.repeat(50_001)}@example.com`, curation: 'important' },
+      { address: 'vip@partner.example.com', curation: 'important' }],
+    domains: [{ domain: `${'x'.repeat(50_001)}.example.com`, curation: 'important' }],
+  });
+  const result = await catchUp(ctxFor(repo), { since: '7d' });
+  assert.ok(result.fromImportant.some((h) => h.ref === `${ACCOUNT}:m3`));
+});
+
 test('catch_up: FRESH index does not spawn a background sync (debounce)', async () => {
   const repo = await freshRepo();
   await seedMailbox(repo);

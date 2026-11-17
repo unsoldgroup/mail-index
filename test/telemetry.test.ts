@@ -1,11 +1,33 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { gunzipSync } from 'node:zlib';
-import { assertTierCoverage } from '../dist-worker/worker/mcp-telemetry.js';
+import { assertTierCoverage, mcpAnalyticsOptions } from '../dist-worker/worker/mcp-telemetry.js';
 import { toolList } from '../dist/mcp/server.js';
 import { SENSITIVE_TOOLS, TOOL_TIERS, instrumentWorkerMcp } from '../dist-worker/worker/telemetry.js';
 
 const listed = toolList().map((t) => t.name);
+
+test('error telemetry exposes static categories without mailbox data or exception payloads', () => {
+  const options = mcpAnalyticsOptions({ serverName: 'mail-index', environment: 'test', tiers: TOOL_TIERS });
+  for (const [message, type, code] of [
+    ['D1_ERROR: LIKE or GLOB pattern too complex: SQLITE_ERROR', 'internal', 'storage_pattern_too_complex'],
+    ['catch_up needs an "account" — configured/indexed: private@example.com', 'missing_context', 'account_required'],
+    ['invalid "since" "private@example.com" — expected a relative token', 'validation', 'invalid_since'],
+    ['D1_ERROR: private@example.com', 'internal', 'storage_error'],
+    ['private@example.com bearer secret', 'internal', 'tool_failed'],
+  ]) {
+    const event = options.beforeSend!({ event: '$mcp_tool_call', properties: {
+      $mcp_is_error: true, $mcp_tool_name: 'catch_up', $mcp_error_message: message,
+      $mcp_error_type: 'private@example.com', $exception_list: [{ value: message }],
+      $mcp_parameters: { since: 'private@example.com' }, $mcp_response: { content: [{ text: message }] },
+    } });
+    assert.equal(event?.properties?.$mcp_error_type, type);
+    assert.equal(event?.properties?.$mcp_error_message, code);
+    assert.doesNotMatch(JSON.stringify(event), /private@example|bearer secret|exception_list|mcp_response|mcp_parameters/);
+  }
+  const success = options.beforeSend!({ event: '$mcp_tool_call', properties: { $mcp_is_error: false, $mcp_error_message: 'secret' } });
+  assert.equal(success?.properties?.$mcp_error_message, undefined);
+});
 
 test('every advertised tool has a telemetry tier, and no tier names a removed tool', () => {
   assertTierCoverage(listed, TOOL_TIERS);
