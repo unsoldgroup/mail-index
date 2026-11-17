@@ -64,7 +64,10 @@ like, `POSTHOG_HOST`, `ENVIRONMENT` and `DEPLOY_GIT_SHA`. The Worker then sends
 one PostHog event per MCP request with operational metadata only: tool name,
 tier (`read`/`write`), a `sensitive` flag for mail-content reads, duration,
 error flag, and the `?surface=` tag from the connector URL. Arguments and
-results are never sent. Without the token nothing is sent.
+results are never sent. Failed tool calls also carry a static error category and
+code, such as `missing_context` / `account_required` or `internal` /
+`storage_pattern_too_complex`. Raw exception messages and mailbox data remain
+excluded. Without the token nothing is sent.
 
 ## 4. Connect an agent
 

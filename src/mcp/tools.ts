@@ -1899,18 +1899,21 @@ export async function digestSources(ctx: ToolContext, args: DigestSourcesArgs): 
 
 function catchUpFromImportantSql(): string {
   // New mail since cutoff from a curated-important contact (or important domain).
+  // Curated values are literals, not LIKE patterns. Imported long/wildcard-heavy
+  // values must not exceed SQLite's pattern limit or match unrelated senders.
   return `SELECT m.* FROM messages m
            WHERE m.account = ? AND m.internal_date >= ? AND m.direction = 'received'
              AND (
                EXISTS (
                  SELECT 1 FROM contacts c
                   WHERE c.account = m.account AND c.curation = 'important'
-                    AND (m.from_addr = c.address OR lower(m.from_addr) LIKE '%<' || lower(c.address) || '>%')
+                    AND (m.from_addr = c.address OR instr(lower(m.from_addr), '<' || lower(c.address) || '>') > 0)
                )
                OR EXISTS (
                  SELECT 1 FROM domains d
                   WHERE d.account = m.account AND d.curation = 'important'
-                    AND (lower(m.from_addr) LIKE '%@' || lower(d.domain) OR lower(m.from_addr) LIKE '%@' || lower(d.domain) || '>%')
+                    AND (substr(lower(m.from_addr), -(length(d.domain) + 1)) = '@' || lower(d.domain)
+                         OR instr(lower(m.from_addr), '@' || lower(d.domain) || '>') > 0)
                )
              )
            ORDER BY m.internal_date DESC LIMIT 25`;
@@ -1934,7 +1937,7 @@ function digestSourcesSql(): string {
             FROM contacts c
             JOIN messages m
               ON m.account = c.account
-             AND (m.from_addr = c.address OR lower(m.from_addr) LIKE '%<' || lower(c.address) || '>%')
+             AND (m.from_addr = c.address OR instr(lower(m.from_addr), '<' || lower(c.address) || '>') > 0)
            WHERE c.account = ?
              AND m.direction = 'received'
              AND m.internal_date >= ?
