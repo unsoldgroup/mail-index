@@ -416,7 +416,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'catch_up',
     description:
-      'The "what did I miss" briefing since a time (30d, 2w, 12h, 1mo, or ISO): new mail from curated-important contacts, new replies in your threads, and interest-keyword hits. Compact rows + a body command handback. If the index is stale it returns now and spawns a background sync.',
+      'The "what did I miss" briefing since a time (30d, 2w, 12h, 1mo, or ISO): new mail from curated-important contacts, new replies in your threads, and interest-keyword hits. Pass account when more than one mailbox is connected; omit it only for a single-account index. Compact rows + a body command handback. If the index is stale it returns now and spawns a background sync.',
     inputSchema: obj({ since: str, account: str }, ['since']),
     run: (ctx, a) => catchUp(ctx, { since: String(a['since']), ...optStr(a, 'account') }),
   },

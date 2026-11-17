@@ -727,6 +727,24 @@ test('catch_up: long curated addresses and domains cannot exceed SQLite pattern 
   assert.ok(result.fromImportant.some((h) => h.ref === `${ACCOUNT}:m3`));
 });
 
+test('catch_up: curated sender matching is literal, case-insensitive in headers, and account-scoped', async () => {
+  const repo = await freshRepo();
+  await seed(repo, { id: 'contact', from: 'VIP <VIP_1@partner.example.com>', internalDate: T });
+  await seed(repo, { id: 'not-contact', from: 'VIP <vipX1@partner.example.com>', internalDate: T });
+  await seed(repo, { id: 'not-domain', from: 'sender@other.example.com', internalDate: T });
+  await seed(repo, { id: 'bare-domain', from: 'sender@DOMAIN.EXAMPLE.NET', internalDate: T });
+  await seed(repo, { id: 'header-domain', from: 'Sender <sender@DOMAIN.EXAMPLE.NET>', internalDate: T });
+  await repo.upsertContact({ account: ACCOUNT, address: 'vip_1@partner.example.com', curation: 'important' });
+  await repo.upsertContact({ account: 'other-account', address: 'vipX1@partner.example.com', curation: 'important' });
+  await curationSet(repo, ACCOUNT, { domains: [
+    { domain: '%.example.com', curation: 'important' },
+    { domain: 'domain.example.net', curation: 'important' },
+  ] });
+  const result = await catchUp(ctxFor(repo), { since: '7d' });
+  assert.deepEqual(result.fromImportant.map((h) => h.ref).sort(),
+    ['bare-domain', 'contact', 'header-domain'].map((id) => `${ACCOUNT}:${id}`).sort());
+});
+
 test('catch_up: FRESH index does not spawn a background sync (debounce)', async () => {
   const repo = await freshRepo();
   await seedMailbox(repo);

@@ -1,6 +1,7 @@
 // Vendored from unsoldgroup/mcp-telemetry src/index.ts at c7db138 [USG-329].
 // The package repo is private and ships no dist/, so CI cannot install it.
 // Re-vendor here when the shared copy changes.
+// Local extension [USG-469]: classify failures into static codes before redaction.
 import { PostHog, instrument, type BeforeSendFn, type MCPAnalyticsOptions } from "@posthog/mcp";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
@@ -46,6 +47,24 @@ export const ANALYTICS_PROPERTIES: ReadonlySet<string> = new Set([
 ]);
 
 const SURFACE = /^[a-z0-9_-]{1,32}$/;
+
+/** Never retain raw error messages: they can contain mailbox data or credentials. */
+function safeFailureProperties(event: CaptureEvent): Record<string, string> {
+  if (event.event !== '$mcp_tool_call' || event.properties?.$mcp_is_error !== true) return {};
+  const message = typeof event.properties.$mcp_error_message === 'string' ? event.properties.$mcp_error_message : '';
+  let type = 'internal';
+  let code = 'tool_failed';
+  if (message.includes('needs an "account"')) {
+    type = 'missing_context'; code = 'account_required';
+  } else if (message.includes('invalid "since"')) {
+    type = 'validation'; code = 'invalid_since';
+  } else if (message.includes('LIKE or GLOB pattern too complex')) {
+    code = 'storage_pattern_too_complex';
+  } else if (message.includes('D1_ERROR:')) {
+    code = 'storage_error';
+  }
+  return { $mcp_error_type: type, $mcp_error_message: code };
+}
 
 /** Reads ?surface= from a connector URL; anything missing or malformed is "claude". */
 export function parseSurface(url: string | URL): string {
@@ -95,6 +114,7 @@ export function mcpAnalyticsOptions(opts: Omit<McpTelemetryOptions, "token" | "h
       const properties = Object.fromEntries(
         Object.entries(event.properties ?? {}).filter(([key]) => ANALYTICS_PROPERTIES.has(key)),
       );
+      Object.assign(properties, safeFailureProperties(event));
       // The only free text kept: what capability the agent was missing.
       const intent = event.properties?.$mcp_intent;
       if (event.event === MISSING_CAPABILITY_EVENT && typeof intent === "string") properties.$mcp_intent = scrub(intent);

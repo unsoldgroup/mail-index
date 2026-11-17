@@ -74,6 +74,19 @@ test('a /mcp tool call emits tier, surface and no arguments when a token is set'
     assert.match(sent, /"mcp_surface":"chatgpt"/);
     assert.match(sent, /"sensitive":true/);
     assert.doesNotMatch(sent, /secret-needle/);
+    const failed = await handleAuthorizedRequest(new Request('https://w.example/mcp', {
+      method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: {
+        name: 'catch_up', arguments: { account: 'default', since: 'private-failure@example.com' },
+      } }),
+    }), env, {}, { waitUntil: (p: Promise<unknown>) => { pending.push(p); }, passThroughOnException() {} });
+    assert.equal(failed.status, 200);
+    assert.equal((await failed.json() as { result: { isError: boolean } }).result.isError, true);
+    await Promise.all(pending);
+    const errors = bodies.join('\n');
+    assert.match(errors, /"\$mcp_error_type":"validation"/);
+    assert.match(errors, /"\$mcp_error_message":"invalid_since"/);
+    assert.doesNotMatch(errors, /private-failure|exception_list|mcp_parameters|mcp_response/);
     const list = await handleAuthorizedRequest(new Request('https://w.example/mcp', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }) }), env, {}, { waitUntil: (p: Promise<unknown>) => { pending.push(p); }, passThroughOnException() {} });
     const listed = await list.text();
