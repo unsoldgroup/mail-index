@@ -7,8 +7,7 @@ import { windowCutoff, nextBackfillSlice, BACKFILL_FLOOR } from '../src/index/se
 import { syncMetadata } from '../src/ingest/sync.js';
 import { enrich } from '../src/ingest/enrich.js';
 import { buildGraph } from '../src/graph/index.js';
-import { GmailRestAdapter } from '../src/source/adapters/gmail-rest/index.js';
-import { accessTokenProvider } from './google-oauth.js';
+import { buildAccountSource } from './jmap-accounts.js';
 import { markQueueEnqueueFailed, queueFor } from './job-state.js';
 import type { Env } from './index.js';
 import { deliverWebhook, evaluateRules, type DeliveryParams } from './triggers.js';
@@ -159,7 +158,7 @@ export async function enqueueScheduledSyncs(env: Env): Promise<string[]> {
   // expensive one: with no successful watermark the `since` below falls back to
   // the full lookback window, so every hour would replay a 12-month sweep that
   // can only fail. Skip it until the grant is repaired (see markAuthFailed).
-  const rows = await driver.prepare('SELECT account FROM google_tokens WHERE auth_error IS NULL ORDER BY account').all() as { account: string }[];
+  const rows = await driver.prepare('SELECT account FROM google_tokens WHERE auth_error IS NULL UNION SELECT account FROM jmap_accounts WHERE auth_error IS NULL ORDER BY account').all() as { account: string }[];
   const ids = await Promise.all(rows.map(async (row) => {
     const watermark = await driver.prepare(`SELECT finished_at FROM sync_runs WHERE account=? AND phase='sync' AND finished_at IS NOT NULL AND error IS NULL ORDER BY finished_at DESC LIMIT 1`).get(row.account) as { finished_at: string } | undefined;
     const minimumSince = configuredLookbackSince(env);
@@ -227,7 +226,7 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
     await driver.prepare(`UPDATE jobs SET status=?,progress_json=?,error=?,started_at=COALESCE(started_at,?),finished_at=? WHERE id=?`)
       .run(status, JSON.stringify(progress), error ?? null, now, status === 'done' || status === 'failed' ? now : null, message.jobId);
   };
-  const source = new GmailRestAdapter({ fetchImpl, tokenProvider: accessTokenProvider(driver, job.account, env, fetchImpl) });
+  const source = await buildAccountSource(driver, env, job.account, fetchImpl);
   const progress: Record<string, unknown> = {};
   console.log(JSON.stringify({ event: 'job_start', job_id: job.jobId, kind: job.kind }));
   await update('running', progress);

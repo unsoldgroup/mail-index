@@ -729,6 +729,16 @@ const m023_staff_link_revocation: Migration = {
   },
 };
 
+/** Read-only JMAP (Stalwart) mailboxes; the app password is AES-GCM encrypted with TOKEN_ENC_KEY. */
+const m024_jmap_accounts: Migration = {
+  version: 24, name: 'JMAP mailbox credentials', up: async db => {
+    await db.exec(`CREATE TABLE IF NOT EXISTS jmap_accounts (
+      account TEXT PRIMARY KEY, address TEXT NOT NULL, session_url TEXT NOT NULL, username TEXT NOT NULL,
+      password_ciphertext BLOB NOT NULL, iv BLOB NOT NULL, auth_error TEXT, created_at TEXT NOT NULL
+    );`);
+  },
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   m001_initial,
   m002_thread_summary,
@@ -753,6 +763,7 @@ export const MIGRATIONS: readonly Migration[] = [
   m021_staff_sent_evidence,
   m022_staff_staging,
   m023_staff_link_revocation,
+  m024_jmap_accounts,
 ];
 
 /**

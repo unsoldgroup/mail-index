@@ -9,6 +9,7 @@ import type { ToolContext } from '../src/mcp/tools.js';
 import { GmailRestAdapter } from '../src/source/adapters/gmail-rest/index.js';
 import { InsufficientScopeError } from '../src/source/index.js';
 import { AccountMismatchError, accessTokenProvider, exchangeToken, GMAIL_COMPOSE, GMAIL_MODIFY, GMAIL_READONLY, saveGrant, signPayload, signState, verifyGoogleIdentity, verifyPayload, verifyState } from './google-oauth.js';
+import { DEFAULT_JMAP_SESSION_URL, jmapSource, saveJmapAccount } from './jmap-accounts.js';
 import { enqueueJob, enqueueScheduledSyncs, jobStatus, runJob, type JobMessage } from './jobs.js';
 import { triggerAdmin } from './triggers.js';
 import { agentCard, handleA2a } from './a2a.js';
@@ -86,11 +87,16 @@ async function handleMcp(request: Request, env: Env, fetchImpl: typeof fetch = f
 export async function buildWorkerToolContext(env: Env, fetchImpl: typeof fetch = fetch, origin?: string): Promise<ToolContext> {
   const { driver, repo } = await storage(env);
   const connected = await driver.prepare('SELECT account,scopes FROM google_tokens ORDER BY account').all() as { account: string; scopes: string }[];
-  const labels = connected.length ? connected.map((row) => row.account) : ['default'];
-  const accounts = Object.fromEntries(labels.map((account) => [account, { adapter: 'gmail-rest' as const, account }]));
+  const jmap = new Map((await driver.prepare('SELECT account,session_url,username FROM jmap_accounts').all() as { account: string; session_url: string; username: string }[]).map((row) => [row.account, row]));
+  const labels = connected.length || jmap.size ? [...connected.map((row) => row.account), ...jmap.keys()] : ['default'];
+  const accounts = Object.fromEntries(labels.map((account) => [account, { adapter: jmap.has(account) ? 'jmap' as const : 'gmail-rest' as const, account }]));
   const scopes = new Map(connected.map((row) => [row.account, row.scopes]));
   return { repo, config: { accounts }, buildSource: (account) => {
     const label = account.account ?? '';
+    // JMAP Accounts are read-only: no modify/createDraft, so the write tools
+    // answer "the jmap adapter is read-only" / "drafts are not supported".
+    const stored = jmap.get(label);
+    if (stored) return jmapSource(driver, stored, env.TOKEN_ENC_KEY, fetchImpl);
     const source = new GmailRestAdapter({ fetchImpl, tokenProvider: accessTokenProvider(driver, label, env, fetchImpl) });
     if (!scopes.get(label)?.includes(GMAIL_MODIFY)) Object.defineProperty(source, 'modify', { value: async () => { throw new InsufficientScopeError('gmail-rest', `/setup?account=${encodeURIComponent(label)}&writes=1`, 'Reconnect this Account with mailbox writes enabled.'); } });
     if (!scopes.get(label)?.split(' ').includes(GMAIL_COMPOSE)) Object.defineProperty(source, 'createDraft', { value: async () => { throw new InsufficientScopeError('gmail-rest', `/setup/google/start?account=${encodeURIComponent(label)}&drafts=1`, 'Reconnect this Account with drafts enabled.'); } });
@@ -212,8 +218,26 @@ export async function handlePublicRequest(request: Request, env: Partial<Env>, c
       consent.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', access_type: 'offline', prompt: 'consent', scope: mailboxScopes(writes, drafts).join(' '), state }).toString();
       return Response.redirect(consent.toString(), 302);
     }
-    const { driver } = await storage(env); const accounts = await driver.prepare('SELECT account,address,scopes FROM google_tokens ORDER BY account').all() as { account: string; address: string; scopes: string }[];
-    return new Response(`<h1>mail-index setup</h1><p>Operator: ${escapeHtml(email)}</p><p>Register callbacks: ${escapeHtml(`${url.origin}/oauth/google/callback`)} and ${escapeHtml(`${url.origin}/setup/google/callback`)}</p><ul>${accounts.map((a) => `<li>${escapeHtml(a.account)} — ${escapeHtml(a.address)} — ${escapeHtml(a.scopes)}</li>`).join('')}</ul>`, { headers: { 'content-type': 'text/html; charset=utf-8' } });
+    const { driver } = await storage(env);
+    const html = (body: string, status = 200) => new Response(body, { status, headers: { 'content-type': 'text/html; charset=utf-8' } });
+    // Stalwart (JMAP) mailboxes: read-only, HTTP Basic with a per-mailbox app password.
+    if (url.pathname === '/setup/jmap' && request.method === 'POST') {
+      const form = await request.formData(); const field = (name: string) => String(form.get(name) ?? '').trim();
+      const account = field('account'); const address = field('address'); const password = String(form.get('password') ?? '');
+      if (!account || !address || !password) return html('<h1>Missing field</h1><p>Label, address and app password are required.</p><p><a href="/setup">Back</a></p>', 400);
+      const saved = await saveJmapAccount(driver, { account, address, sessionUrl: field('session_url') || DEFAULT_JMAP_SESSION_URL, password, key: env.TOKEN_ENC_KEY }, fetchImpl);
+      if (!saved.ok) return html(`<h1>Not saved</h1><p>${escapeHtml(saved.reason)}</p><p><a href="/setup">Back</a></p>`, 400);
+      return new Response(null, { status: 303, headers: { location: '/setup' } });
+    }
+    if (url.pathname === '/setup/jmap/remove' && request.method === 'POST') {
+      await driver.prepare('DELETE FROM jmap_accounts WHERE account=?').run(String((await request.formData()).get('account') ?? ''));
+      return new Response(null, { status: 303, headers: { location: '/setup' } });
+    }
+    const accounts = await driver.prepare('SELECT account,address,scopes FROM google_tokens ORDER BY account').all() as { account: string; address: string; scopes: string }[];
+    const jmapAccounts = await driver.prepare('SELECT account,address,session_url,auth_error FROM jmap_accounts ORDER BY account').all() as { account: string; address: string; session_url: string; auth_error: string | null }[];
+    return html(`<h1>mail-index setup</h1><p>Operator: ${escapeHtml(email)}</p><p>Register callbacks: ${escapeHtml(`${url.origin}/oauth/google/callback`)} and ${escapeHtml(`${url.origin}/setup/google/callback`)}</p><ul>${accounts.map((a) => `<li>${escapeHtml(a.account)} — ${escapeHtml(a.address)} — ${escapeHtml(a.scopes)}</li>`).join('')}</ul>`
+      + `<h2>Stalwart (JMAP) mailboxes</h2><ul>${jmapAccounts.map((a) => `<li>${escapeHtml(a.account)} — ${escapeHtml(a.address)} — ${escapeHtml(a.session_url)}${a.auth_error ? ` — <strong>auth error: ${escapeHtml(a.auth_error)}</strong>` : ''} <form method="post" action="/setup/jmap/remove" style="display:inline"><input type="hidden" name="account" value="${escapeHtml(a.account)}"><button>Remove</button></form></li>`).join('')}</ul>`
+      + `<form method="post" action="/setup/jmap"><label>Label <input name="account" required></label> <label>Address <input name="address" type="email" required></label> <label>App password <input name="password" type="password" autocomplete="off" required></label> <label>Session URL <input name="session_url" type="url" value="${escapeHtml(DEFAULT_JMAP_SESSION_URL)}"></label> <button>Add mailbox</button></form>`);
   }
   return Response.json({ error: 'not_found' }, { status: 404 });
 }

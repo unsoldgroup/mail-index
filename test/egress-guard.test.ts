@@ -52,6 +52,7 @@ const SRC_PROC_ALLOW = new Set([
 const SRC_NETWORK_ALLOW = new Set([
   'mcp/server.ts', // node:http server for the streamable-HTTP MCP transport — serves, never fetches
   'source/adapters/gmail-rest/runner.ts', // injected Gmail REST fetch — remote Deployment provider seam
+  'source/adapters/jmap/runner.ts', // injected JMAP (Stalwart) fetch — remote Deployment provider seam, reads only
 ]);
 const WORKER_NETWORK_ALLOW = new Set([
   'google-oauth.ts', // Google OAuth/token exchange
