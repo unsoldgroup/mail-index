@@ -11,7 +11,7 @@ const MID = '<abc@example.com>';
 
 /** One connected Account (acct-a / you@example.com) and a fake Gmail that only
  * knows `provider` messages for the `rfc822msgid:` fallback search. */
-async function fixture(options: { allow?: string; writes?: boolean; provider?: { id: string; labels: string[] }[] } = {}) {
+async function fixture(options: { allow?: string; writes?: boolean; provider?: { id: string; labels: string[] }[]; phraseOnly?: boolean } = {}) {
   const mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok") } }', d1Databases: ['DB'] });
   const driver = new D1Driver(await mf.getD1Database('DB')); await runMigrations(driver);
   const env = { DB: driver.db, TOKEN_ENC_KEY: Buffer.alloc(32, 9).toString('base64'), GOOGLE_CLIENT_ID: 'fixture-google', GOOGLE_CLIENT_SECRET: 'fixture-secret', INBOX_ARCHIVE_ACCOUNTS: options.allow };
@@ -29,7 +29,7 @@ async function fixture(options: { allow?: string; writes?: boolean; provider?: {
       const m = provider.find((p) => p.id === decodeURIComponent(one[1]!));
       return m ? Response.json({ id: m.id, threadId: 't', labelIds: m.labels, payload: { headers: [] } }) : Response.json({}, { status: 404 });
     }
-    if (url.pathname.endsWith('/messages')) { queries.push(url.searchParams.get('q') ?? ''); return Response.json({ messages: provider.map((p) => ({ id: p.id })) }); }
+    if (url.pathname.endsWith('/messages')) { const q = url.searchParams.get('q') ?? ''; queries.push(q); const hit = !options.phraseOnly || q.startsWith('"'); return Response.json({ messages: hit ? provider.map((p) => ({ id: p.id })) : [] }); }
     throw new Error(`Unexpected provider request ${url}`);
   }) as typeof fetch;
   const repo = new Repo(driver);
@@ -70,7 +70,7 @@ test('invalid ids and inputs are rejected before any lookup', async () => {
 test('not_found when neither the index nor the Gmail search has the id', async () => {
   const f = await fixture({ allow: 'acct-a' }); try {
     assert.deepEqual(await f.archive({ account: 'acct-a', rfcMessageId: MID }), { status: 'not_found' });
-    assert.deepEqual(f.queries, ['rfc822msgid:abc@example.com']);
+    assert.deepEqual(f.queries, ['rfc822msgid:abc@example.com', '"abc@example.com"']);
   } finally { await f.mf.dispose(); }
 });
 
@@ -106,5 +106,13 @@ test('insufficient_scope without a gmail.modify grant, and nothing is written', 
     assert.deepEqual(await f.archive({ account: 'acct-a', rfcMessageId: MID }), { status: 'insufficient_scope' });
     assert.equal(f.modified.length, 0);
     assert.deepEqual(await f.labelsOf('m1'), ['INBOX']);
+  } finally { await f.mf.dispose(); }
+});
+
+test('falls back to a phrase search for a relayed copy that quotes the id', async () => {
+  const f = await fixture({ allow: 'acct-a', phraseOnly: true, provider: [{ id: 'fwd1', labels: ['INBOX'] }] }); try {
+    assert.deepEqual(await f.archive({ account: 'acct-a', rfcMessageId: MID }), { status: 'archived', ref: 'acct-a:fwd1' });
+    assert.deepEqual(f.queries, ['rfc822msgid:abc@example.com', '"abc@example.com"']);
+    assert.deepEqual(f.modified, ['fwd1']);
   } finally { await f.mf.dispose(); }
 });

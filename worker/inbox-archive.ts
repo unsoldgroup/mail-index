@@ -53,9 +53,18 @@ export async function archiveInboxMessage(env: Env, input: unknown, fetchImpl: t
 }
 
 async function searchProvider(source: MailSource, rfcMessageId: string) {
-  const ids: string[] = [];
-  // ponytail: first 10 hits; one Message-ID never legitimately has more copies than that.
-  for await (const id of source.listIds({ query: `rfc822msgid:${rfcMessageId.slice(1, -1)}`, limit: 10 })) ids.push(id);
+  const bare = rfcMessageId.slice(1, -1);
+  // A relayed copy (EI's [FWD] mail) carries its own Message-ID and quotes the
+  // original in its body, so an exact-id miss falls back to a phrase search.
+  let ids = await listUpTo10(source, `rfc822msgid:${bare}`);
+  if (ids.length === 0) ids = await listUpTo10(source, `"${bare}"`);
   if (ids.length === 0) return [];
   return (await source.getMetadata(ids)).map((m) => ({ id: m.id, labels: m.labels }));
+}
+
+async function listUpTo10(source: MailSource, query: string) {
+  const ids: string[] = [];
+  // ponytail: first 10 hits; one Message-ID never legitimately has more copies than that.
+  for await (const id of source.listIds({ query, limit: 10 })) ids.push(id);
+  return ids;
 }
