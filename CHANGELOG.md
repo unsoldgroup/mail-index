@@ -11,6 +11,18 @@ and the MCP Registry metadata entry. See [docs/PUBLISHING.md](docs/PUBLISHING.md
 
 ---
 
+## [Unreleased]
+
+### Added
+- `jmap` MailSource adapter: read-only JMAP (RFC 8621) over `fetch`, for
+  Stalwart-hosted mailboxes. Mailbox roles map to `INBOX`/`SENT`/`SPAM`/
+  `TRASH`/`DRAFT`; a missing `$seen` keyword maps to `UNREAD`.
+- Deployment: `/setup` can add or remove a Stalwart mailbox (label, address,
+  app password). The login is checked before saving; the password is stored
+  encrypted with `TOKEN_ENC_KEY` in the new `jmap_accounts` table (schema 24).
+  Scheduled syncs and MCP tools use the JMAP adapter for these Accounts;
+  archive, label and draft tools refuse them.
+
 ## [1.5.1] — 2026-08-05
 
 ### Changed

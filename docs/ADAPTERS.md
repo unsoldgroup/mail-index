@@ -13,8 +13,10 @@ client): the **gog adapter** (recommended — Gmail via the
 [`gog`](https://github.com/openclaw/gogcli) CLI; Homebrew-installable, clean
 JSON, `--gmail-no-send`) and the **gws adapter** (Gmail via Google's
 [`gws`](https://github.com/googleworkspace/cli) CLI). Both share the Gmail-REST → neutral-record
-mapping in `src/source/adapters/gmail-shared.ts`. IMAP and other providers are
-future work. This document is for anyone writing a new one.
+mapping in `src/source/adapters/gmail-shared.ts`. The **jmap adapter**
+(`src/source/adapters/jmap/`) reads any JMAP server (built for Stalwart) over
+`fetch` with HTTP Basic auth; the Deployment stores its credentials per Account
+(`/setup`). IMAP and other providers are future work. This document is for anyone writing a new one.
 
 ---
 

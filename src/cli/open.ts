@@ -41,6 +41,8 @@ export function providerUrl(account: AccountConfig, id: string): string {
       // `/u/0` = first signed-in profile (Gmail redirects to the right one).
       // Both Gmail-backed adapters share the same web URL shape.
       return `https://mail.google.com/mail/u/0/#all/${id}`;
+    case 'jmap':
+      throw new Error('jmap Accounts have no provider web deep link');
     default: {
       // Exhaustiveness guard: a new adapter id must add its URL shape here too.
       const unknown: never = account.adapter;

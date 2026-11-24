@@ -9,7 +9,7 @@
  */
 
 /** The current (latest) schema version. Bumped whenever a migration is added. */
-export const SCHEMA_VERSION = 23;
+export const SCHEMA_VERSION = 24;
 
 /**
  * Body state — where a Message sits on the compaction ladder (CONTEXT.md,

@@ -29,6 +29,7 @@ const TABLES = [
   'account_identity',
   'labels',
   'google_tokens',
+  'jmap_accounts',
   'jobs',
   'crm_change_events',
 ];
