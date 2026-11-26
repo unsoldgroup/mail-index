@@ -98,6 +98,28 @@ test('a completed sync hands off the next historical slice', async () => {
   } finally { await mf.dispose(); }
 });
 
+test('cloud backfill and repeated sync keep CRM eligibility while skipping unchanged derived writes', async () => {
+  const { mf, env, driver, sent } = await fixture();
+  try {
+    const run = async (kind: 'sync' | 'backfill') => {
+      const id = await enqueueJob(env, kind, 'acct-a', {});
+      await runJob(env, sent.find(m => (m as {jobId: string}).jobId === id) as never, gmailFetch);
+      const row = await driver.prepare('SELECT progress_json FROM jobs WHERE id=?').get(id) as { progress_json: string };
+      assert.equal(JSON.parse(row.progress_json).crm.deferred, 1);
+    };
+    await run('backfill');
+    await driver.exec('CREATE TABLE derived_write_audit(tbl TEXT)');
+    for (const table of ['contacts','threads','domains','contact_stats_snapshot']) {
+      for (const operation of ['INSERT','UPDATE','DELETE']) {
+        await driver.prepare(`CREATE TRIGGER audit_${table}_${operation} AFTER ${operation} ON ${table}
+          BEGIN INSERT INTO derived_write_audit VALUES ('${table}'); END`).run();
+      }
+    }
+    await run('sync');
+    assert.deepEqual(await driver.prepare('SELECT * FROM derived_write_audit').all(), []);
+  } finally { await mf.dispose(); }
+});
+
 test('the inline enrich is bounded, so a big mailbox cannot blow the wall limit', async () => {
   // Unbounded, this call resolved EVERY meta-state direct Message in the mailbox
   // and did one provider fetch each. `fora` (1.7k Messages) finished; `personal`
@@ -193,6 +215,8 @@ test('a backfill slice sweeps sent mail and Correspondents, not the whole year',
 
     assert.ok(queries.some((q) => q.includes('in:sent')), 'pass 1 sweeps everything sent');
     assert.ok(queries.some((q) => q.includes('from:{friend@example.com}')), 'pass 2 sweeps Correspondents');
+    assert.equal(await repo.countSnapshots('acct-a', 'friend@example.com'), 1, 'received chunks do not resnapshot sent history');
+    assert.equal((await driver.prepare('SELECT count(*) n FROM derived_dirty').get() as { n: number }).n, 0);
     assert.ok(queries.every((q) => q.includes('after:2024/01/01') && q.includes('before:2025/01/01')), 'every pass stays inside the slice');
 
     const settings = await repo.getAccountSettings('acct-a');

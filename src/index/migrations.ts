@@ -739,6 +739,40 @@ const m024_jmap_accounts: Migration = {
   },
 };
 
+const m025_derived_scope: Migration = {
+  version: 25, name: 'cloud derived refresh scope', up: async db => {
+    const columns = new Set((await db.prepare('PRAGMA table_info(contact_stats_snapshot)').all() as
+      { name: string }[]).map(c => c.name));
+    if (!columns.has('msgs_sent')) await db.exec('ALTER TABLE contact_stats_snapshot ADD COLUMN msgs_sent INTEGER');
+    if (!columns.has('last_seen')) await db.exec('ALTER TABLE contact_stats_snapshot ADD COLUMN last_seen TEXT');
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS derived_state(account TEXT PRIMARY KEY, own TEXT, score_day TEXT);
+      CREATE TABLE IF NOT EXISTS derived_dirty(account TEXT, bucket TEXT, revision TEXT NOT NULL,
+        PRIMARY KEY(account,bucket));
+      CREATE TABLE IF NOT EXISTS derived_members(account TEXT, bucket TEXT, address TEXT,
+        PRIMARY KEY(account,bucket,address));
+      CREATE INDEX IF NOT EXISTS derived_by_address ON derived_members(account,address,bucket);
+    `);
+    // Pass each complete trigger as one prepared migration statement on D1.
+    const mark = (row: string) => `INSERT INTO derived_dirty(account,bucket,revision)
+      VALUES(${row}.account,CASE WHEN coalesce(${row}.thread_id,'')='' THEN 'm'||${row}.gmail_message_id
+        ELSE 't'||${row}.thread_id END,hex(randomblob(16)))
+      ON CONFLICT(account,bucket) DO UPDATE SET revision=excluded.revision;`;
+    const fields = ['thread_id','internal_date','from_addr','to_addr','cc_addr','subject','category',
+      'is_list','direction','unread','starred','important'];
+    for (const [event, row, condition, body] of [
+      ['INSERT','NEW','1',mark('NEW')],
+      ['DELETE','OLD','1',mark('OLD')],
+      ['UPDATE','NEW',fields.map(f => `OLD.${f} IS NOT NEW.${f}`).join(' OR '),mark('NEW')],
+      ['UPDATE','OLD','OLD.thread_id IS NOT NEW.thread_id',mark('OLD')],
+    ] as const) {
+      await db.prepare(`CREATE TRIGGER IF NOT EXISTS derived_${event}_${row} AFTER ${event} ON messages
+        WHEN (${condition}) AND EXISTS(SELECT 1 FROM derived_state WHERE account=${row}.account)
+        BEGIN ${body} END`).run();
+    }
+  },
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   m001_initial,
   m002_thread_summary,
@@ -764,6 +798,7 @@ export const MIGRATIONS: readonly Migration[] = [
   m022_staff_staging,
   m023_staff_link_revocation,
   m024_jmap_accounts,
+  m025_derived_scope,
 ];
 
 /**

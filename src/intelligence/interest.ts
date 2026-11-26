@@ -169,7 +169,7 @@ export function scoreContact(f: ContactFeatures): number {
 }
 
 /** Map a repo scoring row (snake_case) onto the pure {@link ContactFeatures}. */
-function featuresFromRow(row: ContactScoringRow, nowMs: number): ContactFeatures {
+export function featuresFromRow(row: ContactScoringRow, nowMs: number): ContactFeatures {
   const lastSeenMs = row.last_seen ? Date.parse(row.last_seen) : NaN;
   return {
     msgsReceived: row.msgs_received,

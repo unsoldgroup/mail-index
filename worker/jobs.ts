@@ -266,6 +266,7 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       return;
     } else if (job.kind === 'sync' || job.kind === 'backfill') {
       const sync = await syncMetadata({
+        progressive: true,
         account: job.account,
         source,
         repo,
@@ -343,6 +344,7 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       // Pass 1 — everything sent in the slice. Cheap, and it is what discovers
       // (and scores) the Correspondents pass 2 depends on.
       const sent = await syncMetadata({
+        progressive: true,
         account: job.account, source, repo, scope: { since, until, query: 'in:sent' },
         onProgress: async phase => { progress['backfill_sent'] = { ...phase, since, until }; await update('running', progress); },
       });
@@ -356,6 +358,7 @@ export async function runJob(env: Env, message: JobMessage, fetchImpl: typeof fe
       for (let i = 0; i < correspondents.length; i += CORRESPONDENT_CHUNK) {
         const chunk = correspondents.slice(i, i + CORRESPONDENT_CHUNK);
         const received = await syncMetadata({
+          progressive: true,
           account: job.account,
           source,
           repo,

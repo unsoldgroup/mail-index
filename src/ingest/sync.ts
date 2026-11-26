@@ -31,6 +31,7 @@ import { IndexError } from '../index/db.js';
 import { classifyMessage } from './classify.js';
 import { aggregateAccount } from '../intelligence/aggregate.js';
 import { interestPass } from '../intelligence/interest.js';
+import { refreshDerived } from '../intelligence/progressive.js';
 import { compact } from '../writeback/index.js';
 
 /** Error thrown when a sync cannot start or run (lock contention, etc.). */
@@ -40,6 +41,8 @@ export class SyncError extends Error {
 
 /** Options for {@link syncMetadata}. */
 export interface SyncOptions {
+  /** Maintain the cloud working set under the metadata writer's account lock. */
+  progressive?: boolean;
   /** Awaited phase boundary after metadata is durable; optional for local callers. */
   onProgress?: (progress: { phase: 'metadata' | 'aggregate' | 'interest' | 'compact'; fetched: number; indexed: number }) => void | Promise<void>;
   /** The account label this run indexes under (the index partition key). */
@@ -259,6 +262,15 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
     }
     await flush();
 
+    if (options.progressive && options.aggregate !== false) {
+      await repo.driver.prepare('UPDATE sync_runs SET fetched=?,indexed=? WHERE id=?').run(fetched,indexed,runId);
+      await options.onProgress?.({ phase: 'metadata', fetched, indexed });
+      await options.onProgress?.({ phase: 'aggregate', fetched, indexed });
+      const identity = await repo.getAccountIdentity(account);
+      await refreshDerived(repo, account, identity ? [identity.address] : knownAddresses, async () => {
+        await options.onProgress?.({ phase: 'interest', fetched, indexed });
+      });
+    }
     await repo.finishSyncRun(runId, { fetched, indexed });
   } catch (err) {
     // Always close the audit row so the lock is released, then rethrow.
@@ -273,23 +285,16 @@ export async function syncMetadata(options: SyncOptions): Promise<SyncResult> {
     throw new SyncError(`sync failed for account "${account}": ${message}`);
   }
 
-  await options.onProgress?.({ phase: 'metadata', fetched, indexed });
+  if (!options.progressive || options.aggregate === false) await options.onProgress?.({ phase: 'metadata', fetched, indexed });
 
-  // Derived, INDEX-ONLY aggregation (M2.1, PLAN §4): roll the now-current
-  // messages up into contacts/domains/threads. Runs after the audit row is
-  // closed (lock released) since it touches only the derived tables. Idempotent
-  // — safe on every sync. The probed own-address(es) keep the user out of their
-  // own contact list and feed Correspondent detection on Sent mail (D11).
   if (options.aggregate !== false) {
-    await options.onProgress?.({ phase: 'aggregate', fetched, indexed });
-    await aggregateAccount(repo, account, knownAddresses);
-    // Interest engine (M2.2, D12): recompute every contact's engagement_score
-    // from the now-current aggregates and append a per-contact snapshot. Still
-    // INDEX-ONLY and idempotent; the score is a curation SEED, never a fetch
-    // trigger (D13), so this never enriches. Gated on the same `aggregate` flag
-    // since it consumes the aggregates this run just rebuilt.
-    await options.onProgress?.({ phase: 'interest', fetched, indexed });
-    await interestPass(repo, account);
+    // Local callers retain the full rebuild and per-run snapshot history.
+    if (!options.progressive) {
+      await options.onProgress?.({ phase: 'aggregate', fetched, indexed });
+      await aggregateAccount(repo, account, knownAddresses);
+      await options.onProgress?.({ phase: 'interest', fetched, indexed });
+      await interestPass(repo, account);
+    }
 
     // Demotion (ADR-0003): once a bulk body has a summary older than the grace
     // window, drop the distilled body — summary-only is the end state, and the
