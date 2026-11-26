@@ -98,6 +98,15 @@ test('cloud rollups converge to full rebuild after backdated replies, moves, lab
     assert.equal(await repo.countSnapshots(account, 'untouched@other.example'), 2);
     await drain();
     assert.equal(await repo.countSnapshots(account, 'untouched@other.example'), 2);
+    await put('skew', 'skew', 'skew@example.com', { internalDate: Date.parse('2026-11-26T13:00Z') });
+    await compare();
+    now = new Date('2026-11-26T17:00Z');
+    await put('skew', 'skew', 'skew@example.com', { internalDate: Date.parse('2026-11-26T16:00Z') });
+    await drain();
+    await aggregateAccount(full, account, own);
+    await interestPass(full, account, { now });
+    assert.equal(await repo.getEngagementScore(account, 'skew@example.com'),
+      await full.getEngagementScore(account, 'skew@example.com'), 'timestamp correction recomputes decay');
   } finally {
     db.close();
     oracle.close();

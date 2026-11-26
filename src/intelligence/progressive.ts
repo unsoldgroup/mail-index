@@ -173,7 +173,7 @@ async function refreshScores(
   const snapshots = (await repo.driver
     .prepare(
       `SELECT c.address,c.engagement_score AS current_score,s.taken_at,s.engagement_score,
-      s.msgs_received,s.read_count,s.replied_count FROM contacts c LEFT JOIN contact_stats_snapshot s
+      s.msgs_received,s.read_count,s.replied_count,s.msgs_sent,s.last_seen FROM contacts c LEFT JOIN contact_stats_snapshot s
       ON s.rowid=(SELECT rowid FROM contact_stats_snapshot h WHERE h.account=c.account AND h.address=c.address
         ORDER BY h.taken_at DESC LIMIT 1) WHERE c.account=?
       ${scope ? 'AND c.address IN (SELECT value FROM json_each(?))' : ''}`,
@@ -184,6 +184,8 @@ async function refreshScores(
     taken_at: string | null;
     engagement_score: number | null;
     msgs_received: number;
+    msgs_sent: number | null;
+    last_seen: string | null;
     read_count: number;
     replied_count: number;
   }[];
@@ -195,6 +197,8 @@ async function refreshScores(
     if (
       s?.taken_at &&
       s.current_score === s.engagement_score &&
+      s.last_seen === row.last_seen &&
+      s.msgs_sent === row.msgs_sent &&
       s.engagement_score === scoreContact(featuresFromRow(row, time)) &&
       s.msgs_received === row.msgs_received &&
       s.read_count === row.read_count &&

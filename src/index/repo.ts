@@ -2242,14 +2242,16 @@ export class Repo {
       AND engagement_score IS NOT ?`;
     const snapshot = `INSERT INTO contact_stats_snapshot (
          account, address, taken_at,
-         msgs_received, read_count, replied_count, engagement_score
+         msgs_received, read_count, replied_count, engagement_score, msgs_sent, last_seen
        )
-       SELECT account, address, ?, msgs_received, read_count, replied_count, ?
+       SELECT account, address, ?, msgs_received, read_count, replied_count, ?, msgs_sent, last_seen
          FROM contacts WHERE account = ? AND address = ?
        ON CONFLICT(account, address, taken_at) DO UPDATE SET
          msgs_received    = excluded.msgs_received,
          read_count       = excluded.read_count,
          replied_count    = excluded.replied_count,
+         msgs_sent        = excluded.msgs_sent,
+         last_seen        = excluded.last_seen,
          engagement_score = excluded.engagement_score`;
     await this.transaction(async () => {
       function* writes(): Generator<BatchStatement> {

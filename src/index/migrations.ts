@@ -741,6 +741,10 @@ const m024_jmap_accounts: Migration = {
 
 const m025_derived_scope: Migration = {
   version: 25, name: 'cloud derived refresh scope', up: async db => {
+    const columns = new Set((await db.prepare('PRAGMA table_info(contact_stats_snapshot)').all() as
+      { name: string }[]).map(c => c.name));
+    if (!columns.has('msgs_sent')) await db.exec('ALTER TABLE contact_stats_snapshot ADD COLUMN msgs_sent INTEGER');
+    if (!columns.has('last_seen')) await db.exec('ALTER TABLE contact_stats_snapshot ADD COLUMN last_seen TEXT');
     await db.exec(`
       CREATE TABLE IF NOT EXISTS derived_state(account TEXT PRIMARY KEY, own TEXT, score_day TEXT);
       CREATE TABLE IF NOT EXISTS derived_dirty(account TEXT, bucket TEXT, revision TEXT NOT NULL,
