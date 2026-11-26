@@ -59,3 +59,17 @@ for 15 minutes still dies at the wall limit and still leaves its row `running`
 until the next tick's lease reaps it — it just no longer takes the sweeps down
 with it. Slicing the sync itself, the way `backfill_slice` already is, remains the
 real fix and is deliberately not attempted here.
+
+## Amendment for USG-494
+
+Cloud sync, explicit backfill and correspondence slices share a durable derived
+refresh. The first pass indexes thread membership from existing Messages.
+Subsequent passes revisit changed threads and the other threads needed to
+compute their contacts' totals. Message mutations mark affected keys in the
+same SQLite statement, including the old key on a move or deletion. The sync
+lock covers derivation, and progress counts are visible before it finishes.
+
+The first sync of each UTC day refreshes recency decay, even with an empty
+provider result. Within the day a changed contact is rescored when its inputs
+affect the score or its recorded snapshot counters. CRM and trigger consumers
+still receive the provider sweep's message IDs independently of derived writes.

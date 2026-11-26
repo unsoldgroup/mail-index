@@ -92,7 +92,7 @@ for (const phase of ['provider', 'aggregate', 'enrich', 'aggregate-error', 'cont
         if (phase !== 'provider') assert.equal(JSON.parse(job.progress_json).sync.indexed, 1);
         else assert.equal(job.progress_json, '{}');
         assert.equal(indexed.n, phase === 'provider' ? 0 : 1);
-        assert.equal(audit.finished_at !== null, phase !== 'provider');
+        assert.equal(audit.finished_at !== null, phase === 'enrich', 'the metadata writer retains its lock through derivation');
         if (phase === 'aggregate') { assert.equal(audit.indexed, 1); assert.equal(providerMessages, 1); assert.equal(JSON.parse(job.progress_json).sync.phase, 'aggregate'); }
         assert.equal(sent.length, 1, 'follow-ups are not queued while syncMetadata is blocked');
         console.log('[UNS1554-PHASE]', JSON.stringify({ phase, job, audit, indexed: indexed.n, providerMessages, aggregateReads }));

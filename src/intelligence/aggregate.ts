@@ -129,6 +129,7 @@ function toIso(internalDate: number | null): string | null {
 export function computeAggregates(
   rows: readonly AggregationMessageRow[],
   ownAddresses: readonly string[] = [],
+  onContact?: (row: AggregationMessageRow, address: string) => void,
 ): Aggregates {
   const own = new Set(ownAddresses.map((a) => a.toLowerCase()));
   const contacts = new Map<string, ContactAcc>();
@@ -226,6 +227,7 @@ export function computeAggregates(
       for (const raw of recipients) {
         const addr = extractAddress(raw);
         if (!addr || own.has(addr)) continue;
+        onContact?.(row, addr);
         const acc = contactFor(addr, displayNameOf(raw));
         acc.msgsSent += 1;
         touchSeen(acc, iso);
@@ -247,6 +249,7 @@ export function computeAggregates(
       // Received: the sender is the contact.
       const addr = extractAddress(row.from_addr);
       if (addr && !own.has(addr)) {
+        onContact?.(row, addr);
         const acc = contactFor(addr, displayNameOf(row.from_addr));
         acc.msgsReceived += 1;
         if (!row.unread) acc.readCount += 1;

@@ -1594,15 +1594,22 @@ export class Repo {
    * thread "who started it" (initiated) signal fall out of a single forward
    * pass. NULL `internal_date` rows sort first (oldest) deterministically.
    */
-  async messagesForAggregation(account: string): Promise<AggregationMessageRow[]> {
-    return await this.#prepare(
-      `SELECT account, gmail_message_id, thread_id, internal_date, date_header,
+  async messagesForAggregation(account: string, buckets?: readonly string[]): Promise<AggregationMessageRow[]> {
+    // Keep both lookups on their composite indexes even for a single changed
+    // message in a large account. A common account predicate around OR can
+    // make SQLite scan the entire partition.
+    const projection = `SELECT account, gmail_message_id, thread_id, internal_date, date_header,
               from_addr, to_addr, cc_addr, subject, category, is_list, direction,
-              unread, starred, important
-         FROM messages
-        WHERE account = ?
-        ORDER BY internal_date IS NULL DESC, internal_date ASC, gmail_message_id ASC`,
-    ).all(account) as unknown as AggregationMessageRow[];
+              unread, starred, important FROM messages WHERE account=?`;
+    const source = buckets ? `SELECT * FROM (
+      ${projection} AND thread_id IN (SELECT value FROM json_each(?))
+      UNION ALL
+      ${projection} AND gmail_message_id IN (SELECT value FROM json_each(?))
+        AND coalesce(thread_id,'')='')` : projection;
+    const ids = (prefix: string) => JSON.stringify(buckets?.filter(b => b.startsWith(prefix)).map(b => b.slice(1)));
+    return await this.#prepare(
+      `${source} ORDER BY internal_date IS NULL DESC, internal_date ASC, gmail_message_id ASC`,
+    ).all(...(buckets ? [account, ids('t'), account, ids('m')] : [account])) as unknown as AggregationMessageRow[];
   }
 
   /**
@@ -1622,19 +1629,20 @@ export class Repo {
       domains: readonly DomainAggregate[];
       threads: readonly ThreadAggregate[];
     },
+    scope?: { contacts: string[]; domains: string[]; threads: string[] },
   ): Promise<void> {
     await this.transaction(async () => {
-      await this.#replaceContacts(account, aggregates.contacts);
-      await this.#replaceDomains(account, aggregates.domains);
-      await this.#replaceThreads(account, aggregates.threads);
+      await this.#replaceContacts(account, aggregates.contacts, scope?.contacts);
+      await this.#replaceDomains(account, aggregates.domains, scope?.domains);
+      await this.#replaceThreads(account, aggregates.threads, scope?.threads);
     });
   }
 
-  async #replaceContacts(account: string, contacts: readonly ContactAggregate[]): Promise<void> {
+  async #replaceContacts(account: string, contacts: readonly ContactAggregate[], scope?: string[]): Promise<void> {
     // Drop contacts that no longer aggregate (none of their mail remains), but
     // keep curation/identity for any that persist via the UPSERT below.
     const keep = new Set(contacts.map((c) => c.address));
-    const existing = await this.#prepare(
+    const existing = scope?.map(address => ({ address })) ?? await this.#prepare(
       `SELECT address FROM contacts WHERE account = ?`,
     ).all(account) as { address: string }[];
     const del = `DELETE FROM contacts WHERE account = ? AND address = ?`;
@@ -1659,7 +1667,13 @@ export class Repo {
            starred_count   = excluded.starred_count,
            important_count = excluded.important_count,
            first_seen      = excluded.first_seen,
-           last_seen       = excluded.last_seen`;
+           last_seen       = excluded.last_seen
+         WHERE (contacts.display_name,contacts.domain,contacts.msgs_received,contacts.msgs_sent,
+           contacts.read_count,contacts.replied_count,contacts.initiated_count,contacts.starred_count,
+           contacts.important_count,contacts.first_seen,contacts.last_seen) IS NOT
+           (coalesce(excluded.display_name,contacts.display_name),coalesce(excluded.domain,contacts.domain),
+           excluded.msgs_received,excluded.msgs_sent,excluded.read_count,excluded.replied_count,
+           excluded.initiated_count,excluded.starred_count,excluded.important_count,excluded.first_seen,excluded.last_seen)`;
       for (const c of contacts) {
         yield { sql: up, params: [
           account,
@@ -1681,9 +1695,9 @@ export class Repo {
     await this.#writeBatches(writes());
   }
 
-  async #replaceDomains(account: string, domains: readonly DomainAggregate[]): Promise<void> {
+  async #replaceDomains(account: string, domains: readonly DomainAggregate[], scope?: string[]): Promise<void> {
     const keep = new Set(domains.map((d) => d.domain));
-    const existing = await this.#prepare(
+    const existing = scope?.map(domain => ({ domain })) ?? await this.#prepare(
       `SELECT domain FROM domains WHERE account = ?`,
     ).all(account) as { domain: string }[];
     const del = `DELETE FROM domains WHERE account = ? AND domain = ?`;
@@ -1697,7 +1711,9 @@ export class Repo {
          ON CONFLICT(account, domain) DO UPDATE SET
            msgs               = excluded.msgs,
            distinct_contacts  = excluded.distinct_contacts,
-           registrable_domain = excluded.registrable_domain`;
+           registrable_domain = excluded.registrable_domain
+         WHERE (domains.msgs,domains.distinct_contacts,domains.registrable_domain) IS NOT
+           (excluded.msgs,excluded.distinct_contacts,excluded.registrable_domain)`;
       for (const d of domains) {
         yield { sql: up, params: [account, d.domain, d.msgs, d.distinctContacts, d.registrableDomain ?? null] };
       }
@@ -1705,13 +1721,13 @@ export class Repo {
     await this.#writeBatches(writes());
   }
 
-  async #replaceThreads(account: string, threads: readonly ThreadAggregate[]): Promise<void> {
+  async #replaceThreads(account: string, threads: readonly ThreadAggregate[], scope?: string[]): Promise<void> {
     // Threads now carry an agent-written summary (M3.5, ADR-0003) that the
     // aggregation does not own — so a clean wipe would drop it. Drop only
     // threads that no longer aggregate, and UPSERT the rest so the summary
     // columns survive a rebuild (matching contacts/domains).
     const keep = new Set(threads.map((t) => t.threadId));
-    const existing = await this.#prepare(
+    const existing = scope?.map(thread_id => ({ thread_id })) ?? await this.#prepare(
       `SELECT thread_id FROM threads WHERE account = ?`,
     ).all(account) as { thread_id: string }[];
     const del = `DELETE FROM threads WHERE account = ? AND thread_id = ?`;
@@ -1731,7 +1747,11 @@ export class Repo {
            unread_count      = excluded.unread_count,
            user_participated = excluded.user_participated,
            first_at          = excluded.first_at,
-           last_at           = excluded.last_at`;
+           last_at           = excluded.last_at
+         WHERE (threads.subject,threads.participants_json,threads.msg_count,threads.unread_count,
+           threads.user_participated,threads.first_at,threads.last_at) IS NOT
+           (excluded.subject,excluded.participants_json,excluded.msg_count,excluded.unread_count,
+           excluded.user_participated,excluded.first_at,excluded.last_at)`;
       for (const t of threads) {
         yield { sql: up, params: [
           account,
@@ -2164,15 +2184,16 @@ export class Repo {
    * contacts over ~17k messages blew D1's per-query CPU limit and reset the
    * database every hourly sync (USG-341).
    */
-  async contactScoringRows(account: string): Promise<ContactScoringRow[]> {
+  async contactScoringRows(account: string, addresses?: readonly string[], scopedMessages?: readonly AggregationMessageRow[]): Promise<ContactScoringRow[]> {
     const contacts = await this.#prepare(
       `SELECT address, msgs_received, msgs_sent, read_count,
               replied_count, initiated_count, starred_count,
               important_count, last_seen
          FROM contacts
-        WHERE account = ?`,
-    ).all(account) as unknown as Omit<ContactScoringRow, 'bulk_count'>[];
-    const senders = await this.#prepare(
+        WHERE account = ?${addresses ? ' AND address IN (SELECT value FROM json_each(?))' : ''}`,
+    ).all(account, ...(addresses ? [JSON.stringify(addresses)] : [])) as unknown as Omit<ContactScoringRow, 'bulk_count'>[];
+    const senders = scopedMessages ? scopedMessages.filter(m => m.from_addr && m.direction === 'received' &&
+      (m.is_list || m.category === 'promotions' || m.category === 'social')).map(m => ({ from_addr: m.from_addr!, n: 1 })) : await this.#prepare(
       `SELECT from_addr, count(*) AS n
          FROM messages
         WHERE account = ?
@@ -2217,7 +2238,8 @@ export class Repo {
     scored: readonly ScoredContactInput[],
     takenAt: string,
   ): Promise<void> {
-    const setScore = `UPDATE contacts SET engagement_score = ? WHERE account = ? AND address = ?`;
+    const setScore = `UPDATE contacts SET engagement_score = ? WHERE account = ? AND address = ?
+      AND engagement_score IS NOT ?`;
     const snapshot = `INSERT INTO contact_stats_snapshot (
          account, address, taken_at,
          msgs_received, read_count, replied_count, engagement_score
@@ -2232,7 +2254,7 @@ export class Repo {
     await this.transaction(async () => {
       function* writes(): Generator<BatchStatement> {
         for (const s of scored) {
-          yield { sql: setScore, params: [s.engagementScore, account, s.address] };
+          yield { sql: setScore, params: [s.engagementScore, account, s.address, s.engagementScore] };
           yield { sql: snapshot, params: [takenAt, s.engagementScore, account, s.address] };
         }
       }
