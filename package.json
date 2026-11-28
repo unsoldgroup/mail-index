@@ -58,7 +58,8 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260719.1",
     "@eslint/js": "^9.0.0",
-    "@posthog/mcp": "^0.23.0",
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@posthog/mcp": "^1.8.2",
     "@types/node": "^24.0.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
@@ -74,7 +75,8 @@
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^0.8.2",
-    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@modelcontextprotocol/node": "^2.1.2",
+    "@modelcontextprotocol/server": "^2.4.0",
     "graphology": "^0.26.0",
     "graphology-communities-louvain": "^2.0.2",
     "graphology-metrics": "^2.4.0",

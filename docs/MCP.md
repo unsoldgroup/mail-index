@@ -1,7 +1,10 @@
 # mail-index MCP tool reference
 
 The agent surface. `mail-index-mcp` is a **stdio** MCP server
-(`@modelcontextprotocol/sdk`) over the local index. This document is the
+(`@modelcontextprotocol/server` v2) over the local index. The stdio, local HTTP,
+and Cloudflare Worker entry points support MCP `2026-07-28` and existing
+2025 clients. Local HTTP retains sessions for 2025 clients. Cloudflare serves
+both protocol generations per request. This document is the
 reference for agent integrators: every tool, its arguments, its compact result
 shape, and the two contracts that hold across the whole surface — **freshness**
 (`index_as_of`) and **command handbacks**.

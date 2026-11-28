@@ -92,5 +92,24 @@ test('a /mcp tool call emits tier, surface and no arguments when a token is set'
     const listed = await list.text();
     assert.match(listed, /"search"/);
     assert.doesNotMatch(listed, /get_more_tools/);
+
+    bodies.length = 0;
+    const modern = await handleAuthorizedRequest(new Request('https://w.example/mcp?surface=chatgpt', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json', accept: 'application/json, text/event-stream',
+        'mcp-protocol-version': '2026-07-28', 'mcp-method': 'tools/call', 'mcp-name': 'search',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: {
+        name: 'search', arguments: { query: 'modern-secret-needle' },
+        _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' },
+      } }),
+    }), env, {}, { waitUntil: (p: Promise<unknown>) => { pending.push(p); }, passThroughOnException() {} });
+    assert.equal(modern.status, 200);
+    await Promise.all(pending);
+    const modernEvents = bodies.join('\n');
+    assert.match(modernEvents, /"\$mcp_tool_name":"search"/);
+    assert.match(modernEvents, /"mcp_surface":"chatgpt"/);
+    assert.doesNotMatch(modernEvents, /modern-secret-needle/);
   } finally { globalThis.fetch = realFetch; await mf.dispose(); }
 });

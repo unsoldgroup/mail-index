@@ -24,6 +24,7 @@
 
 import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
+import type { Tool } from '@modelcontextprotocol/server';
 
 import { defaultConfigPath } from '../config/index.js';
 
@@ -155,12 +156,7 @@ export function setupInstructions(
 export interface SetupToolDef {
   name: string;
   description: string;
-  inputSchema: {
-    type: 'object';
-    properties: Record<string, unknown>;
-    required?: string[];
-    additionalProperties?: boolean;
-  };
+  inputSchema: Tool['inputSchema'];
   run: (args: Record<string, unknown>) => unknown;
 }
 
@@ -187,7 +183,7 @@ export const SETUP_TOOLS: SetupToolDef[] = [
 ];
 
 /** `tools/list` payload for setup mode (name + description + schema). */
-export function setupToolList(): { name: string; description: string; inputSchema: unknown }[] {
+export function setupToolList(): Tool[] {
   return SETUP_TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
 }
 

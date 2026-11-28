@@ -198,7 +198,7 @@ and how to reproduce it all → **[docs/COMPARISON.md](docs/COMPARISON.md)**.
 ## Stack
 
 TypeScript · `node:sqlite` (no native deps) · SQLite FTS5 · Graphology ·
-`@modelcontextprotocol/sdk`. Node 24+. Pluggable `MailSource` adapters; ships two
+`@modelcontextprotocol/server` v2. Node 24+. Pluggable `MailSource` adapters; ships two
 Gmail transports — [`gog`](https://github.com/openclaw/gogcli) (recommended) and
 Google's [`gws`](https://github.com/googleworkspace/cli).
 

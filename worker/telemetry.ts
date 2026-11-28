@@ -1,5 +1,4 @@
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { Server } from '@modelcontextprotocol/server';
 import { instrumentMcpAnalytics, parseSurface, type ToolTiers } from './mcp-telemetry.js';
 
 /**
@@ -38,8 +37,7 @@ export interface TelemetryEnv { POSTHOG_PROJECT_TOKEN?: string; POSTHOG_HOST?: s
  */
 export function instrumentWorkerMcp(server: Server, request: Request, env: TelemetryEnv, lifetime?: { waitUntil(promise: Promise<unknown>): void }): boolean {
   if (!env.POSTHOG_PROJECT_TOKEN || !lifetime) return false;
-  // @posthog/mcp instruments the low-level Server too; the package types only McpServer.
-  instrumentMcpAnalytics(server as unknown as McpServer, {
+  instrumentMcpAnalytics(server, {
     token: env.POSTHOG_PROJECT_TOKEN,
     host: env.POSTHOG_HOST,
     lifetime,
