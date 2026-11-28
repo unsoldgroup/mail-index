@@ -51,7 +51,7 @@ test('Worker health reports package and migrated schema versions', async () => {
     const response = await handlePublicRequest(new Request('https://worker.example/healthz'), env, ctx);
     assert.equal(response.status, 200);
     const body = (await response.json()) as Record<string, unknown>;
-    assert.equal(body['version'], '1.4.0');
+    assert.equal(body['version'], '1.6.0');
     assert.equal(body['schema_version'], SCHEMA_VERSION);
     assert.equal(body['migration_state'], 'current');
     assert.equal(body['ok'], true);
