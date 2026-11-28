@@ -36,6 +36,17 @@ jobs:
       - run: pnpm run build
       - run: pnpm test
 
+      - name: Build the production Worker without deploying
+        run: pnpm exec wrangler deploy --dry-run --config worker/wrangler.production.jsonc --outdir dist-worker-release
+
+      - name: Save the verified Worker bundle
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: mail-index-worker-${{ github.ref_name }}
+          path: dist-worker-release/
+          if-no-files-found: error
+          retention-days: 7
+
       # Pack the MCP bundle (mcpb pack → mail-index.mcpb). `pnpm bundle` runs the
       # build again + the mcpb packer; the artifact lands at repo root.
       - name: Pack the MCP bundle

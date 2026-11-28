@@ -17,7 +17,7 @@ import { handleCrmRequest } from './crm-api.js';
 import type { AttachmentBucket } from './attachments.js';
 import { instrumentWorkerMcp, type TelemetryEnv } from './telemetry.js';
 
-const VERSION = '1.4.0';
+const VERSION = '1.6.0';
 const SESSION_COOKIE = 'mail_index_operator';
 
 interface QueueBinding { send(message: unknown): Promise<void> }

@@ -13,6 +13,8 @@ and the MCP Registry metadata entry. See [docs/PUBLISHING.md](docs/PUBLISHING.md
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-11-28
+
 ### Added
 - `jmap` MailSource adapter: read-only JMAP (RFC 8621) over `fetch`, for
   Stalwart-hosted mailboxes. Mailbox roles map to `INBOX`/`SENT`/`SPAM`/
@@ -22,6 +24,14 @@ and the MCP Registry metadata entry. See [docs/PUBLISHING.md](docs/PUBLISHING.md
   encrypted with `TOKEN_ENC_KEY` in the new `jmap_accounts` table (schema 24).
   Scheduled syncs and MCP tools use the JMAP adapter for these Accounts;
   archive, label and draft tools refuse them.
+- `create_draft` prepares a Gmail draft for review with the opt-in compose grant.
+- MCP clients can list and download message attachments.
+
+### Changed
+- Local stdio, local HTTP, and the Cloudflare Worker support MCP
+  `2026-07-28` through the TypeScript SDK v2 and continue serving 2025 clients.
+- Cloud sync refreshes contact and thread aggregates from durable Message
+  changes. CRM publication runs in bounded Queue jobs.
 
 ## [1.5.1] — 2026-08-05
 
@@ -251,6 +261,7 @@ interest engine, curation, the full MCP tool surface, and the write-back loops �
 on [npm](https://www.npmjs.com/package/mail-index), as a `.mcpb` bundle, and in
 the [MCP Registry](https://registry.modelcontextprotocol.io).
 
+[1.6.0]: https://github.com/unsoldgroup/mail-index/releases/tag/v1.6.0
 [1.5.1]: https://github.com/unsoldgroup/mail-index/releases/tag/v1.5.1
 [1.5.0]: https://github.com/unsoldgroup/mail-index/releases/tag/v1.5.0
 [1.4.0]: https://github.com/unsoldgroup/mail-index/releases/tag/v1.4.0
