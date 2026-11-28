@@ -45,7 +45,7 @@ jobs:
       - name: Save the verified Worker bundle
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: mail-index-worker-${{ github.ref_name }}-${{ github.run_attempt }}
+          name: mail-index-worker-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist-worker-bundle/index.js
           if-no-files-found: error
           retention-days: 7
