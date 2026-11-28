@@ -23,7 +23,7 @@ test('setup stdio negotiates MCP 2026-07-28 and calls the advisory tools', async
     assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name), ['setup_status', 'setup_instructions']);
     const result = await client.callTool({ name: 'setup_status' });
     assert.equal(result.isError, undefined);
-    assert.equal(JSON.parse(result.content[0].text).config_present, false);
+    assert.equal(JSON.parse(result.content[0].text).state.config_present, false);
   } finally {
     await client.close();
   }

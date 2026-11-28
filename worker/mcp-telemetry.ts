@@ -2,6 +2,7 @@
 // The package repo is private and ships no dist/, so CI cannot install it.
 // Re-vendor here when the shared copy changes.
 // Local extension [USG-469]: classify failures into static codes before redaction.
+// @posthog/mcp 1.7+ uses a computed import that Workerd cannot bundle.
 import { PostHog, instrument, type BeforeSendFn, type MCPAnalyticsOptions } from "@posthog/mcp";
 import type { Server } from "@modelcontextprotocol/server";
 

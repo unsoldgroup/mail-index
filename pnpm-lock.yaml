@@ -46,8 +46,8 @@ importers:
         specifier: ^2.4.0
         version: 2.4.0
       '@posthog/mcp':
-        specifier: ^1.8.2
-        version: 1.8.2(@modelcontextprotocol/sdk@1.32.2(zod@4.6.7))(@modelcontextprotocol/server@2.4.0)(posthog-node@5.57.2)
+        specifier: 1.6.1
+        version: 1.6.1(@modelcontextprotocol/sdk@1.32.2(zod@4.6.7))(@modelcontextprotocol/server@2.4.0)(posthog-node@5.57.2)
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.2
@@ -569,8 +569,8 @@ packages:
   '@posthog/core@1.69.2':
     resolution: {integrity: sha512-toMfPKklwLW+a4ZY3/EzM3GNMVXmk2ylGb8NPJXRH4igXMoI8wgNL2jqXOiglWAXqFBLZGYFN1oQx6LVmUTxTg==}
 
-  '@posthog/mcp@1.8.2':
-    resolution: {integrity: sha512-b54s8FR4dFzATgZU6B+19uMmVX5hO4yuc7DaeDJn+iFwm/3KpXbeG6yT4rIRdJPBopxI6XZO6p+ZmuNCepV+EA==}
+  '@posthog/mcp@1.6.1':
+    resolution: {integrity: sha512-p+sQva+OMSilzJ68/QRZRGj5pMn3BFG+iZKzFF2mvtKnHfI3RuqUAH/B5d7t+DVyOt64aR4CdSVHMikhp6lRBg==}
     engines: {node: ^20.20.0 || >=22.22.0}
     peerDependencies:
       '@modelcontextprotocol/sdk': '>=1.26.0'
@@ -1825,7 +1825,7 @@ snapshots:
     dependencies:
       '@posthog/types': 1.427.2
 
-  '@posthog/mcp@1.8.2(@modelcontextprotocol/sdk@1.32.2(zod@4.6.7))(@modelcontextprotocol/server@2.4.0)(posthog-node@5.57.2)':
+  '@posthog/mcp@1.6.1(@modelcontextprotocol/sdk@1.32.2(zod@4.6.7))(@modelcontextprotocol/server@2.4.0)(posthog-node@5.57.2)':
     dependencies:
       '@posthog/core': 1.69.2
       posthog-node: 5.57.2

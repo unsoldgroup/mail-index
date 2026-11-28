@@ -102,10 +102,13 @@ test('a /mcp tool call emits tier, surface and no arguments when a token is set'
       },
       body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: {
         name: 'search', arguments: { query: 'modern-secret-needle' },
-        _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' },
+        _meta: {
+          'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+          'io.modelcontextprotocol/clientCapabilities': {},
+        },
       } }),
     }), env, {}, { waitUntil: (p: Promise<unknown>) => { pending.push(p); }, passThroughOnException() {} });
-    assert.equal(modern.status, 200);
+    assert.equal(modern.status, 200, await modern.text());
     await Promise.all(pending);
     const modernEvents = bodies.join('\n');
     assert.match(modernEvents, /"\$mcp_tool_name":"search"/);
