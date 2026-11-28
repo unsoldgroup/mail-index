@@ -13,6 +13,8 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # Validate and save the Worker bundle on demand.
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -36,30 +38,34 @@ jobs:
       - run: pnpm run build
       - run: pnpm test
 
-      - name: Build the production Worker without deploying
-        run: pnpm exec wrangler deploy --dry-run --config worker/wrangler.production.jsonc --outdir dist-worker-release
+      - name: Validate the production Worker configuration
+        run: pnpm exec wrangler deploy --dry-run --config worker/wrangler.production.jsonc
 
+      # pnpm test builds this bundle and exercises it in Miniflare.
       - name: Save the verified Worker bundle
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: mail-index-worker-${{ github.ref_name }}
-          path: dist-worker-release/
+          name: mail-index-worker-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist-worker-bundle/index.js
           if-no-files-found: error
           retention-days: 7
 
       # Pack the MCP bundle (mcpb pack → mail-index.mcpb). `pnpm bundle` runs the
       # build again + the mcpb packer; the artifact lands at repo root.
       - name: Pack the MCP bundle
+        if: github.event_name == 'push'
         run: pnpm run bundle
 
       # Use npm (not pnpm) to publish so --provenance is honored.
       - run: npm publish --provenance --access public
+        if: github.event_name == 'push'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # Attach the unsigned .mcpb to the tag's GitHub Release (created if absent).
       # Signing/notarization is deliberately out of scope here (docs/PUBLISHING.md).
       - name: Upload the .mcpb to the GitHub Release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: mail-index.mcpb
