@@ -2,8 +2,9 @@
 // The package repo is private and ships no dist/, so CI cannot install it.
 // Re-vendor here when the shared copy changes.
 // Local extension [USG-469]: classify failures into static codes before redaction.
+// @posthog/mcp 1.7+ uses a computed import that Workerd cannot bundle.
 import { PostHog, instrument, type BeforeSendFn, type MCPAnalyticsOptions } from "@posthog/mcp";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Server } from "@modelcontextprotocol/server";
 
 export type ToolTier = "read" | "write" | "send" | "money" | "destructive" | "exec";
 export type ToolTiers = Readonly<Record<string, ToolTier>>;
@@ -152,7 +153,7 @@ export class WorkerPostHog extends PostHog {
   }
 }
 
-export function instrumentMcpAnalytics(server: McpServer, opts: McpTelemetryOptions): void {
+export function instrumentMcpAnalytics(server: Server, opts: McpTelemetryOptions): void {
   if (!opts.token) return;
   try {
     const posthog = new WorkerPostHog(opts.token, opts.host || "https://us.i.posthog.com", opts.lifetime);

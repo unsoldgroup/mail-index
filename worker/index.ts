@@ -1,5 +1,5 @@
 import type { AuthRequest, OAuthHelpers } from '@cloudflare/workers-oauth-provider';
-import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
+import { WebStandardStreamableHTTPServerTransport, createMcpHandler, isJsonContentType, isLegacyRequest } from '@modelcontextprotocol/server';
 import { D1Driver, type D1DatabaseBinding } from '../src/index/drivers/d1.js';
 import { workerRepository } from './repository.js';
 import { getUserVersion, runMigrations } from '../src/index/migrations.js';
@@ -60,25 +60,20 @@ function assertBindings(env: Partial<Env>): asserts env is Env {
 
 async function storage(env: Env) { const driver = new D1Driver(env.DB); await runMigrations(driver); return { driver, repo: workerRepository(driver) }; }
 
-/**
- * Serve one MCP request STATELESSLY (SDK "stateless mode", the documented
- * Cloudflare Workers pattern).
- *
- * A session map keyed by `mcp-session-id` cannot work here: Workers give no
- * cross-request isolate affinity, so the POST that follows `initialize`
- * routinely lands in an isolate whose map is empty. The old code then built a
- * fresh transport carrying a NEW session id while the client was still sending
- * the old one, and the SDK rejected the mismatch — every connection went 200 on
- * initialize then 400 on `tools/list`, surfacing in claude.ai as "couldn't
- * reload tools from the server".
- *
- * Each request therefore gets its own server + transport. The tool surface is
- * rebuilt from D1 per request, so nothing of value lived in that map anyway.
- */
+/** Serve both protocol versions per request because Workers have no isolate affinity. */
 async function handleMcp(request: Request, env: Env, fetchImpl: typeof fetch = fetch, ctx?: WorkerContext): Promise<Response> {
   const telemetry = Boolean(env.POSTHOG_PROJECT_TOKEN && ctx);
-  const server = buildServer(await buildWorkerToolContext(env, fetchImpl, new URL(request.url).origin), { telemetry });
-  if (telemetry) instrumentWorkerMcp(server, request, env, ctx);
+  const build = async () => {
+    const server = buildServer(await buildWorkerToolContext(env, fetchImpl, new URL(request.url).origin), { telemetry });
+    if (telemetry) instrumentWorkerMcp(server, request, env, ctx);
+    return server;
+  };
+  // Keep JSON responses for existing stateless clients. The SDK's built-in
+  // legacy fallback can stream responses and does not expose this option.
+  if (request.method !== 'POST' || !isJsonContentType(request.headers.get('content-type')) || !await isLegacyRequest(request)) {
+    return createMcpHandler(build, { legacy: 'reject' }).fetch(request);
+  }
+  const server = await build();
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   await server.connect(transport);
   return transport.handleRequest(request);

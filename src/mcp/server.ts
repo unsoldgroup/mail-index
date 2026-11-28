@@ -1,8 +1,8 @@
 /**
  * MCP server wiring (SCOPE 3.4, PLAN §12, ADR-0001/0005).
  *
- * Turns the pure tool engine (`tools.ts`) into a stdio
- * `@modelcontextprotocol/sdk` Server. One {@link TOOLS} registry drives BOTH the
+ * Turns the pure tool engine (`tools.ts`) into an MCP server.
+ * One {@link TOOLS} registry drives BOTH the
  * `tools/list` response (name + description + input JSON Schema) and the
  * `tools/call` dispatch (each entry's `run`), so the advertised schema and the
  * executed handler can never drift. The registry + {@link dispatch} are exported
@@ -18,12 +18,11 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { toNodeHandler } from '@modelcontextprotocol/node';
+import { Server, WebStandardStreamableHTTPServerTransport, createMcpHandler, isInitializeRequest, isJsonContentType, isLegacyRequest, type Tool } from '@modelcontextprotocol/server';
+import { serveStdio } from '@modelcontextprotocol/server/stdio';
 
 import {
   search,
@@ -63,19 +62,14 @@ import {
 import { dispatchSetup, setupToolList } from './setup-tools.js';
 
 /** A JSON Schema object (the subset the SDK advertises for `inputSchema`). */
-type JsonSchema = {
-  type: 'object';
-  properties: Record<string, unknown>;
-  required?: string[];
-  additionalProperties?: boolean;
-};
+type JsonSchema = Tool['inputSchema'];
 
 /** One registered tool: its advertised contract + its handler. */
 interface ToolDef {
   name: string;
   description: string;
   inputSchema: JsonSchema;
-  annotations?: Record<string, unknown>;
+  annotations?: Tool['annotations'];
   /** Run the tool over the context with the (validated-by-schema) args. */
   run: (ctx: ToolContext, args: Record<string, unknown>) => unknown | Promise<unknown>;
 }
@@ -86,10 +80,10 @@ const bool = { type: 'boolean' as const };
 const strArr = { type: 'array' as const, items: { type: 'string' as const } };
 
 function obj(
-  properties: Record<string, unknown>,
+  properties: NonNullable<JsonSchema['properties']>,
   required: string[] = [],
-): JsonSchema {
-  return { type: 'object', properties, required, additionalProperties: false };
+) {
+  return { type: 'object' as const, properties, required, additionalProperties: false };
 }
 
 /**
@@ -581,12 +575,7 @@ async function remoteizeHandbacks(ctx: ToolContext, value: unknown, fallbackAcco
 }
 
 /** The `tools/list` payload (exported for tests): name + description + schema. */
-export function toolList(): {
-  name: string;
-  description: string;
-  inputSchema: JsonSchema;
-  annotations?: Record<string, unknown>;
-}[] {
+export function toolList(): Tool[] {
   return TOOLS.map((t) => ({
     name: t.name,
     description: t.description,
@@ -642,9 +631,9 @@ export function buildServer(ctx: ToolContext, opts: { telemetry?: boolean } = {}
     },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: toolList() }));
+  server.setRequestHandler('tools/list', () => ({ tools: toolList() }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler('tools/call', async (request) => {
     const { name, arguments: args } = request.params;
     try {
       const callArgs = (args ?? {}) as Record<string, unknown>;
@@ -659,11 +648,9 @@ export function buildServer(ctx: ToolContext, opts: { telemetry?: boolean } = {}
   return server;
 }
 
-/** Connect the server to a fresh stdio transport (the production wiring). */
-export async function serve(ctx: ToolContext): Promise<Server> {
-  const server = buildServer(ctx);
-  await server.connect(new StdioServerTransport());
-  return server;
+/** Serve both MCP protocol versions over stdio. */
+export function serve(ctx: ToolContext) {
+  return serveStdio(() => buildServer(ctx));
 }
 
 export interface HttpServeOptions {
@@ -678,50 +665,39 @@ export interface HttpServeOptions {
 /** Serve one long-lived Streamable HTTP MCP endpoint for many agent sessions. */
 export async function serveHttp(opts: HttpServeOptions): Promise<void> {
   const startedAt = Date.now();
-  const transports = new Map<string, StreamableHTTPServerTransport>();
-  const servers = new Map<string, Server>();
+  const sessions = new Map<string, WebStandardStreamableHTTPServerTransport>();
+  const modern = createMcpHandler(opts.build, { legacy: 'reject' });
+  const handleMcp = toNodeHandler({
+    async fetch(request) {
+      if (request.method === 'POST' && !isJsonContentType(request.headers.get('content-type'))) {
+        return Response.json({
+          jsonrpc: '2.0', error: { code: -32000, message: 'Content-Type must be application/json' }, id: null,
+        }, { status: 415 });
+      }
+      if (!await isLegacyRequest(request)) return modern.fetch(request);
 
-  const closeSession = async (transport: StreamableHTTPServerTransport) => {
-    const sid = transport.sessionId;
-    if (!sid) return;
-    transports.delete(sid);
-    const server = servers.get(sid);
-    servers.delete(sid);
-    await server?.close();
-  };
+      const sid = request.headers.get('mcp-session-id');
+      const existing = sid ? sessions.get(sid) : undefined;
+      if (existing) return existing.handleRequest(request);
 
-  const handleMcp = async (req: IncomingMessage, res: ServerResponse, body: unknown) => {
-    const sessionId = req.headers['mcp-session-id'];
-    const sid = Array.isArray(sessionId) ? sessionId[0] : sessionId;
-    let transport = sid ? transports.get(sid) : undefined;
-
-    if (!transport) {
+      const body: unknown = request.method === 'POST' ? await request.json() : undefined;
       if (!isInitializeRequest(body)) {
-        res.writeHead(400, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({
-          jsonrpc: '2.0',
-          error: { code: -32000, message: 'Bad Request: initialize required' },
-          id: null,
-        }));
-        return;
+        const message = request.method === 'POST' ? 'Bad Request: initialize required' : 'Bad Request: unknown session';
+        return Response.json({ jsonrpc: '2.0', error: { code: -32000, message }, id: null }, { status: 400 });
       }
 
       const server = opts.build();
-      transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (newSessionId) => {
-          transports.set(newSessionId, transport as StreamableHTTPServerTransport);
-          servers.set(newSessionId, server);
-        },
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        sessionIdGenerator: randomUUID,
+        onsessioninitialized: (id) => { sessions.set(id, transport); },
+        onsessionclosed: (id) => { sessions.delete(id); },
       });
-      transport.onclose = () => {
-        void closeSession(transport as StreamableHTTPServerTransport);
-      };
       await server.connect(transport);
-    }
-
-    await transport.handleRequest(req, res, body);
-  };
+      const response = await transport.handleRequest(request, { parsedBody: body });
+      if (!transport.sessionId) await server.close();
+      return response;
+    },
+  });
 
   const httpServer = createServer((req, res) => {
     void (async () => {
@@ -734,7 +710,7 @@ export async function serveHttp(opts: HttpServeOptions): Promise<void> {
           name: 'mail-index',
           mode: opts.mode,
           uptime_ms: Date.now() - startedAt,
-          sessions: transports.size,
+          sessions: sessions.size,
         }));
         return;
       }
@@ -745,34 +721,13 @@ export async function serveHttp(opts: HttpServeOptions): Promise<void> {
         return;
       }
 
-      if (req.method === 'GET' || req.method === 'DELETE') {
-        const sessionId = req.headers['mcp-session-id'];
-        const sid = Array.isArray(sessionId) ? sessionId[0] : sessionId;
-        const transport = sid ? transports.get(sid) : undefined;
-        if (!transport) {
-          res.writeHead(400, { 'content-type': 'application/json' });
-          res.end(JSON.stringify({
-            jsonrpc: '2.0',
-            error: { code: -32000, message: 'Bad Request: unknown session' },
-            id: null,
-          }));
-          return;
-        }
-        await transport.handleRequest(req, res);
-        return;
-      }
-
-      if (req.method !== 'POST') {
+      if (req.method !== 'POST' && req.method !== 'GET' && req.method !== 'DELETE') {
         res.writeHead(405, { allow: 'GET, POST, DELETE' });
         res.end();
         return;
       }
 
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      const raw = Buffer.concat(chunks).toString('utf8');
-      const body = raw.length > 0 ? JSON.parse(raw) : undefined;
-      await handleMcp(req, res, body);
+      await handleMcp(req, res);
     })().catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       if (!res.headersSent) {
@@ -788,10 +743,9 @@ export async function serveHttp(opts: HttpServeOptions): Promise<void> {
 
   const shutdown = async () => {
     opts.onShutdown?.();
-    for (const transport of transports.values()) await transport.close();
-    transports.clear();
-    for (const server of servers.values()) await server.close();
-    servers.clear();
+    await modern.close();
+    for (const transport of sessions.values()) await transport.close();
+    sessions.clear();
     httpServer.close(() => process.exit(0));
   };
   process.on('SIGINT', () => { void shutdown(); });
@@ -800,7 +754,9 @@ export async function serveHttp(opts: HttpServeOptions): Promise<void> {
   await new Promise<void>((resolve) => {
     httpServer.listen(opts.port, opts.host, resolve);
   });
-  process.stderr.write(`mail-index-mcp: Streamable HTTP listening on http://${opts.host}:${opts.port}${opts.path}\n`);
+  const address = httpServer.address();
+  const port = typeof address === 'object' && address ? address.port : opts.port;
+  process.stderr.write(`mail-index-mcp: Streamable HTTP listening on http://${opts.host}:${port}${opts.path}\n`);
 }
 
 /**
@@ -828,9 +784,9 @@ export function buildSetupServer(): Server {
     },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: setupToolList() }));
+  server.setRequestHandler('tools/list', () => ({ tools: setupToolList() }));
 
-  server.setRequestHandler(CallToolRequestSchema, (request) => {
+  server.setRequestHandler('tools/call', (request) => {
     const { name, arguments: args } = request.params;
     try {
       const result = dispatchSetup(name, (args ?? {}) as Record<string, unknown>);
@@ -844,11 +800,9 @@ export function buildSetupServer(): Server {
   return server;
 }
 
-/** Connect a setup-mode server to a fresh stdio transport. */
-export async function serveSetup(): Promise<Server> {
-  const server = buildSetupServer();
-  await server.connect(new StdioServerTransport());
-  return server;
+/** Serve setup mode over stdio. */
+export function serveSetup() {
+  return serveStdio(buildSetupServer);
 }
 
 /**

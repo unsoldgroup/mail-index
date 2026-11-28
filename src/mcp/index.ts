@@ -98,7 +98,7 @@ async function main(): Promise<void> {
       });
       return;
     }
-    await serveSetup();
+    serveSetup();
     return;
   }
 
@@ -124,8 +124,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  await serve(ctx);
-  // serve() resolves once connected; the transport keeps the event loop alive
+  serve(ctx);
+  // The transport keeps the event loop alive
   // until stdin closes. Close the DB on shutdown so WAL is checkpointed.
   process.on('SIGINT', () => {
     db.close();

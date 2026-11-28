@@ -4,7 +4,7 @@
  *
  * The pure, transport-free half of the MCP server: every PLAN §12 tool is a
  * function over a {@link ToolContext} that returns a plain, JSON-serialisable
- * result object. `server.ts` wires these to the stdio `@modelcontextprotocol/sdk`
+ * result object. `server.ts` wires these to the `@modelcontextprotocol/server`
  * Server; the golden-response tests call them directly against a seeded fixture
  * DB. Splitting the logic out (mirroring the CLI's `run*` seam) keeps the tools
  * testable without a live transport and keeps the entry point thin.

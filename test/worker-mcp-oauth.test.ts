@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Miniflare } from 'miniflare';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { handleAuthorizedRequest, handlePublicRequest } from '../dist-worker/worker/index.js';
 import { D1Driver } from '../dist/index/drivers/d1.js';
 import { Repo } from '../dist/index/repo.js';
@@ -25,6 +26,17 @@ test('OAuth provider challenges MCP, exposes health, protects setup, and support
     assert.equal(setup.status, 401);
     const denied = await mf.dispatchFetch('https://worker.example/mcp', { method: 'POST' });
     assert.equal(denied.status, 401); assert.ok(denied.headers.get('www-authenticate'));
+    const deniedV2 = await mf.dispatchFetch('https://worker.example/mcp', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'server/discover' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'server/discover', params: {
+        _meta: {
+          'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+          'io.modelcontextprotocol/clientCapabilities': {},
+        },
+      } }),
+    });
+    assert.equal(deniedV2.status, 401);
     const a2aCard = await mf.dispatchFetch('https://worker.example/.well-known/agent-card.json');
     assert.equal(a2aCard.status, 200);
     const deniedA2a = await mf.dispatchFetch('https://worker.example/a2a', { method: 'POST' });
@@ -116,5 +128,21 @@ test('Worker HTTP MCP advertises and returns attachment bytes as an embedded res
     const resource = body.result.content.find((item) => item.type === 'resource')?.resource;
     assert.equal(resource?.mimeType, 'application/pdf');
     assert.equal(Buffer.from(resource?.blob ?? '', 'base64').toString(), '%PDFtest');
+
+    const client = new Client({ name: 'worker-test', version: '1' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
+    const transport = new StreamableHTTPClientTransport(new URL('https://worker.example/mcp'), {
+      fetch: (url, init) => handleAuthorizedRequest(new Request(url, init), env, { fetchImpl: fakeFetch }),
+    });
+    try {
+      await client.connect(transport);
+      assert.equal(client.getProtocolEra(), 'modern');
+      assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name), listed.result.tools.map((tool) => tool.name));
+      const modern = await client.callTool({
+        name: 'get_message_attachment', arguments: { ref: 'personal:m1', attachment: 'scope.pdf' },
+      });
+      assert.deepEqual(modern.content, body.result.content);
+    } finally {
+      await client.close();
+    }
   } finally { await mf.dispose(); }
 });
